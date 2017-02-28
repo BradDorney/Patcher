@@ -282,8 +282,8 @@ std::shared_ptr<patch> Patch(void *address, size_t patchSize, const void *newByt
 
 std::shared_ptr<patch> Patch(void *address, const std::vector<BYTE> &newBytes,
                              const std::vector<BYTE> &expectedBytes, bool enable) {
-  return Patch(address, newBytes.size(), newBytes.data(), expectedBytes.empty() ?
-               nullptr : expectedBytes.data(), enable);
+  return Patch(address, newBytes.size(), newBytes.data(), expectedBytes.size() >=
+               newBytes.size() ? expectedBytes.data() : nullptr, enable);
 }
 
 

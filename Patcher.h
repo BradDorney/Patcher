@@ -269,6 +269,7 @@ inline T* _MakeDummy() { return _MakeDummy_impl<T>(); }
 
 // Helper macro to get void* pointer to a class member function
 // Used like PatchFunction(_GetPtr(Class::MemberFunction), &newFunction)
+// Must use _GetPtrOL if function is overloaded
 #if defined(__clang__) || (defined(PATCHER_MSVC) && defined(_M_X64))
 // MSVC/C1 (x64), Clang: See comments of PMFCast about restrictions
 #define _GetPtr(function) Patcher::PMFCast(&function)
@@ -288,6 +289,25 @@ inline T* _MakeDummy() { return _MakeDummy_impl<T>(); }
 // Unsupported compiler
 #define _GetPtr(function) []() ->void* { static_assert(false,                  \
   "_GetPtr is only supported in MSVC, GCC, or Clang"); return nullptr; }()
+#endif
+
+// Helper macro to get void* pointer to an overloaded class member function
+// More restrictive than _GetPtr in MSVC when targeting x86
+// "function" must be provided as a PMF variable because of overload resolution
+#if defined(__clang__) || defined(PATCHER_MSVC)
+// MSVC/C1, Clang: See comments of PMFCast about restrictions
+#define _GetPtrOL(function) Patcher::PMFCast(function)
+#elif defined(__GNUC__)
+// GCC, ICC, etc.
+#define _GetPtrOL(function) ({                                                 \
+  _Pragma("GCC diagnostic push")                                               \
+  _Pragma("GCC diagnostic ignored \"-Wpmf-conversions\"")                      \
+  void *_f_p_ = reinterpret_cast<void*>(function);                             \
+  _Pragma("GCC diagnostic pop")                                                \
+  _f_p_; })
+// Unsupported compiler
+#define _GetPtrOL(function) []() ->void* { static_assert(false,                \
+  "_GetPtrOL is only supported in MSVC, GCC, or Clang"); return nullptr; }()
 #endif
 
 

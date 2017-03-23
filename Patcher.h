@@ -147,6 +147,7 @@ public:
 
 private:
   std::unique_ptr<BYTE[]> newBytesBuffer;
+  std::unique_ptr<BYTE[]> oldBytesBuffer;
   size_t size;
 };
 
@@ -293,7 +294,7 @@ inline T* _MakeDummy() { return _MakeDummy_impl<T>(); }
 
 // Helper macro to get void* pointer to an overloaded class member function
 // More restrictive than _GetPtr in MSVC when targeting x86
-// "function" must be provided as a PMF variable because of overload resolution
+// "function" must be provided as a PMF variable for overload resolution
 #if defined(__clang__) || defined(PATCHER_MSVC)
 // MSVC/C1, Clang: See comments of PMFCast about restrictions
 #define _GetPtrOL(function) Patcher::PMFCast(function)

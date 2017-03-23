@@ -35,8 +35,10 @@ MemPatch::MemPatch(void *_address, size_t patchSize, const void *newBytes,
   }
 
   newBytesBuffer.reset(new BYTE[size]);
-  if ((invalid = !newBytesBuffer || memcpy(newBytesBuffer.get(), newBytes, size) !=
-       newBytesBuffer.get())) {
+  oldBytesBuffer.reset(new BYTE[size]);
+  if ((invalid = (!newBytesBuffer || !oldBytesBuffer ||
+                  memcpy(newBytesBuffer.get(), newBytes, size) !=
+                  newBytesBuffer.get()))) {
     return;
   }
 
@@ -48,12 +50,14 @@ MemPatch::MemPatch(void *_address, size_t patchSize, const void *newBytes,
   }
 
   if (!(invalid = expectedBytes && memcmp(expectedBytes, address, size) != 0)) {
-    // Store old bytes in map if they weren't already
+    // Copy old bytes
     for (size_t i = 0; i < size; ++i) {
       auto *p = reinterpret_cast<BYTE*>(address) + i;
       if (originalBytes.count(p) == 0) {
         originalBytes[p] = *p;
       }
+
+      oldBytesBuffer[i] = originalBytes[p];
     }
   }
 
@@ -113,10 +117,7 @@ bool MemPatch::Disable(bool force) {
   if (!VirtualProtect(address, size, PAGE_EXECUTE_READWRITE, &oldAttr)) {
     return false;
   }
-  for (size_t i = 0; i < size; ++i) {
-    auto *p = reinterpret_cast<BYTE*>(address) + i;
-    *p = originalBytes[p];
-  }
+  memcpy(address, oldBytesBuffer.get(), size);
   VirtualProtect(address, size, oldAttr, &oldAttr);
 
   return !(enabled = false);

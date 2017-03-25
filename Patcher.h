@@ -162,7 +162,7 @@ public:
   virtual bool Disable(bool unused = false);
 
   // Returns a pointer to a MinHook function trampoline
-  const void* GetTrapoline();
+  const void* GetTrampoline();
 
 private:
   const void *newFunction,

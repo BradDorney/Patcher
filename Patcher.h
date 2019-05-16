@@ -1,315 +1,315 @@
+/*
+ ***********************************************************************************************************************
+ * Copyright (c) 2019, Brad Dorney
+ * All rights reserved.
+ *
+ * Redistribution and use in source and binary forms, with or without modification, are permitted provided that the
+ * following conditions are met:
+ *
+ * - Redistributions of source code must retain the above copyright notice, this list of conditions and the following
+ *   disclaimer.
+ *
+ * - Redistributions in binary form must reproduce the above copyright notice, this list of conditions and the following
+ *   disclaimer in the documentation and/or other materials provided with the distribution.
+ *
+ * - Neither the name of the copyright holder nor the names of its contributors may be used to endorse or promote
+ *   products derived from this software without specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES,
+ * INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+ * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+ * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+ * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
+ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+ * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ ***********************************************************************************************************************
+ */
 
+#pragma once
 
-#ifndef PATCHER_H
-#define PATCHER_H
-
-// Uncomment this line if using MinHook; comment otherwise:
-//#define PATCHER_MINHOOK
-
-#if defined(_MSC_VER) && !defined(__clang__) && !defined(__GNUC__)
-#define PATCHER_MSVC
-#endif
-
-#include <windows.h>
-#include <memory>
+#include <utility>
+#include <tuple>
+#include <list>
 #include <vector>
-#include <type_traits>
+#include <unordered_map>
+#include <initializer_list>
+
+#include "PatcherUtil.h"
 
 namespace Patcher {
 
-// Forward declarations
-class patch;
-namespace Util { template <class T> inline T* _MakeDummy(); }
-
-// Recommended to use one of the Patch factory functions to instantiate
-// Use Unpatch to handle deletion of patches created by Patch functions
-
-// General arbitrary memory patch
-std::shared_ptr<patch> Patch(void *address, size_t patchSize, const void *newBytes,
-                             const void *expectedBytes = nullptr,
-                             bool enable = true);
-std::shared_ptr<patch> Patch(void *address, const std::vector<BYTE> &newBytes,
-                             const std::vector<BYTE> &expectedBytes = {},
-                             bool enable = true);
-template <class T>
-std::shared_ptr<patch> Patch(void *address, T newValue, T expectedValue,
-                             bool enable = true) {
-  return Patch(address, sizeof(T), &newValue, &expectedValue, enable);
-}
-template <class T>
-std::shared_ptr<patch> Patch(void *address, T newValue, bool enable = true) {
-  return Patch(address, sizeof(T), &newValue, nullptr, enable);
-}
-
-// Inserts a jump instruction. Can use MinHook.
-std::shared_ptr<patch> PatchFunction(void *address, const void *newFunction,
-                                     bool enable = true);
-// Inserts/rewrites a call instruction
-std::shared_ptr<patch> PatchFunctionCall(void *address, const void *newFunction,
-                                         bool enable = true);
-
-// Replaces virtual function table entry by function address
-std::shared_ptr<patch> PatchFunctionVirtual(void *vftableAddress,
-                                            const void *oldFunction,
-                                            const void *newFunction,
-                                            bool enable = true);
-template <class T>
-std::shared_ptr<patch> PatchFunctionVirtual(T &obj, const void *oldFunction,
-                                            const void *newFunction,
-                                            bool enable = true) {
-  return PatchFunctionVirtual(*reinterpret_cast<void**>(&obj), oldFunction,
-                              newFunction, enable);
-}
-template <class T>
-std::shared_ptr<patch> PatchFunctionVirtual(const void *oldFunction,
-                                            const void *newFunction,
-                                            bool enable = true) {
-  std::unique_ptr<T> obj(Util::_MakeDummy<T>()); // Dummy for getting vftable
-  return obj ?
-    PatchFunctionVirtual(*reinterpret_cast<void**>(obj.get()), oldFunction,
-                         newFunction, enable) : nullptr;
-}
-
-// Replaces virtual function table entry by index
-std::shared_ptr<patch> PatchFunctionVirtual(void *vftableAddress,
-                                            int vftableEntryIndex,
-                                            const void *newFunction,
-                                            bool enable = true);
-template <class T>
-std::shared_ptr<patch> PatchFunctionVirtual(T &obj, int vftableEntryIndex,
-                                            const void *newFunction,
-                                            bool enable = true) {
-  return PatchFunctionVirtual(*reinterpret_cast<void**>(&obj),
-                              vftableEntryIndex, newFunction, enable);
-}
-template <class T>
-std::shared_ptr<patch> PatchFunctionVirtual(int vftableEntryIndex,
-                                            const void *newFunction,
-                                            bool enable = true) {
-  std::unique_ptr<T> obj(Util::_MakeDummy<T>()); // Dummy for getting vftable
-  return obj ?
-    PatchFunctionVirtual(*reinterpret_cast<void**>(obj.get()), vftableEntryIndex,
-                         newFunction, enable) : nullptr;
-}
-
-// Patches all references to a global variable/object in base relocation table
-bool PatchGlobalReferences(const void *oldGlobalAddress,
-                           const void *newGlobalAddress,
-                           std::vector<std::shared_ptr<patch>> *out = nullptr,
-                           bool enable = true,
-                           HMODULE module =
-                             reinterpret_cast<HMODULE>(-1));
-
-// Helper function to delete patches created by factory functions
-bool Unpatch(std::shared_ptr<patch> &which, bool doDelete = true,
-             bool force = false);
-
-// Enables all unapplied patches and optionally reapplies enabled patches
-bool PatchAll(bool force = false);
-// Disables and optionally deletes all patches
-bool UnpatchAll(bool doDelete = true, bool force = false);
-
-
-// Patch abstract class
-class patch {
+/// @brief  RAII memory patch context class.  Allows for safe writes into process memory.
+///
+/// The first time some memory is modified, the original data is tracked, and is automatically restored when the context
+/// object instance is destroyed.
+///
+/// Methods that return a Status also update an internally-tracked status.  If the internal status is an error, all
+/// subsequent calls to those methods become a no-op and return the last error until it is reset by RevertAll().
+///
+/// @note  Calling methods with address provided as uintptr_t will cause address to be relocated.
+///        Calling methods with address provided as a pointer type will not relocate.
+class PatchContext {
 public:
-  virtual ~patch() {}
+  /// Default constructor creates a patcher context for the process's base module.
+  PatchContext() : PatchContext(static_cast<const char*>(nullptr), false) { }
 
-  virtual bool Enable(bool force = false) = 0;
-  virtual bool Disable(bool force = false) = 0;
+  /// Constructor to create a patcher context for the given process module name, and (optionally) loads the module.
+  explicit PatchContext(const char* pModuleName, bool loadModule = false);
 
-  bool GetEnabled() { return enabled; }
-  bool GetValid() { return !invalid; }
+  /// Constructor to create a patcher context for the given HMODULE.
+  explicit PatchContext(void* hModule);
 
-protected:
-  patch() { enabled = false; module = reinterpret_cast<HMODULE>(-1); }
+  PatchContext(const PatchContext&)            = delete;
+  PatchContext& operator=(const PatchContext&) = delete;
 
-  bool VerifyModule();
-  void GetModuleInfo(HMODULE &moduleOut, size_t &hashOut);
+  /// Destructor.  Reverts all patches owned by this context, and if it had opened a module, releases it as well.
+  ~PatchContext();
 
-  bool enabled,
-       invalid;
+  /// Gets the status of the patcher. This can be called once after multiple Write/Memcpy/Hook/etc. calls, rather than
+  /// checking the returned status of each call individually.
+  Status GetStatus() const { return status_; }
 
-  void *address;
-  HMODULE module;
-  size_t moduleHash;
-};
+  ///@{
+  /// Fixes up a raw address, adjusting it for module base relocation.
+  template <typename T = void>
+  T* FixPtr(uintptr_t address) const { return FixPtr(reinterpret_cast<T*>(address)); }
+  template <typename T>
+  T* FixPtr(T* pAddress) const {
+    assert(pAddress != nullptr);
+    return static_cast<T*>(PtrInc(static_cast<void*>(pAddress), moduleRelocDelta_));
+  }
+  ///@}
 
-// Memory patch class
-class MemPatch : public patch {
-public:
-  MemPatch(void *_address, size_t patchSize, const void *newBytes,
-           const void *expectedBytes, bool enable = true);
-  virtual ~MemPatch();
+  /// Writes the given value to process memory.
+  template <typename T>
+  Status Write(TargetPtr pAddress, const T& newValue) { return Memcpy<sizeof(T)>(pAddress, &newValue); }
 
-  virtual bool Enable(bool force = false);
-  virtual bool Disable(bool force = false);
+  /// Writes the given bytes to process memory.
+  Status WriteBytes(TargetPtr pAddress, std::initializer_list<uint8> bytes)
+    { return Memcpy(pAddress, bytes.begin(), bytes.size()); }
+
+  ///@{
+  /// Adds the specified process memory to the history tracker so it can be restored via Revert().
+  Status Touch(TargetPtr pAddress, size_t size);
+  template <typename T>
+  Status Touch(T*        pAddress) { return Touch(pAddress, sizeof(T)); };
+  ///@}
+
+  ///@{
+  /// Hooks the beginning of a function in process memory, and optionally returns a pointer to a trampoline function
+  /// that can be used to call the original function.  New function's signature must match the original's.
+  ///
+  /// @param [in]  pAddress        Address of where to insert the hook.
+  /// @param [in]  pfnNewFunction  Pointer to the hook function to call instead.
+  /// @param [out] pPfnTrampoline  (Optional) Pointer to where to store a callback pointer to the original function.
+  ///
+  /// @note  32-bit x86 only.
+  Status Hook(TargetPtr pAddress, FunctionPtr pfnNewFunction, void* pPfnTrampoline = nullptr);
+  template <typename T>
+  Status Hook(TargetPtr pAddress, FunctionPtr pfnNewFunction, T**   pPfnTrampoline = nullptr)
+    { return Hook(pAddress, pfnNewFunction, static_cast<void*>(pPfnTrampoline)); }
+  ///@}
+
+  /// Hooks a function call instruction in process memory, replacing its original target address.
+  /// New function's signature must match the original's.
+  ///
+  /// @param [in] pAddress        Address of the call instruction to fix up.
+  /// @param [in] pfnNewFunction  Pointer to the new function to call instead.
+  ///
+  /// @note  32-bit x86 only.
+  Status HookCall(TargetPtr pAddress, FunctionPtr pfnNewFunction);
+
+  ///@{
+  /// @brief  Hooks an instruction (almost) anywhere in process memory.  Read and write access to the state of standard
+  ///         registers is provided via function args, and control flow can be manipulated via the returned value.
+  ///
+  /// Example usage: LowLevelHook(0x402044, [](Eax<int>& a1, Esi<bool> a2) { ++a1;  return a2 ? 0 : 0x402107; })
+  ///                LowLevelHook(0x5200AF, { Register::Eax, Register::Edx }, [](int64& val) { val = -val; })
+  ///
+  /// Available registers: [Eax, Ecx, Edx, Ebx, Esi, Edi, Ebp, Esp, Eflags].  Arg types must fit within register size.
+  /// To write to registers, declare args with >& or >*, e.g. Eax<int>&, Ecx<int>*, Ebp<char*>&, Edx<int&>&, Edi<int*>*
+  /// Hook must use cdecl, and return either void (with @ref LowLevelHookOpt::NoCustomReturnAddr or template deduction);
+  /// or an address to jump to, where nullptr = original address (addresses within the overwritten area are allowed).
+  ///
+  /// @warning  This requires 5-19 bytes at pAddress; if the last N-1 bytes overlap any jump targets, this could crash.
+  /// @note     32-bit x86 only.
+  Status LowLevelHook(TargetPtr                     pAddress,         ///< [in] Address of where to insert the hook.
+                      const std::vector<Register>&  registers,        ///< [in] Registers to pass to the hook function.
+                      uint32                        byRefMask,        ///< [in] Bitmask of args to pass by reference.
+                      FunctionPtr                   pfnHookCb,        ///< [in] User hook callback (function or lambda).
+                      uint32                        options    = 0);  ///< [in] Options.  See @ref LowLevelHookOpt.
+  ///< Insert a low-level hook with a callback function that takes RegisterArgs or no args.
+  template <typename P, typename R, typename... Args>
+  Status LowLevelHook(P pAddress, R (PATCHER_CDECL* pfnHookCb)(Args...), uint32 options = 0) {
+    const auto address = static_cast<Conditional<std::is_pointer<P>::value, void*, uintptr_t>>(pAddress);
+    options |= LowLevelHookOpt::GetDefaults<R>();
+    return LowLevelHook(address, { GetRegisterArgId<Args>()... }, MakeByRefMask<Args...>(), pfnHookCb, options);
+  }
+  ///< Insert a low-level hook with a callback function that takes a struct pointer or reference.
+  template <typename P, typename R, typename A>
+  Status LowLevelHook(
+    P pAddress, const std::vector<Register>& registers, R (PATCHER_CDECL* pfnHookCb)(A), uint32 options = 0)
+  {
+    const auto address = static_cast<Conditional<std::is_pointer<P>::value, void*, uintptr_t>>(pAddress);
+    options |= (LowLevelHookOpt::ArgsAsStructPtr | LowLevelHookOpt::GetDefaults<R>());
+    return LowLevelHook(address, registers, 0, pfnHookCb, options);
+  }
+  ///< Insert a low-level hook with a non-capturing lambda that takes RegisterArgs or no args.
+  template <typename P, typename Lambda, typename IsNonCapturingLambda = decltype(LambdaPtr(std::declval<Lambda>()))>
+  Status LowLevelHook(P pAddress, const Lambda& pfnHookCb, uint32 options = 0)
+    { return LowLevelHook(pAddress, CdeclLambdaPtr(pfnHookCb), options); }
+  ///< Insert a low-level hook with a non-capturing lambda that takes a struct pointer or reference.
+  template <typename P, typename Lambda, typename IsNonCapturingLambda = decltype(LambdaPtr(std::declval<Lambda>()))>
+  Status LowLevelHook(P pAddress, const std::vector<Register>& registers, const Lambda& pfnHookCb, uint32 options = 0)
+    { return LowLevelHook(pAddress, registers, CdeclLambdaPtr(pfnHookCb), options); }
+  ///@}
+
+  ///@{
+  /// Replaces all static, direct pointer references to a global by scanning the module's .reloc section for any
+  /// references to it.
+  ///
+  /// @param [in]  pOldGlobal  Pointer to the old global we want to replace.
+  /// @param [in]  size        Size in bytes of the global.
+  /// @param [in]  pNewGlobal  Pointer to the new global we want to replace all references to pOldGlobal with.
+  /// @param [out] pRefsOut    (Optional) Pointer to a vector to contain all locations that have been patched up.
+  Status ReplaceReferencesToGlobal(
+    TargetPtr pOldGlobal, size_t size, const void* pNewGlobal, std::vector<void*>* pRefsOut = nullptr);
+  template <typename T>
+  Status ReplaceReferencesToGlobal(TargetPtr pOldGlobal, const T* pNewGlobal, std::vector<void*>* pRefsOut = nullptr)
+    { return ReplaceReferencesToGlobal(pOldGlobal, sizeof(T), pNewGlobal, pRefsOut); }
+  ///@}
+
+  /// Adds or modifies export table entries in the module.
+  ///
+  /// There are 3 modes of exporting:
+  ///  - Export by name:     Exports by decorated symbol name.
+  ///  - Export by ordinal:  Exports by ordinal (index); used by older exes or for anonymizing exports.
+  ///  - Forwarded export:   Forwards an import (by name) from another module.  Often used by OS and shim libraries.
+  ///                        Injecting new (rather than modifying existing) forwarded exports is currently unsupported.
+  ///
+  /// Injecting exports with the same name or ordinal as existing exports overrides them.  Otherwise, they are added as
+  /// new export entries.  If the export address is nullptr, the entry will be deleted instead.
+  ///
+  /// @note  32-bit x86 only.
+  Status EditExports(const std::vector<ExportInfo>& exportInfos);
+
+  /// Safe memcpy into process memory.
+  Status Memcpy(TargetPtr pAddress, const void* pSrc, size_t size);
+  /// Optimized safe memcpy that allows the compiler to inline the instructions when the size is known at compile time.
+  template <size_t Size>
+  Status Memcpy(TargetPtr pAddress, const void* pSrc);
+
+  /// Safe memset of process memory.
+  Status Memset(TargetPtr pAddress, uint8 value, size_t count);
+  /// Optimized safe memset that allows the compiler to inline the instructions when the size is known at compile time.
+  template <size_t Count>
+  Status Memset(TargetPtr pAddress, uint8 value);
+
+  ///@{
+  /// In-place constructs an object within the module's memory.
+  template <typename T, typename... Args>
+  Status Construct(T*        pAddress, Args&&... args);
+  template <typename T, typename... Args>
+  Status Construct(uintptr_t address,  Args&&... args)
+    { return Construct<T>(FixPtr<T*>(address), std::forward(args)...); }
+  ///@}
+
+  /// Freezes all other process threads, preventing potential race conditions between patching code and executing it.
+  /// @note  32-bit x86 only.
+  Status LockThreads();
+  /// Unfreezes all other process threads after having used LockThreads().
+  Status UnlockThreads();
+
+  /// Reverts a patch that was previously written beginning at the given address.
+  Status Revert(TargetPtr pAddress);
+  /// Reverts exports that had been injected by EditExports().
+  Status RevertExports();
+  /// Reverts all patches this context had applied, and resets the context status to a clean state.
+  Status RevertAll();
+
+  /// If this PatchContext has loaded a module, releases its active handle to it.
+  Status ReleaseModule();
+
+  /// Returns the number of active patches.
+  uint32 NumPatches() const { return history_.size(); }
 
 private:
-  std::unique_ptr<BYTE[]> newBytesBuffer;
-  std::unique_ptr<BYTE[]> oldBytesBuffer;
-  size_t size;
+  void Init();
+
+  // Helper functions for barriering around memory writes.
+  uint32 BeginDeProtect(void* pAddress, size_t size);
+  void   EndDeProtect(void* pAddress, size_t size, uint32 oldAttr);
+  Status AdvanceThreads(void* pAddress, size_t size);
+
+  bool      hasModuleRef_;
+  void*     hModule_;
+  intptr_t  moduleRelocDelta_;
+  uint32    moduleHash_;
+  Status    status_;
+
+  static constexpr size_t StorageSize = 8;
+
+  // Mappings of addresses to (old memory copy, trampoline function allocation (optional), trampoline size (optional)).
+  std::list<std::tuple<void*, ByteArray<StorageSize>, void*, size_t>>  history_;
+  std::unordered_map<void*, decltype(history_)::iterator>              historyAt_;
+
+  // Threads locked by LockThreads() (pair of handle, program counter).  AdvanceThreads() may temporarily resume these.
+  std::vector<std::pair<uint32, uintptr_t>>  frozenThreads_;
 };
 
-#ifdef PATCHER_MINHOOK
-// MinHook function hook patch class
-class MHPatch : public patch {
-public:
-  MHPatch(void *function, const void *_newFunction, bool enable = true);
-  virtual ~MHPatch();
+// =====================================================================================================================
+template <size_t Size>
+Status PatchContext::Memcpy(
+  TargetPtr    pAddress,
+  const void*  pSrc)
+{
+  assert((pAddress != nullptr) && (pSrc != nullptr));
+  void*const pDst = pAddress.ShouldRelocate() ? FixPtr(pAddress) : static_cast<void*>(pAddress);
 
-  virtual bool Enable(bool force = false);
-  virtual bool Disable(bool unused = false);
+  const uint32 oldAttr = BeginDeProtect(pDst, Size);
 
-  // Returns a pointer to a MinHook function trampoline
-  const void* GetTrampoline();
-
-private:
-  const void *newFunction,
-             *trampoline;
-};
-#endif
-
-
-// Helper functions
-
-// Fixes up a pointer to correct for module relocation
-void* FixPtr(const void *pointer, HMODULE module = reinterpret_cast<HMODULE>(-1));
-inline void* FixPtr(uintptr_t address,
-                    HMODULE module = reinterpret_cast<HMODULE>(-1)) {
-  return FixPtr(reinterpret_cast<const void*>(address), module);
-}
-
-// Cast pointer to member function to void*. May be used by _GetPtr() macro.
-// NOTE: For virtual PMFs, an object instance must be passed or class is default,
-// copy, or move constructible. Class cannot multiply inherit.
-template <class T, class U>
-typename std::enable_if<std::is_member_function_pointer<U T::*>::value>::type*
-  PMFCast(U T::*pmf, const T *self = nullptr) {
-  union {
-    U T::*in;
-    void *out;
-    uintptr_t vftOffset;
-  } u;
-
-  u.in = pmf;
-
-  #ifdef PATCHER_MSVC
-  static BYTE vcall[] =
-    #ifdef _M_X64
-    { 0x48, 0x8B, 0x01, 0xFF }; // mov rax, [rcx]; jmp qword ptr [rax+?]
-    #else
-    { 0x8B, 0x01, 0xFF };       // mov eax, [ecx]; jmp dword ptr [eax+?]
-    #endif
-  auto *operand = reinterpret_cast<BYTE*>(u.out) + _countof(vcall);
-
-  if (memcmp(u.out, vcall, _countof(vcall)) == 0 && *operand & 0x20) {
-  #else
-  if (u.vftOffset & 1) {
-  #endif
-    // Virtual; requires an object instance to get the vftable pointer
-    std::unique_ptr<T> dummy;
-    if (!self) {
-      dummy.reset(Util::_MakeDummy<T>());
-      if (!(self = dummy.get())) {
-        return nullptr;
-      }
-    }
-
-    uintptr_t offset =
-      #ifdef PATCHER_MSVC
-      *operand == 0x60 ? *(operand + 1) :
-      *operand == 0xA0 ? *reinterpret_cast<DWORD*>(operand + 1) : 0;
-      #else
-      u.vftOffset - 1;
-      #endif
-
-    return *reinterpret_cast<void**>(*reinterpret_cast<const uintptr_t*>(self) +
-                                     offset);
+  if (status_ == Status::Ok) {
+    memcpy(pDst, pSrc, Size);
+    EndDeProtect(pDst, Size, oldAttr);
   }
-  else {
-    return u.out;
+
+  return status_;
+}
+
+// =====================================================================================================================
+template <size_t Count>
+Status PatchContext::Memset(
+  TargetPtr  pAddress,
+  uint8      value)
+{
+  assert(pAddress != nullptr);
+  void*const pDst = pAddress.ShouldRelocate() ? FixPtr(pAddress) : static_cast<void*>(pAddress);
+
+  const uint32 oldAttr = BeginDeProtect(pDst, Count);
+
+  if (status_ == Status::Ok) {
+    memset(pDst, value, Count);
+    EndDeProtect(pDst, Count, oldAttr);
   }
+
+  return status_;
 }
 
-namespace Util {
+// =====================================================================================================================
+template <typename T, typename... Args>
+Status PatchContext::Construct(
+  T*         pAddress,
+  Args&&...  args)
+{
+  assert(pAddress != nullptr);
+  const uint32 oldAttr = BeginDeProtect(pAddress, sizeof(T));
 
-#if !defined(_MSC_VER) || _MSC_VER >= 1900
-template <class T>
-typename std::enable_if<std::is_default_constructible<T>::value, T*>::type
-  _MakeDummy_impl() { return new T(); }
-template <class T>
-typename std::enable_if<!std::is_default_constructible<T>::value &&
-                        (std::is_move_constructible<T>::value ||
-                         std::is_copy_constructible<T>::value), T*>::type
-  _MakeDummy_impl() {
-  // Warning: may be unsafe depending on constructor or destructor implementation
-  char blank[sizeof(T)] = {};
-  T *result = nullptr;
-  try { result = new T(std::move(*reinterpret_cast<T*>(blank))); } catch (...) {}
-  return result;
+  if (status_ == Status::Ok) {
+    new(pAddress) T(std::forward(args)...);
+    EndDeProtect(pAddress, sizeof(T), oldAttr);
+  }
+
+  return status_;
 }
-template <class T>
-typename std::enable_if<!std::is_default_constructible<T>::value &&
-                        !std::is_move_constructible<T>::value &&
-                        !std::is_copy_constructible<T>::value, T*>::type
-  _MakeDummy_impl() { return nullptr; }
-#else
-// MSVC versions prior to 2015 use a primitive version of type_traits
-template <class T>
-T* _MakeDummy_impl() { return new T(); }
-#endif
 
-// Ancillary function for PatchFunctionVirtual and PMFCast. Creates dummy object
-// from which vftable can be obtained using default, move, or copy constructor.
-template <class T>
-inline T* _MakeDummy() { return _MakeDummy_impl<T>(); }
-
-} // namespace Util
-} // namespace Patcher
-
-// Helper macro to get void* pointer to a class member function
-// Used like PatchFunction(_GetPtr(Class::MemberFunction), &newFunction)
-// Must use _GetPtrOL if function is overloaded
-#if defined(__clang__) || (defined(PATCHER_MSVC) && defined(_M_X64))
-// MSVC/C1 (x64), Clang: See comments of PMFCast about restrictions
-#define _GetPtr(function) Patcher::PMFCast(&function)
-#elif defined(__GNUC__)
-// GCC, ICC, etc.
-#define _GetPtr(function) ({                                                   \
-  _Pragma("GCC diagnostic push")                                               \
-  _Pragma("GCC diagnostic ignored \"-Wpmf-conversions\"")                      \
-  void *_f_p_ = reinterpret_cast<void*>(&function);                            \
-  _Pragma("GCC diagnostic pop")                                                \
-  _f_p_; })
-#elif defined(PATCHER_MSVC)
-// MSVC/C1 (x86): Requires incremental linking to be disabled to work correctly
-#define _GetPtr(function) []() ->void* {                                       \
-  void *p; { __asm mov eax, function __asm mov p, eax } return p; }()
-#else
-// Unsupported compiler
-#define _GetPtr(function) []() ->void* { static_assert(false,                  \
-  "_GetPtr is only supported in MSVC, GCC, or Clang"); return nullptr; }()
-#endif
-
-// Helper macro to get void* pointer to an overloaded class member function
-// More restrictive than _GetPtr in MSVC when targeting x86
-// "function" must be provided as a PMF variable for overload resolution
-#if defined(__clang__) || defined(PATCHER_MSVC)
-// MSVC/C1, Clang: See comments of PMFCast about restrictions
-#define _GetPtrOL(function) Patcher::PMFCast(function)
-#elif defined(__GNUC__)
-// GCC, ICC, etc.
-#define _GetPtrOL(function) ({                                                 \
-  _Pragma("GCC diagnostic push")                                               \
-  _Pragma("GCC diagnostic ignored \"-Wpmf-conversions\"")                      \
-  void *_f_p_ = reinterpret_cast<void*>(function);                             \
-  _Pragma("GCC diagnostic pop")                                                \
-  _f_p_; })
-// Unsupported compiler
-#define _GetPtrOL(function) []() ->void* { static_assert(false,                \
-  "_GetPtrOL is only supported in MSVC, GCC, or Clang"); return nullptr; }()
-#endif
-
-
-#endif // PATCHER_H
+} // Patcher

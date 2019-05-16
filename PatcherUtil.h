@@ -364,7 +364,7 @@ template <typename T>  using R12    = RegisterArg<Register::R12,    T>;
 template <typename T>  using R13    = RegisterArg<Register::R13,    T>;
 template <typename T>  using R14    = RegisterArg<Register::R14,    T>;
 template <typename T>  using R15    = RegisterArg<Register::R15,    T>;
-template <typename T>  using Eflags = RegisterArg<Register::Eflags, T>;
+template <typename T>  using Rflags = RegisterArg<Register::Rflags, T>;
 ///@}
 #endif
 

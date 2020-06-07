@@ -533,25 +533,26 @@ void* PmfCast(
 #if PATCHER_MSVC && PATCHER_X86_32
 // MSVC (x86_32):  Inline __asm can reference C++ symbols, including virtual methods, by address.
 # if (defined(_DEBUG) == false)
-#  define MFN_PTR(memberFunction) []() { void* pfn; { __asm mov eax, memberFunction __asm mov pfn, eax } return pfn; }()
+#  define MFN_PTR(method) []() { struct { static void* Get() { __asm mov eax, method } } p;  return p.Get(); }()
 # else
 // Incremental linking (debug) conflicts with this method somewhat and gives you a pointer to a jump thunk instead.
-#  define MFN_PTR(memberFunction) []() {                                                                               \
-     auto*const pfn = []() { unsigned char* pfn; { __asm mov eax, memberFunction __asm mov pfn, eax } return pfn; }(); \
-     return (pfn[0] != 0xE9) ? pfn : (pfn + 5 + *reinterpret_cast<uint32*>(&pfn[1]));                                  \
+#  define MFN_PTR(method) []() -> void* {                                             \
+     struct { static unsigned char* Get() { __asm mov eax, method } } p;              \
+     auto*const pfn = p.Get();                                                        \
+     return (pfn[0] != 0xE9) ? pfn : (pfn + 5 + *reinterpret_cast<uint32*>(&pfn[1])); \
    }()
 # endif
 #elif PATCHER_GCC || PATCHER_ICC
 // GCC-compliant, ICC:  GCC supports an extension to cast PMFs to void* to get the raw address, which is ideal.
-# define MFN_PTR(memberFunction) []() {                  \
+# define MFN_PTR(method) []() {                          \
 _Pragma("GCC diagnostic push")                           \
 _Pragma("GCC diagnostic ignored \"-Wpmf-conversions\"")  \
-    return reinterpret_cast<void*>(&memberFunction);     \
+    return reinterpret_cast<void*>(&method);             \
 _Pragma("GCC diagnostic pop")                            \
   }()
 #else
 // MSVC (non-x86_32), Clang, other:  See comments of PmfCast about restrictions.
-# define MFN_PTR(memberFunction) Patcher::PmfCast(&memberFunction)
+# define MFN_PTR(method) Patcher::PmfCast(&method)
 #endif
 
 

@@ -536,10 +536,10 @@ void* PmfCast(
 #  define MFN_PTR(method) []() { struct { static void* Get() { __asm mov eax, method } } p;  return p.Get(); }()
 # else
 // Incremental linking (debug) conflicts with this method somewhat and gives you a pointer to a jump thunk instead.
-#  define MFN_PTR(method) []() -> void* {                                             \
-     struct { static unsigned char* Get() { __asm mov eax, method } } p;              \
-     auto*const pfn = p.Get();                                                        \
-     return (pfn[0] != 0xE9) ? pfn : (pfn + 5 + *reinterpret_cast<uint32*>(&pfn[1])); \
+#  define MFN_PTR(method) []() -> void* {                                          \
+     struct { static unsigned char* Get() { __asm mov eax, method } } p;           \
+     auto*const pfn = p.Get();                                                     \
+     return (pfn[0] != 0xE9) ? pfn : (pfn + 5 + *reinterpret_cast<int*>(&pfn[1])); \
    }()
 # endif
 #elif PATCHER_GCC || PATCHER_ICC
@@ -688,6 +688,7 @@ bool ByteArray<InitialSize>::Append(
   }
   if (result == true) {
     memcpy(PtrInc(pData_, size_), pSrc, size);
+    size_ += size;
   }
 
   return result;

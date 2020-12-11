@@ -2,22 +2,20 @@
 #define CAPSTONE_X86_H
 
 /* Capstone Disassembly Engine */
-/* By Nguyen Anh Quynh <aquynh@gmail.com>, 2013-2014 */
+/* By Nguyen Anh Quynh <aquynh@gmail.com>, 2013-2015 */
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-#if !defined(_MSC_VER) || !defined(_KERNEL_MODE)
-#include <stdint.h>
-#endif
+#include "platform.h"
 
-// Calculate relative address for X86-64, given cs_insn structure
+/// Calculate relative address for X86-64, given cs_insn structure
 #define X86_REL_ADDR(insn) (((insn).detail->x86.operands[0].type == X86_OP_IMM) \
 	? (uint64_t)((insn).detail->x86.operands[0].imm) \
 	: (((insn).address + (insn).size) + (uint64_t)(insn).detail->x86.disp))
 
-//> X86 registers
+/// X86 registers
 typedef enum x86_reg {
 	X86_REG_INVALID = 0,
 	X86_REG_AH, X86_REG_AL, X86_REG_AX, X86_REG_BH, X86_REG_BL,
@@ -34,8 +32,10 @@ typedef enum x86_reg {
 	X86_REG_CR6, X86_REG_CR7, X86_REG_CR8, X86_REG_CR9, X86_REG_CR10,
 	X86_REG_CR11, X86_REG_CR12, X86_REG_CR13, X86_REG_CR14, X86_REG_CR15,
 	X86_REG_DR0, X86_REG_DR1, X86_REG_DR2, X86_REG_DR3, X86_REG_DR4,
-	X86_REG_DR5, X86_REG_DR6, X86_REG_DR7, X86_REG_FP0, X86_REG_FP1,
-	X86_REG_FP2, X86_REG_FP3, X86_REG_FP4, X86_REG_FP5, X86_REG_FP6, X86_REG_FP7,
+	X86_REG_DR5, X86_REG_DR6, X86_REG_DR7, X86_REG_DR8, X86_REG_DR9,
+	X86_REG_DR10, X86_REG_DR11, X86_REG_DR12, X86_REG_DR13, X86_REG_DR14,
+	X86_REG_DR15, X86_REG_FP0, X86_REG_FP1, X86_REG_FP2, X86_REG_FP3,
+	X86_REG_FP4, X86_REG_FP5, X86_REG_FP6, X86_REG_FP7,
 	X86_REG_K0, X86_REG_K1, X86_REG_K2, X86_REG_K3, X86_REG_K4,
 	X86_REG_K5, X86_REG_K6, X86_REG_K7, X86_REG_MM0, X86_REG_MM1,
 	X86_REG_MM2, X86_REG_MM3, X86_REG_MM4, X86_REG_MM5, X86_REG_MM6,
@@ -71,27 +71,122 @@ typedef enum x86_reg {
 	X86_REG_ENDING		// <-- mark the end of the list of registers
 } x86_reg;
 
-//> Operand type for instruction's operands
+// Sub-flags of EFLAGS
+#define X86_EFLAGS_MODIFY_AF (1ULL << 0)
+#define X86_EFLAGS_MODIFY_CF (1ULL << 1)
+#define X86_EFLAGS_MODIFY_SF (1ULL << 2)
+#define X86_EFLAGS_MODIFY_ZF (1ULL << 3)
+#define X86_EFLAGS_MODIFY_PF (1ULL << 4)
+#define X86_EFLAGS_MODIFY_OF (1ULL << 5)
+#define X86_EFLAGS_MODIFY_TF (1ULL << 6)
+#define X86_EFLAGS_MODIFY_IF (1ULL << 7)
+#define X86_EFLAGS_MODIFY_DF (1ULL << 8)
+#define X86_EFLAGS_MODIFY_NT (1ULL << 9)
+#define X86_EFLAGS_MODIFY_RF (1ULL << 10)
+#define X86_EFLAGS_PRIOR_OF (1ULL << 11)
+#define X86_EFLAGS_PRIOR_SF (1ULL << 12)
+#define X86_EFLAGS_PRIOR_ZF (1ULL << 13)
+#define X86_EFLAGS_PRIOR_AF (1ULL << 14)
+#define X86_EFLAGS_PRIOR_PF (1ULL << 15)
+#define X86_EFLAGS_PRIOR_CF (1ULL << 16)
+#define X86_EFLAGS_PRIOR_TF (1ULL << 17)
+#define X86_EFLAGS_PRIOR_IF (1ULL << 18)
+#define X86_EFLAGS_PRIOR_DF (1ULL << 19)
+#define X86_EFLAGS_PRIOR_NT (1ULL << 20)
+#define X86_EFLAGS_RESET_OF (1ULL << 21)
+#define X86_EFLAGS_RESET_CF (1ULL << 22)
+#define X86_EFLAGS_RESET_DF (1ULL << 23)
+#define X86_EFLAGS_RESET_IF (1ULL << 24)
+#define X86_EFLAGS_RESET_SF (1ULL << 25)
+#define X86_EFLAGS_RESET_AF (1ULL << 26)
+#define X86_EFLAGS_RESET_TF (1ULL << 27)
+#define X86_EFLAGS_RESET_NT (1ULL << 28)
+#define X86_EFLAGS_RESET_PF (1ULL << 29)
+#define X86_EFLAGS_SET_CF (1ULL << 30)
+#define X86_EFLAGS_SET_DF (1ULL << 31)
+#define X86_EFLAGS_SET_IF (1ULL << 32)
+#define X86_EFLAGS_TEST_OF (1ULL << 33)
+#define X86_EFLAGS_TEST_SF (1ULL << 34)
+#define X86_EFLAGS_TEST_ZF (1ULL << 35)
+#define X86_EFLAGS_TEST_PF (1ULL << 36)
+#define X86_EFLAGS_TEST_CF (1ULL << 37)
+#define X86_EFLAGS_TEST_NT (1ULL << 38)
+#define X86_EFLAGS_TEST_DF (1ULL << 39)
+#define X86_EFLAGS_UNDEFINED_OF (1ULL << 40)
+#define X86_EFLAGS_UNDEFINED_SF (1ULL << 41)
+#define X86_EFLAGS_UNDEFINED_ZF (1ULL << 42)
+#define X86_EFLAGS_UNDEFINED_PF (1ULL << 43)
+#define X86_EFLAGS_UNDEFINED_AF (1ULL << 44)
+#define X86_EFLAGS_UNDEFINED_CF (1ULL << 45)
+#define X86_EFLAGS_RESET_RF (1ULL << 46)
+#define X86_EFLAGS_TEST_RF (1ULL << 47)
+#define X86_EFLAGS_TEST_IF (1ULL << 48)
+#define X86_EFLAGS_TEST_TF (1ULL << 49)
+#define X86_EFLAGS_TEST_AF (1ULL << 50)
+#define X86_EFLAGS_RESET_ZF (1ULL << 51)
+#define X86_EFLAGS_SET_OF (1ULL << 52)
+#define X86_EFLAGS_SET_SF (1ULL << 53)
+#define X86_EFLAGS_SET_ZF (1ULL << 54)
+#define X86_EFLAGS_SET_AF (1ULL << 55)
+#define X86_EFLAGS_SET_PF (1ULL << 56)
+#define X86_EFLAGS_RESET_0F (1ULL << 57)
+#define X86_EFLAGS_RESET_AC (1ULL << 58)
+
+#define X86_FPU_FLAGS_MODIFY_C0 (1ULL << 0)
+#define X86_FPU_FLAGS_MODIFY_C1 (1ULL << 1)
+#define X86_FPU_FLAGS_MODIFY_C2 (1ULL << 2)
+#define X86_FPU_FLAGS_MODIFY_C3 (1ULL << 3)
+#define X86_FPU_FLAGS_RESET_C0 (1ULL << 4)
+#define X86_FPU_FLAGS_RESET_C1 (1ULL << 5)
+#define X86_FPU_FLAGS_RESET_C2 (1ULL << 6)
+#define X86_FPU_FLAGS_RESET_C3 (1ULL << 7)
+#define X86_FPU_FLAGS_SET_C0 (1ULL << 8)
+#define X86_FPU_FLAGS_SET_C1 (1ULL << 9)
+#define X86_FPU_FLAGS_SET_C2 (1ULL << 10)
+#define X86_FPU_FLAGS_SET_C3 (1ULL << 11)
+#define X86_FPU_FLAGS_UNDEFINED_C0 (1ULL << 12)
+#define X86_FPU_FLAGS_UNDEFINED_C1 (1ULL << 13)
+#define X86_FPU_FLAGS_UNDEFINED_C2 (1ULL << 14)
+#define X86_FPU_FLAGS_UNDEFINED_C3 (1ULL << 15)
+#define X86_FPU_FLAGS_TEST_C0 (1ULL << 16)
+#define X86_FPU_FLAGS_TEST_C1 (1ULL << 17)
+#define X86_FPU_FLAGS_TEST_C2 (1ULL << 18)
+#define X86_FPU_FLAGS_TEST_C3 (1ULL << 19)
+
+
+/// Operand type for instruction's operands
 typedef enum x86_op_type {
-	X86_OP_INVALID = 0, // = CS_OP_INVALID (Uninitialized).
-	X86_OP_REG, // = CS_OP_REG (Register operand).
-	X86_OP_IMM, // = CS_OP_IMM (Immediate operand).
-	X86_OP_MEM, // = CS_OP_MEM (Memory operand).
-	X86_OP_FP,  //  = CS_OP_FP  (Floating-Point operand).
+	X86_OP_INVALID = 0, ///< = CS_OP_INVALID (Uninitialized).
+	X86_OP_REG, ///< = CS_OP_REG (Register operand).
+	X86_OP_IMM, ///< = CS_OP_IMM (Immediate operand).
+	X86_OP_MEM, ///< = CS_OP_MEM (Memory operand).
 } x86_op_type;
 
-//> AVX broadcast type
+/// XOP Code Condition type
+typedef enum x86_xop_cc {
+	X86_XOP_CC_INVALID = 0,	///< Uninitialized.
+	X86_XOP_CC_LT,
+	X86_XOP_CC_LE,
+	X86_XOP_CC_GT,
+	X86_XOP_CC_GE,
+	X86_XOP_CC_EQ,
+	X86_XOP_CC_NEQ,
+	X86_XOP_CC_FALSE,
+	X86_XOP_CC_TRUE,
+} x86_xop_cc;
+
+/// AVX broadcast type
 typedef enum x86_avx_bcast {
-	X86_AVX_BCAST_INVALID = 0,	// Uninitialized.
-	X86_AVX_BCAST_2,	// AVX512 broadcast type {1to2}
-	X86_AVX_BCAST_4,	// AVX512 broadcast type {1to4}
-	X86_AVX_BCAST_8,	// AVX512 broadcast type {1to8}
-	X86_AVX_BCAST_16,	// AVX512 broadcast type {1to16}
+	X86_AVX_BCAST_INVALID = 0,	///< Uninitialized.
+	X86_AVX_BCAST_2,	///< AVX512 broadcast type {1to2}
+	X86_AVX_BCAST_4,	///< AVX512 broadcast type {1to4}
+	X86_AVX_BCAST_8,	///< AVX512 broadcast type {1to8}
+	X86_AVX_BCAST_16,	///< AVX512 broadcast type {1to16}
 } x86_avx_bcast;
 
-//> SSE Code Condition type
+/// SSE Code Condition type
 typedef enum x86_sse_cc {
-	X86_SSE_CC_INVALID = 0,	// Uninitialized.
+	X86_SSE_CC_INVALID = 0,	///< Uninitialized.
 	X86_SSE_CC_EQ,
 	X86_SSE_CC_LT,
 	X86_SSE_CC_LE,
@@ -100,19 +195,11 @@ typedef enum x86_sse_cc {
 	X86_SSE_CC_NLT,
 	X86_SSE_CC_NLE,
 	X86_SSE_CC_ORD,
-	X86_SSE_CC_EQ_UQ,
-	X86_SSE_CC_NGE,
-	X86_SSE_CC_NGT,
-	X86_SSE_CC_FALSE,
-	X86_SSE_CC_NEQ_OQ,
-	X86_SSE_CC_GE,
-	X86_SSE_CC_GT,
-	X86_SSE_CC_TRUE,
 } x86_sse_cc;
 
-//> AVX Code Condition type
+/// AVX Code Condition type
 typedef enum x86_avx_cc {
-	X86_AVX_CC_INVALID = 0,	// Uninitialized.
+	X86_AVX_CC_INVALID = 0,	///< Uninitialized.
 	X86_AVX_CC_EQ,
 	X86_AVX_CC_LT,
 	X86_AVX_CC_LE,
@@ -147,121 +234,153 @@ typedef enum x86_avx_cc {
 	X86_AVX_CC_TRUE_US,
 } x86_avx_cc;
 
-//> AVX static rounding mode type
+/// AVX static rounding mode type
 typedef enum x86_avx_rm {
-	X86_AVX_RM_INVALID = 0,	// Uninitialized.
-	X86_AVX_RM_RN,	// Round to nearest
-	X86_AVX_RM_RD,	// Round down
-	X86_AVX_RM_RU,	// Round up
-	X86_AVX_RM_RZ,	// Round toward zero
+	X86_AVX_RM_INVALID = 0,	///< Uninitialized.
+	X86_AVX_RM_RN,	///< Round to nearest
+	X86_AVX_RM_RD,	///< Round down
+	X86_AVX_RM_RU,	///< Round up
+	X86_AVX_RM_RZ,	///< Round toward zero
 } x86_avx_rm;
 
-//> Instruction prefixes - to be used in cs_x86.prefix[]
+/// Instruction prefixes - to be used in cs_x86.prefix[]
 typedef enum x86_prefix {
-	X86_PREFIX_LOCK		= 	0xf0,	// lock (cs_x86.prefix[0]
-	X86_PREFIX_REP		= 	0xf3,	// rep (cs_x86.prefix[0]
-	X86_PREFIX_REPNE	= 	0xf2,	// repne (cs_x86.prefix[0]
+	X86_PREFIX_LOCK		= 	0xf0,	///< lock (cs_x86.prefix[0]
+	X86_PREFIX_REP		= 	0xf3,	///< rep (cs_x86.prefix[0]
+	X86_PREFIX_REPE		= 	0xf3,	///< repe/repz (cs_x86.prefix[0]
+	X86_PREFIX_REPNE	= 	0xf2,	///< repne/repnz (cs_x86.prefix[0]
 
-	X86_PREFIX_CS		= 	0x2e,	// segment override CS (cs_x86.prefix[1]
-	X86_PREFIX_SS		= 	0x36,	// segment override SS (cs_x86.prefix[1]
-	X86_PREFIX_DS		= 	0x3e,	// segment override DS (cs_x86.prefix[1]
-	X86_PREFIX_ES		= 	0x26,	// segment override ES (cs_x86.prefix[1]
-	X86_PREFIX_FS		= 	0x64,	// segment override FS (cs_x86.prefix[1]
-	X86_PREFIX_GS		= 	0x65,	// segment override GS (cs_x86.prefix[1]
+	X86_PREFIX_CS		= 	0x2e,	///< segment override CS (cs_x86.prefix[1]
+	X86_PREFIX_SS		= 	0x36,	///< segment override SS (cs_x86.prefix[1]
+	X86_PREFIX_DS		= 	0x3e,	///< segment override DS (cs_x86.prefix[1]
+	X86_PREFIX_ES		= 	0x26,	///< segment override ES (cs_x86.prefix[1]
+	X86_PREFIX_FS		= 	0x64,	///< segment override FS (cs_x86.prefix[1]
+	X86_PREFIX_GS		= 	0x65,	///< segment override GS (cs_x86.prefix[1]
 
-	X86_PREFIX_OPSIZE	=	0x66,	// operand-size override (cs_x86.prefix[2]
-	X86_PREFIX_ADDRSIZE	=	0x67,	// address-size override (cs_x86.prefix[3]
+	X86_PREFIX_OPSIZE	=	0x66,	///< operand-size override (cs_x86.prefix[2]
+	X86_PREFIX_ADDRSIZE	=	0x67,	///< address-size override (cs_x86.prefix[3]
 } x86_prefix;
 
-// Instruction's operand referring to memory
-// This is associated with X86_OP_MEM operand type above
+/// Instruction's operand referring to memory
+/// This is associated with X86_OP_MEM operand type above
 typedef struct x86_op_mem {
-	unsigned int segment; // segment register (or X86_REG_INVALID if irrelevant)
-	unsigned int base;	// base register (or X86_REG_INVALID if irrelevant)
-	unsigned int index;	// index register (or X86_REG_INVALID if irrelevant)
-	int scale;	// scale for index register
-	int64_t disp;	// displacement value
+	x86_reg segment; ///< segment register (or X86_REG_INVALID if irrelevant)
+	x86_reg base;	///< base register (or X86_REG_INVALID if irrelevant)
+	x86_reg index;	///< index register (or X86_REG_INVALID if irrelevant)
+	int scale;	///< scale for index register
+	int64_t disp;	///< displacement value
 } x86_op_mem;
 
-// Instruction operand
+/// Instruction operand
 typedef struct cs_x86_op {
-		x86_op_type type;	// operand type
+		x86_op_type type;	///< operand type
 		union {
-			x86_reg reg;	// register value for REG operand
-			int64_t imm;		// immediate value for IMM operand
-			double fp;		// floating point value for FP operand
-			x86_op_mem mem;		// base/index/scale/disp value for MEM operand
+			x86_reg reg;	  ///< register value for REG operand
+			int64_t imm;		///< immediate value for IMM operand
+			x86_op_mem mem;		///< base/index/scale/disp value for MEM operand
 		};
 
-		// size of this operand (in bytes).
+		/// size of this operand (in bytes).
 		uint8_t size;
 
-		// AVX broadcast type, or 0 if irrelevant
+		/// How is this operand accessed? (READ, WRITE or READ|WRITE)
+		/// This field is combined of cs_ac_type.
+		/// NOTE: this field is irrelevant if engine is compiled in DIET mode.
+		uint8_t access;
+
+		/// AVX broadcast type, or 0 if irrelevant
 		x86_avx_bcast avx_bcast;
 
-		// AVX zero opmask {z}
+		/// AVX zero opmask {z}
 		bool avx_zero_opmask;
 } cs_x86_op;
 
-// Instruction structure
+typedef struct cs_x86_encoding {
+	/// ModR/M offset, or 0 when irrelevant
+	uint8_t modrm_offset;
+
+	/// Displacement offset, or 0 when irrelevant.
+	uint8_t disp_offset;
+	uint8_t disp_size;
+
+	/// Immediate offset, or 0 when irrelevant.
+	uint8_t imm_offset;
+	uint8_t imm_size;
+} cs_x86_encoding;
+
+/// Instruction structure
 typedef struct cs_x86 {
-	// Instruction prefix, which can be up to 4 bytes.
-	// A prefix byte gets value 0 when irrelevant.
-	// prefix[0] indicates REP/REPNE/LOCK prefix (See X86_PREFIX_REP/REPNE/LOCK above)
-	// prefix[1] indicates segment override (irrelevant for x86_64):
-	// See X86_PREFIX_CS/SS/DS/ES/FS/GS above.
-	// prefix[2] indicates operand-size override (X86_PREFIX_OPSIZE)
-	// prefix[3] indicates address-size override (X86_PREFIX_ADDRSIZE)
+	/// Instruction prefix, which can be up to 4 bytes.
+	/// A prefix byte gets value 0 when irrelevant.
+	/// prefix[0] indicates REP/REPNE/LOCK prefix (See X86_PREFIX_REP/REPNE/LOCK above)
+	/// prefix[1] indicates segment override (irrelevant for x86_64):
+	/// See X86_PREFIX_CS/SS/DS/ES/FS/GS above.
+	/// prefix[2] indicates operand-size override (X86_PREFIX_OPSIZE)
+	/// prefix[3] indicates address-size override (X86_PREFIX_ADDRSIZE)
 	uint8_t prefix[4];
 
-	// Instruction opcode, which can be from 1 to 4 bytes in size.
-	// This contains VEX opcode as well.
-	// An trailing opcode byte gets value 0 when irrelevant.
+	/// Instruction opcode, which can be from 1 to 4 bytes in size.
+	/// This contains VEX opcode as well.
+	/// An trailing opcode byte gets value 0 when irrelevant.
 	uint8_t opcode[4];
 
-	// REX prefix: only a non-zero value is relevant for x86_64
+	/// REX prefix: only a non-zero value is relevant for x86_64
 	uint8_t rex;
 
-	// Address size, which can be overridden with above prefix[5].
+	/// Address size, which can be overridden with above prefix[5].
 	uint8_t addr_size;
 
-	// ModR/M byte
+	/// ModR/M byte
 	uint8_t modrm;
 
-	// SIB value, or 0 when irrelevant.
+	/// SIB value, or 0 when irrelevant.
 	uint8_t sib;
 
-	// Displacement value, or 0 when irrelevant.
-	int32_t disp;
+	/// Displacement value, valid if encoding.disp_offset != 0
+	int64_t disp;
 
-	/* SIB state */
-	// SIB index register, or X86_REG_INVALID when irrelevant.
+	/// SIB index register, or X86_REG_INVALID when irrelevant.
 	x86_reg sib_index;
-	// SIB scale. only applicable if sib_index is relevant.
+	/// SIB scale, only applicable if sib_index is valid.
 	int8_t sib_scale;
-	// SIB base register, or X86_REG_INVALID when irrelevant.
+	/// SIB base register, or X86_REG_INVALID when irrelevant.
 	x86_reg sib_base;
 
-	// SSE Code Condition
+	/// XOP Code Condition
+	x86_xop_cc xop_cc;
+
+	/// SSE Code Condition
 	x86_sse_cc sse_cc;
 
-	// AVX Code Condition
+	/// AVX Code Condition
 	x86_avx_cc avx_cc;
 
-	// AVX Suppress all Exception
+	/// AVX Suppress all Exception
 	bool avx_sae;
 
-	// AVX static rounding mode
+	/// AVX static rounding mode
 	x86_avx_rm avx_rm;
 
-	// Number of operands of this instruction,
-	// or 0 when instruction has no operand.
+	
+	union {
+		/// EFLAGS updated by this instruction.
+		/// This can be formed from OR combination of X86_EFLAGS_* symbols in x86.h
+		uint64_t eflags;
+		/// FPU_FLAGS updated by this instruction.
+		/// This can be formed from OR combination of X86_FPU_FLAGS_* symbols in x86.h
+		uint64_t fpu_flags;
+	};
+
+	/// Number of operands of this instruction,
+	/// or 0 when instruction has no operand.
 	uint8_t op_count;
 
-	cs_x86_op operands[8];	// operands for this instruction.
+	cs_x86_op operands[8];	///< operands for this instruction.
+
+	cs_x86_encoding encoding;  ///< encoding information
 } cs_x86;
 
-//> X86 instructions
+/// X86 instructions
 typedef enum x86_insn {
 	X86_INS_INVALID = 0,
 
@@ -329,9 +448,11 @@ typedef enum x86_insn {
 	X86_INS_CLC,
 	X86_INS_CLD,
 	X86_INS_CLFLUSH,
+	X86_INS_CLFLUSHOPT,
 	X86_INS_CLGI,
 	X86_INS_CLI,
 	X86_INS_CLTS,
+	X86_INS_CLWB,
 	X86_INS_CMC,
 	X86_INS_CMOVA,
 	X86_INS_CMOVAE,
@@ -358,12 +479,8 @@ typedef enum x86_insn {
 	X86_INS_FCMOVU,
 	X86_INS_CMOVS,
 	X86_INS_CMP,
-	X86_INS_CMPPD,
-	X86_INS_CMPPS,
 	X86_INS_CMPSB,
-	X86_INS_CMPSD,
 	X86_INS_CMPSQ,
-	X86_INS_CMPSS,
 	X86_INS_CMPSW,
 	X86_INS_CMPXCHG16B,
 	X86_INS_CMPXCHG,
@@ -371,7 +488,7 @@ typedef enum x86_insn {
 	X86_INS_COMISD,
 	X86_INS_COMISS,
 	X86_INS_FCOMP,
-	X86_INS_FCOMPI,
+	X86_INS_FCOMIP,
 	X86_INS_FCOMI,
 	X86_INS_FCOM,
 	X86_INS_FCOS,
@@ -447,6 +564,7 @@ typedef enum x86_insn {
 	X86_INS_FPREM,
 	X86_INS_FPREM1,
 	X86_INS_FPTAN,
+	X86_INS_FFREEP,
 	X86_INS_FRNDINT,
 	X86_INS_FRSTOR,
 	X86_INS_FNSAVE,
@@ -504,7 +622,6 @@ typedef enum x86_insn {
 	X86_INS_FISTP,
 	X86_INS_UCOMISD,
 	X86_INS_UCOMISS,
-	X86_INS_VCMP,
 	X86_INS_VCOMISD,
 	X86_INS_VCOMISS,
 	X86_INS_VCVTSD2SS,
@@ -558,9 +675,18 @@ typedef enum x86_insn {
 	X86_INS_KORB,
 	X86_INS_KORD,
 	X86_INS_KORQ,
+	X86_INS_KORTESTB,
+	X86_INS_KORTESTD,
+	X86_INS_KORTESTQ,
 	X86_INS_KORTESTW,
 	X86_INS_KORW,
+	X86_INS_KSHIFTLB,
+	X86_INS_KSHIFTLD,
+	X86_INS_KSHIFTLQ,
 	X86_INS_KSHIFTLW,
+	X86_INS_KSHIFTRB,
+	X86_INS_KSHIFTRD,
+	X86_INS_KSHIFTRQ,
 	X86_INS_KSHIFTRW,
 	X86_INS_KUNPCKBW,
 	X86_INS_KXNORB,
@@ -769,6 +895,7 @@ typedef enum x86_insn {
 	X86_INS_PCMPGTQ,
 	X86_INS_PCMPISTRI,
 	X86_INS_PCMPISTRM,
+	X86_INS_PCOMMIT,
 	X86_INS_PDEP,
 	X86_INS_PEXT,
 	X86_INS_PEXTRB,
@@ -939,6 +1066,7 @@ typedef enum x86_insn {
 	X86_INS_FST,
 	X86_INS_FSTP,
 	X86_INS_FSTPNCE,
+	X86_INS_FXCH,
 	X86_INS_SUBPD,
 	X86_INS_SUBPS,
 	X86_INS_FSUBR,
@@ -960,7 +1088,7 @@ typedef enum x86_insn {
 	X86_INS_FTST,
 	X86_INS_TZCNT,
 	X86_INS_TZMSK,
-	X86_INS_FUCOMPI,
+	X86_INS_FUCOMIP,
 	X86_INS_FUCOMI,
 	X86_INS_FUCOMPP,
 	X86_INS_FUCOMP,
@@ -995,15 +1123,12 @@ typedef enum x86_insn {
 	X86_INS_VBLENDVPD,
 	X86_INS_VBLENDVPS,
 	X86_INS_VBROADCASTF128,
-	X86_INS_VBROADCASTI128,
 	X86_INS_VBROADCASTI32X4,
 	X86_INS_VBROADCASTI64X4,
 	X86_INS_VBROADCASTSD,
 	X86_INS_VBROADCASTSS,
-	X86_INS_VCMPPD,
-	X86_INS_VCMPPS,
-	X86_INS_VCMPSD,
-	X86_INS_VCMPSS,
+	X86_INS_VCOMPRESSPD,
+	X86_INS_VCOMPRESSPS,
 	X86_INS_VCVTDQ2PD,
 	X86_INS_VCVTDQ2PS,
 	X86_INS_VCVTPD2DQX,
@@ -1035,6 +1160,10 @@ typedef enum x86_insn {
 	X86_INS_VDPPS,
 	X86_INS_VERR,
 	X86_INS_VERW,
+	X86_INS_VEXP2PD,
+	X86_INS_VEXP2PS,
+	X86_INS_VEXPANDPD,
+	X86_INS_VEXPANDPS,
 	X86_INS_VEXTRACTF128,
 	X86_INS_VEXTRACTF32X4,
 	X86_INS_VEXTRACTF64X4,
@@ -1044,11 +1173,11 @@ typedef enum x86_insn {
 	X86_INS_VEXTRACTPS,
 	X86_INS_VFMADD132PD,
 	X86_INS_VFMADD132PS,
-	X86_INS_VFMADD213PD,
-	X86_INS_VFMADD213PS,
 	X86_INS_VFMADDPD,
+	X86_INS_VFMADD213PD,
 	X86_INS_VFMADD231PD,
 	X86_INS_VFMADDPS,
+	X86_INS_VFMADD213PS,
 	X86_INS_VFMADD231PS,
 	X86_INS_VFMADDSD,
 	X86_INS_VFMADD213SD,
@@ -1060,27 +1189,27 @@ typedef enum x86_insn {
 	X86_INS_VFMADD231SS,
 	X86_INS_VFMADDSUB132PD,
 	X86_INS_VFMADDSUB132PS,
-	X86_INS_VFMADDSUB213PD,
-	X86_INS_VFMADDSUB213PS,
 	X86_INS_VFMADDSUBPD,
+	X86_INS_VFMADDSUB213PD,
 	X86_INS_VFMADDSUB231PD,
 	X86_INS_VFMADDSUBPS,
+	X86_INS_VFMADDSUB213PS,
 	X86_INS_VFMADDSUB231PS,
 	X86_INS_VFMSUB132PD,
 	X86_INS_VFMSUB132PS,
-	X86_INS_VFMSUB213PD,
-	X86_INS_VFMSUB213PS,
 	X86_INS_VFMSUBADD132PD,
 	X86_INS_VFMSUBADD132PS,
-	X86_INS_VFMSUBADD213PD,
-	X86_INS_VFMSUBADD213PS,
 	X86_INS_VFMSUBADDPD,
+	X86_INS_VFMSUBADD213PD,
 	X86_INS_VFMSUBADD231PD,
 	X86_INS_VFMSUBADDPS,
+	X86_INS_VFMSUBADD213PS,
 	X86_INS_VFMSUBADD231PS,
 	X86_INS_VFMSUBPD,
+	X86_INS_VFMSUB213PD,
 	X86_INS_VFMSUB231PD,
 	X86_INS_VFMSUBPS,
+	X86_INS_VFMSUB213PS,
 	X86_INS_VFMSUB231PS,
 	X86_INS_VFMSUBSD,
 	X86_INS_VFMSUB213SD,
@@ -1092,11 +1221,11 @@ typedef enum x86_insn {
 	X86_INS_VFMSUB231SS,
 	X86_INS_VFNMADD132PD,
 	X86_INS_VFNMADD132PS,
-	X86_INS_VFNMADD213PD,
-	X86_INS_VFNMADD213PS,
 	X86_INS_VFNMADDPD,
+	X86_INS_VFNMADD213PD,
 	X86_INS_VFNMADD231PD,
 	X86_INS_VFNMADDPS,
+	X86_INS_VFNMADD213PS,
 	X86_INS_VFNMADD231PS,
 	X86_INS_VFNMADDSD,
 	X86_INS_VFNMADD213SD,
@@ -1108,11 +1237,11 @@ typedef enum x86_insn {
 	X86_INS_VFNMADD231SS,
 	X86_INS_VFNMSUB132PD,
 	X86_INS_VFNMSUB132PS,
-	X86_INS_VFNMSUB213PD,
-	X86_INS_VFNMSUB213PS,
 	X86_INS_VFNMSUBPD,
+	X86_INS_VFNMSUB213PD,
 	X86_INS_VFNMSUB231PD,
 	X86_INS_VFNMSUBPS,
+	X86_INS_VFNMSUB213PS,
 	X86_INS_VFNMSUB231PS,
 	X86_INS_VFNMSUBSD,
 	X86_INS_VFNMSUB213SD,
@@ -1148,9 +1277,13 @@ typedef enum x86_insn {
 	X86_INS_VHSUBPS,
 	X86_INS_VINSERTF128,
 	X86_INS_VINSERTF32X4,
+	X86_INS_VINSERTF32X8,
+	X86_INS_VINSERTF64X2,
 	X86_INS_VINSERTF64X4,
 	X86_INS_VINSERTI128,
 	X86_INS_VINSERTI32X4,
+	X86_INS_VINSERTI32X8,
+	X86_INS_VINSERTI64X2,
 	X86_INS_VINSERTI64X4,
 	X86_INS_VINSERTPS,
 	X86_INS_VLDDQU,
@@ -1241,8 +1374,10 @@ typedef enum x86_insn {
 	X86_INS_VPAVGB,
 	X86_INS_VPAVGW,
 	X86_INS_VPBLENDD,
+	X86_INS_VPBLENDMB,
 	X86_INS_VPBLENDMD,
 	X86_INS_VPBLENDMQ,
+	X86_INS_VPBLENDMW,
 	X86_INS_VPBLENDVB,
 	X86_INS_VPBLENDW,
 	X86_INS_VPBROADCASTB,
@@ -1253,7 +1388,7 @@ typedef enum x86_insn {
 	X86_INS_VPBROADCASTW,
 	X86_INS_VPCLMULQDQ,
 	X86_INS_VPCMOV,
-	X86_INS_VPCMP,
+	X86_INS_VPCMPB,
 	X86_INS_VPCMPD,
 	X86_INS_VPCMPEQB,
 	X86_INS_VPCMPEQD,
@@ -1268,10 +1403,15 @@ typedef enum x86_insn {
 	X86_INS_VPCMPISTRI,
 	X86_INS_VPCMPISTRM,
 	X86_INS_VPCMPQ,
+	X86_INS_VPCMPUB,
 	X86_INS_VPCMPUD,
 	X86_INS_VPCMPUQ,
+	X86_INS_VPCMPUW,
+	X86_INS_VPCMPW,
 	X86_INS_VPCOMB,
 	X86_INS_VPCOMD,
+	X86_INS_VPCOMPRESSD,
+	X86_INS_VPCOMPRESSQ,
 	X86_INS_VPCOMQ,
 	X86_INS_VPCOMUB,
 	X86_INS_VPCOMUD,
@@ -1298,6 +1438,8 @@ typedef enum x86_insn {
 	X86_INS_VPERMT2PD,
 	X86_INS_VPERMT2PS,
 	X86_INS_VPERMT2Q,
+	X86_INS_VPEXPANDD,
+	X86_INS_VPEXPANDQ,
 	X86_INS_VPEXTRB,
 	X86_INS_VPEXTRD,
 	X86_INS_VPEXTRQ,
@@ -1368,6 +1510,10 @@ typedef enum x86_insn {
 	X86_INS_VPMINUW,
 	X86_INS_VPMOVDB,
 	X86_INS_VPMOVDW,
+	X86_INS_VPMOVM2B,
+	X86_INS_VPMOVM2D,
+	X86_INS_VPMOVM2Q,
+	X86_INS_VPMOVM2W,
 	X86_INS_VPMOVMSKB,
 	X86_INS_VPMOVQB,
 	X86_INS_VPMOVQD,
@@ -1399,6 +1545,7 @@ typedef enum x86_insn {
 	X86_INS_VPMULHUW,
 	X86_INS_VPMULHW,
 	X86_INS_VPMULLD,
+	X86_INS_VPMULLQ,
 	X86_INS_VPMULLW,
 	X86_INS_VPMULUDQ,
 	X86_INS_VPORD,
@@ -1538,7 +1685,6 @@ typedef enum x86_insn {
 	X86_INS_XACQUIRE,
 	X86_INS_XBEGIN,
 	X86_INS_XCHG,
-	X86_INS_FXCH,
 	X86_INS_XCRYPTCBC,
 	X86_INS_XCRYPTCFB,
 	X86_INS_XCRYPTCTR,
@@ -1550,37 +1696,230 @@ typedef enum x86_insn {
 	X86_INS_XRELEASE,
 	X86_INS_XRSTOR,
 	X86_INS_XRSTOR64,
+	X86_INS_XRSTORS,
+	X86_INS_XRSTORS64,
 	X86_INS_XSAVE,
 	X86_INS_XSAVE64,
+	X86_INS_XSAVEC,
+	X86_INS_XSAVEC64,
 	X86_INS_XSAVEOPT,
 	X86_INS_XSAVEOPT64,
+	X86_INS_XSAVES,
+	X86_INS_XSAVES64,
 	X86_INS_XSETBV,
 	X86_INS_XSHA1,
 	X86_INS_XSHA256,
 	X86_INS_XSTORE,
 	X86_INS_XTEST,
+	X86_INS_FDISI8087_NOP,
+	X86_INS_FENI8087_NOP,
 
-	X86_INS_ENDING,	// mark the end of the list of insn
+	// pseudo instructions
+	X86_INS_CMPSS,
+	X86_INS_CMPEQSS,
+	X86_INS_CMPLTSS,
+	X86_INS_CMPLESS,
+	X86_INS_CMPUNORDSS,
+	X86_INS_CMPNEQSS,
+	X86_INS_CMPNLTSS,
+	X86_INS_CMPNLESS,
+	X86_INS_CMPORDSS,
+
+	X86_INS_CMPSD,
+	X86_INS_CMPEQSD,
+	X86_INS_CMPLTSD,
+	X86_INS_CMPLESD,
+	X86_INS_CMPUNORDSD,
+	X86_INS_CMPNEQSD,
+	X86_INS_CMPNLTSD,
+	X86_INS_CMPNLESD,
+	X86_INS_CMPORDSD,
+
+	X86_INS_CMPPS,
+	X86_INS_CMPEQPS,
+	X86_INS_CMPLTPS,
+	X86_INS_CMPLEPS,
+	X86_INS_CMPUNORDPS,
+	X86_INS_CMPNEQPS,
+	X86_INS_CMPNLTPS,
+	X86_INS_CMPNLEPS,
+	X86_INS_CMPORDPS,
+
+	X86_INS_CMPPD,
+	X86_INS_CMPEQPD,
+	X86_INS_CMPLTPD,
+	X86_INS_CMPLEPD,
+	X86_INS_CMPUNORDPD,
+	X86_INS_CMPNEQPD,
+	X86_INS_CMPNLTPD,
+	X86_INS_CMPNLEPD,
+	X86_INS_CMPORDPD,
+
+	X86_INS_VCMPSS,
+	X86_INS_VCMPEQSS,
+	X86_INS_VCMPLTSS,
+	X86_INS_VCMPLESS,
+	X86_INS_VCMPUNORDSS,
+	X86_INS_VCMPNEQSS,
+	X86_INS_VCMPNLTSS,
+	X86_INS_VCMPNLESS,
+	X86_INS_VCMPORDSS,
+	X86_INS_VCMPEQ_UQSS,
+	X86_INS_VCMPNGESS,
+	X86_INS_VCMPNGTSS,
+	X86_INS_VCMPFALSESS,
+	X86_INS_VCMPNEQ_OQSS,
+	X86_INS_VCMPGESS,
+	X86_INS_VCMPGTSS,
+	X86_INS_VCMPTRUESS,
+	X86_INS_VCMPEQ_OSSS,
+	X86_INS_VCMPLT_OQSS,
+	X86_INS_VCMPLE_OQSS,
+	X86_INS_VCMPUNORD_SSS,
+	X86_INS_VCMPNEQ_USSS,
+	X86_INS_VCMPNLT_UQSS,
+	X86_INS_VCMPNLE_UQSS,
+	X86_INS_VCMPORD_SSS,
+	X86_INS_VCMPEQ_USSS,
+	X86_INS_VCMPNGE_UQSS,
+	X86_INS_VCMPNGT_UQSS,
+	X86_INS_VCMPFALSE_OSSS,
+	X86_INS_VCMPNEQ_OSSS,
+	X86_INS_VCMPGE_OQSS,
+	X86_INS_VCMPGT_OQSS,
+	X86_INS_VCMPTRUE_USSS,
+
+	X86_INS_VCMPSD,
+	X86_INS_VCMPEQSD,
+	X86_INS_VCMPLTSD,
+	X86_INS_VCMPLESD,
+	X86_INS_VCMPUNORDSD,
+	X86_INS_VCMPNEQSD,
+	X86_INS_VCMPNLTSD,
+	X86_INS_VCMPNLESD,
+	X86_INS_VCMPORDSD,
+	X86_INS_VCMPEQ_UQSD,
+	X86_INS_VCMPNGESD,
+	X86_INS_VCMPNGTSD,
+	X86_INS_VCMPFALSESD,
+	X86_INS_VCMPNEQ_OQSD,
+	X86_INS_VCMPGESD,
+	X86_INS_VCMPGTSD,
+	X86_INS_VCMPTRUESD,
+	X86_INS_VCMPEQ_OSSD,
+	X86_INS_VCMPLT_OQSD,
+	X86_INS_VCMPLE_OQSD,
+	X86_INS_VCMPUNORD_SSD,
+	X86_INS_VCMPNEQ_USSD,
+	X86_INS_VCMPNLT_UQSD,
+	X86_INS_VCMPNLE_UQSD,
+	X86_INS_VCMPORD_SSD,
+	X86_INS_VCMPEQ_USSD,
+	X86_INS_VCMPNGE_UQSD,
+	X86_INS_VCMPNGT_UQSD,
+	X86_INS_VCMPFALSE_OSSD,
+	X86_INS_VCMPNEQ_OSSD,
+	X86_INS_VCMPGE_OQSD,
+	X86_INS_VCMPGT_OQSD,
+	X86_INS_VCMPTRUE_USSD,
+
+	X86_INS_VCMPPS,
+	X86_INS_VCMPEQPS,
+	X86_INS_VCMPLTPS,
+	X86_INS_VCMPLEPS,
+	X86_INS_VCMPUNORDPS,
+	X86_INS_VCMPNEQPS,
+	X86_INS_VCMPNLTPS,
+	X86_INS_VCMPNLEPS,
+	X86_INS_VCMPORDPS,
+	X86_INS_VCMPEQ_UQPS,
+	X86_INS_VCMPNGEPS,
+	X86_INS_VCMPNGTPS,
+	X86_INS_VCMPFALSEPS,
+	X86_INS_VCMPNEQ_OQPS,
+	X86_INS_VCMPGEPS,
+	X86_INS_VCMPGTPS,
+	X86_INS_VCMPTRUEPS,
+	X86_INS_VCMPEQ_OSPS,
+	X86_INS_VCMPLT_OQPS,
+	X86_INS_VCMPLE_OQPS,
+	X86_INS_VCMPUNORD_SPS,
+	X86_INS_VCMPNEQ_USPS,
+	X86_INS_VCMPNLT_UQPS,
+	X86_INS_VCMPNLE_UQPS,
+	X86_INS_VCMPORD_SPS,
+	X86_INS_VCMPEQ_USPS,
+	X86_INS_VCMPNGE_UQPS,
+	X86_INS_VCMPNGT_UQPS,
+	X86_INS_VCMPFALSE_OSPS,
+	X86_INS_VCMPNEQ_OSPS,
+	X86_INS_VCMPGE_OQPS,
+	X86_INS_VCMPGT_OQPS,
+	X86_INS_VCMPTRUE_USPS,
+
+	X86_INS_VCMPPD,
+	X86_INS_VCMPEQPD,
+	X86_INS_VCMPLTPD,
+	X86_INS_VCMPLEPD,
+	X86_INS_VCMPUNORDPD,
+	X86_INS_VCMPNEQPD,
+	X86_INS_VCMPNLTPD,
+	X86_INS_VCMPNLEPD,
+	X86_INS_VCMPORDPD,
+	X86_INS_VCMPEQ_UQPD,
+	X86_INS_VCMPNGEPD,
+	X86_INS_VCMPNGTPD,
+	X86_INS_VCMPFALSEPD,
+	X86_INS_VCMPNEQ_OQPD,
+	X86_INS_VCMPGEPD,
+	X86_INS_VCMPGTPD,
+	X86_INS_VCMPTRUEPD,
+	X86_INS_VCMPEQ_OSPD,
+	X86_INS_VCMPLT_OQPD,
+	X86_INS_VCMPLE_OQPD,
+	X86_INS_VCMPUNORD_SPD,
+	X86_INS_VCMPNEQ_USPD,
+	X86_INS_VCMPNLT_UQPD,
+	X86_INS_VCMPNLE_UQPD,
+	X86_INS_VCMPORD_SPD,
+	X86_INS_VCMPEQ_USPD,
+	X86_INS_VCMPNGE_UQPD,
+	X86_INS_VCMPNGT_UQPD,
+	X86_INS_VCMPFALSE_OSPD,
+	X86_INS_VCMPNEQ_OSPD,
+	X86_INS_VCMPGE_OQPD,
+	X86_INS_VCMPGT_OQPD,
+	X86_INS_VCMPTRUE_USPD,
+
+	X86_INS_UD0,
+	X86_INS_ENDBR32,
+	X86_INS_ENDBR64,
+
+	X86_INS_ENDING, // mark the end of the list of insn
 } x86_insn;
 
-//> Group of X86 instructions
+/// Group of X86 instructions
 typedef enum  x86_insn_group {
-	X86_GRP_INVALID = 0, // = CS_GRP_INVALID
+	X86_GRP_INVALID = 0, ///< = CS_GRP_INVALID
 
-	//> Generic groups
+	// Generic groups
 	// all jump instructions (conditional+direct+indirect jumps)
-	X86_GRP_JUMP,	// = CS_GRP_JUMP
+	X86_GRP_JUMP,	///< = CS_GRP_JUMP
 	// all call instructions
-	X86_GRP_CALL,	// = CS_GRP_CALL
+	X86_GRP_CALL,	///< = CS_GRP_CALL
 	// all return instructions
-	X86_GRP_RET,	// = CS_GRP_RET
+	X86_GRP_RET,	///< = CS_GRP_RET
 	// all interrupt instructions (int+syscall)
-	X86_GRP_INT,	// = CS_GRP_INT
+	X86_GRP_INT,	///< = CS_GRP_INT
 	// all interrupt return instructions
-	X86_GRP_IRET,	// = CS_GRP_IRET
+	X86_GRP_IRET,	///< = CS_GRP_IRET
+	// all privileged instructions
+	X86_GRP_PRIVILEGE,	///< = CS_GRP_PRIVILEGE
+	// all relative branching instructions
+	X86_GRP_BRANCH_RELATIVE, ///< = CS_GRP_BRANCH_RELATIVE
 
-	//> Architecture-specific groups
-	X86_GRP_VM = 128,	// all virtualization instructions (VT-x + AMD-V)
+	// Architecture-specific groups
+	X86_GRP_VM = 128,	///< all virtualization instructions (VT-x + AMD-V)
 	X86_GRP_3DNOW,
 	X86_GRP_AES,
 	X86_GRP_ADX,
@@ -1621,6 +1960,7 @@ typedef enum  x86_insn_group {
 	X86_GRP_VLX,
 	X86_GRP_SMAP,
 	X86_GRP_NOVLX,
+	X86_GRP_FPU,
 
 	X86_GRP_ENDING
 } x86_insn_group;

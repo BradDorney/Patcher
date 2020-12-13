@@ -156,7 +156,8 @@ public:
 
   // Disassembles a number of instructions.
   std::vector<cs_insn> Disassemble(const void* pAddress, size_t numInsns) const {
-    std::vector<cs_insn> out(numInsns);
+    std::vector<cs_insn> out;
+    out.reserve(numInsns);
 
     if (refCount_ != 0) {
       cs_insn*      pInsns = nullptr;

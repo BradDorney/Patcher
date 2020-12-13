@@ -189,7 +189,7 @@ enum class Call : uint32 {
 #elif PATCHER_UNIX_ABI
   Membercall = Cdecl,
 #else
-  Memercall  = Unknown,
+  Membercall = Unknown,
 #endif
   Variadic   = Cdecl,
 };

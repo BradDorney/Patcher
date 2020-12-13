@@ -146,7 +146,7 @@ public:
   /// @param [in]  pfnOriginalOffset  (Optional) Offset or pointer-to-member into pfnNewFunction's functor object
   ///                                 state to pfnOriginal.  Use SetCapturedTrampoline for the first lambda capture.
   ///
-  /// @see Comments of @ref Hook for examples, which has similar usage.
+  /// @see   Comments of @ref Hook for examples, which has similar usage.
   /// @note  32-bit x86 only.
   PatcherStatus HookCall(TargetPtr pAddress, const FunctionPtr& pfnNewFunction, void* pPfnOriginal = nullptr);
   template <typename T>  PatcherStatus HookCall(TargetPtr pAddress, const FunctionPtr& pfnNewFunction, T** pPfnOriginal)

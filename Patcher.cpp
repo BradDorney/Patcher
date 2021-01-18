@@ -1,6 +1,6 @@
 /*
  ***********************************************************************************************************************
- * Copyright (c) 2020, Brad Dorney
+ * Copyright (c) 2021, Brad Dorney
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without modification, are permitted provided that the
@@ -138,7 +138,8 @@ static Status TranslateCsError(cs_err capstoneError) {
 template <cs_arch CsArchitecture, uint32 CsMode>
 class Disassembler {
 public:
-  Disassembler() : hDisasm_(NULL), refCount_(0) { }
+   Disassembler() : hDisasm_(NULL), refCount_(0) { }
+  ~Disassembler() { if (refCount_ != 0) { cs_close(&hDisasm_);  refCount_ = 0; } }
 
   void Acquire() {
     std::lock_guard<std::mutex> lock(lock_);
@@ -188,7 +189,8 @@ private:
 // HEAP_CREATE_ENABLE_EXECUTE flag.
 class Allocator {
 public:
-  Allocator() : hHeap_(NULL), refCount_(0) { }
+   Allocator() : hHeap_(NULL), refCount_(0) { }
+  ~Allocator() { if (hHeap_ != NULL) { HeapDestroy(hHeap_);  hHeap_ = NULL; } }
 
   void Acquire() {
     std::lock_guard<std::mutex> lock(allocatorLock_);
@@ -319,7 +321,7 @@ static uint32 CalculateModuleHash(
   const auto*const pDosHeader = reinterpret_cast<IMAGE_DOS_HEADER*>(GetModuleFromAddress(hModule));
 
   if ((pDosHeader != nullptr) && (pDosHeader->e_magic == IMAGE_DOS_SIGNATURE)) {
-    const auto&  ntHeader         = *static_cast<IMAGE_NT_HEADERS*>(PtrInc(hModule, pDosHeader->e_lfanew));
+    const auto&  ntHeader         = *PtrInc<IMAGE_NT_HEADERS*>(hModule, pDosHeader->e_lfanew);
     const auto&  optionalHeader   = ntHeader.OptionalHeader;
     const auto&  optionalHeader64 = reinterpret_cast<const IMAGE_OPTIONAL_HEADER64&>(optionalHeader);
 
@@ -351,8 +353,7 @@ static IMAGE_DATA_DIRECTORY* GetDataDirectory(
   const auto*const      pDosHeader = static_cast<const IMAGE_DOS_HEADER*>(hModule);
 
   if ((pDosHeader != nullptr) && (pDosHeader->e_magic == IMAGE_DOS_SIGNATURE)) {
-    auto& optionalHeader = static_cast<IMAGE_NT_HEADERS*>(
-        PtrInc(hModule, static_cast<IMAGE_DOS_HEADER*>(hModule)->e_lfanew))->OptionalHeader;
+    auto& optionalHeader   = PtrInc<IMAGE_NT_HEADERS*>(hModule, pDosHeader->e_lfanew)->OptionalHeader;
     auto& optionalHeader64 = reinterpret_cast<IMAGE_OPTIONAL_HEADER64&>(optionalHeader);
 
     const uint32 numDataDirs =
@@ -423,7 +424,7 @@ void PatchContext::InitModule() {
 
   if ((pDosHeader != nullptr) && (pDosHeader->e_magic == IMAGE_DOS_SIGNATURE)) {
     // Calculate the module's base relocation delta.
-    const auto& peHeader = *static_cast<const IMAGE_NT_HEADERS*>(PtrInc(hModule_, pDosHeader->e_lfanew));
+    const auto& peHeader = *PtrInc<IMAGE_NT_HEADERS*>(hModule_, pDosHeader->e_lfanew);
 
     if (peHeader.Signature == IMAGE_NT_SIGNATURE) {
       if (peHeader.OptionalHeader.Magic == IMAGE_NT_OPTIONAL_HDR32_MAGIC) {
@@ -444,17 +445,20 @@ Status PatchContext::SetModule(
   const char* pModuleName,
   bool        loadModule)
 {
-  RevertAll();
-  UnlockThreads();
-  ReleaseModule();
+  if (GetModuleHandleA(pModuleName) != hModule_) {
+    RevertAll();
+    UnlockThreads();
+    ReleaseModule();
 
-  status_       = Status::FailInvalidModule;
-  hModule_      = (loadModule && (pModuleName != nullptr)) ? LoadLibraryA(pModuleName) : GetModuleHandleA(pModuleName);
-  hasModuleRef_ =  loadModule && (pModuleName != nullptr) && (hModule_ != NULL);
-  moduleHash_   = CalculateModuleHash(hModule_);
-  moduleRelocDelta_ = 0;
+    status_       = Status::FailInvalidModule;
+    hModule_      = (loadModule && (pModuleName != nullptr)) ? LoadLibraryA(pModuleName): GetModuleHandleA(pModuleName);
+    hasModuleRef_ =  loadModule && (pModuleName != nullptr) && (hModule_ != NULL);
+    moduleHash_   = CalculateModuleHash(hModule_);
+    moduleRelocDelta_ = 0;
 
-  InitModule();
+    InitModule();
+  }
+
   return status_;
 }
 
@@ -463,17 +467,20 @@ Status PatchContext::SetModule(
   const void* hModule,
   bool        addReference)
 {
-  RevertAll();
-  UnlockThreads();
-  ReleaseModule();
+  if (GetModuleFromAddress(hModule) != hModule_) {
+    RevertAll();
+    UnlockThreads();
+    ReleaseModule();
 
-  status_           = Status::FailInvalidModule;
-  hModule_          = GetModuleFromAddress(hModule, addReference);
-  hasModuleRef_     = addReference && (hModule_ != NULL);
-  moduleHash_       = CalculateModuleHash(hModule_);
-  moduleRelocDelta_ = 0;
+    status_           = Status::FailInvalidModule;
+    hModule_          = GetModuleFromAddress(hModule, addReference);
+    hasModuleRef_     = addReference && (hModule_ != NULL);
+    moduleHash_       = CalculateModuleHash(hModule_);
+    moduleRelocDelta_ = 0;
 
-  InitModule();
+    InitModule();
+  }
+
   return status_;
 }
 
@@ -749,7 +756,7 @@ Status PatchContext::UnlockThreads() {
   frozenThreads_.clear();
 
   if (needsUnlock) {
-    assert(g_codeThreadLock.try_lock() == false);
+    const bool ignored = g_codeThreadLock.try_lock();
     g_codeThreadLock.unlock();
   }
 
@@ -872,7 +879,7 @@ uint32 PatchContext::BeginDeProtect(
     const HMODULE hDstModule = GetModuleFromAddress(pAddress);
     // Note:  Heap-allocated memory isn't associated with any module, in which case hModule will be set to nullptr.
     // Patching modules other than the one associated with this context is an error.
-    if ((hDstModule != nullptr) && (CalculateModuleHash(hDstModule) != moduleHash_)) {
+    if ((hDstModule != nullptr) && (hDstModule != hModule_)) {
       status_ = Status::FailInvalidPointer;
     }
   }
@@ -881,7 +888,7 @@ uint32 PatchContext::BeginDeProtect(
     // Query memory page protection information to determine how we need to barrier around making this memory writable.
     MEMORY_BASIC_INFORMATION memInfo;
 
-    if ((VirtualQuery(pAddress, &memInfo, sizeof(memInfo)) >= offsetof(MEMORY_BASIC_INFORMATION, Protect)) &&
+    if ((VirtualQuery(pAddress, &memInfo, sizeof(memInfo)) > offsetof(MEMORY_BASIC_INFORMATION, Protect)) &&
         (memInfo.State  == MEM_COMMIT) &&
         (memInfo.Protect > PAGE_NOACCESS))
     {
@@ -970,7 +977,7 @@ Status PatchContext::ReplaceReferencesToGlobal(
   }
 
   if (status_ == Status::Ok) {
-    const auto*const pRelocTable = static_cast<IMAGE_BASE_RELOCATION*>(PtrInc(hModule_, pRelocDataDir->VirtualAddress));
+    const auto*const pRelocTable = PtrInc<IMAGE_BASE_RELOCATION*>(hModule_, pRelocDataDir->VirtualAddress);
     const auto*      pCurBlock   = pRelocTable;
 
     // Iterate through relocation table blocks.  Each block typically represents 4096 bytes, e.g. 0x401000-0x402000.
@@ -978,7 +985,7 @@ Status PatchContext::ReplaceReferencesToGlobal(
            (static_cast<const void*>(pCurBlock) < PtrInc(pRelocTable, pRelocDataDir->Size)) &&
            (pCurBlock->SizeOfBlock != 0))
     {
-      const auto*const pRelocArray = static_cast<const RelocInfo*>(PtrInc(pCurBlock, sizeof(IMAGE_BASE_RELOCATION)));
+      const auto*const pRelocArray = PtrInc<RelocInfo*>(pCurBlock, sizeof(IMAGE_BASE_RELOCATION));
       const size_t     numRelocs   = ((pCurBlock->SizeOfBlock - sizeof(IMAGE_BASE_RELOCATION)) / sizeof(RelocInfo));
 
       // Iterate over relocations, find references to the global and replace them.
@@ -1023,14 +1030,12 @@ Status PatchContext::ReplaceReferencesToGlobal(
       }
 
       // Set pointer to next relocation table block.
-      pCurBlock = static_cast<const IMAGE_BASE_RELOCATION*>(PtrInc(pCurBlock, pCurBlock->SizeOfBlock));
+      pCurBlock = PtrInc<IMAGE_BASE_RELOCATION*>(pCurBlock, pCurBlock->SizeOfBlock);
     }
   }
 
   if (status_ != Status::Ok) {
-    for (auto it = (pRefsOut->begin() + startIndex); it != pRefsOut->end(); ++it) {
-      Revert(*it);
-    }
+    for (auto it = (pRefsOut->begin() + startIndex); it != pRefsOut->end(); Revert(*(it++)));
     pRefsOut->erase((pRefsOut->begin() + startIndex), pRefsOut->end());
   }
 
@@ -1155,7 +1160,7 @@ static void CopyInstructions(
     const auto& insn  = pInsns[i];
     const auto& bytes = insn.bytes;
 
-    uintptr pcRelTarget = 0;
+    ptrdiff_t pcRelTarget = 0;
 
     // Store mapping of the original instruction to the offset of the new instruction we're writing.
     offsetLut[curOldOffset] = static_cast<uint8>(PtrDelta(*ppWriter, pBegin));
@@ -1176,7 +1181,7 @@ static void CopyInstructions(
     }
     else if (bytes[0] == 0xEB) {
       CatByte(ppWriter, 0xE9);
-      pcRelTarget = bytes[1];
+      pcRelTarget = static_cast<int8>(bytes[1]);
     }
     // Conditional jump
     else if ((bytes[0] == 0x0F) && (bytes[1] >= 0x80) && (bytes[1] <= 0x8F)) {
@@ -1186,7 +1191,7 @@ static void CopyInstructions(
     }
     else if ((bytes[0] >= 0x70) && (bytes[0] <= 0x7F)) {
       CatBytes(ppWriter, { 0x0F, static_cast<uint8>(bytes[0] + 0x10) });
-      pcRelTarget = bytes[1];
+      pcRelTarget = static_cast<int8>(bytes[1]);
     }
     // Loop, jump if ECX == 0
     else if ((bytes[0] >= 0xE0) && (bytes[0] <= 0xE3)) {
@@ -1856,7 +1861,7 @@ static size_t CreateLowLevelHookTrampoline(
 
     if (BitFlagTest(options, LowLevelHookOpt::NoShortReturnAddr) == false) {
       CatValue(&pWriter, RelocateIntoTrampolineCodeChunkImage);
-      pRelocateCode->testAfterOverwrite.operand = reinterpret_cast<uint32>(PtrInc(pAddress, overwrittenSize));
+      pRelocateCode->testAfterOverwrite.operand                  = PtrInc<uint32>(pAddress, overwrittenSize);
       pRelocateCode->branch1.testBeforeOverwrite.operand         = reinterpret_cast<uint32>(pAddress);
       pRelocateCode->branch1.branch1A.subtractOldAddress.operand = reinterpret_cast<uint32>(pAddress);
       // We will defer initializing the offset LUT lookup operand until we know where the LUT will be placed.
@@ -2038,9 +2043,9 @@ Status PatchContext::EditExports(
       strncpy_s(
         &moduleName[0], sizeof(moduleName), static_cast<char*>(PtrInc(hModule_, pOldExportTable->Name)), _TRUNCATE);
 
-      auto*const pFunctions    = static_cast<uint32*>(PtrInc(hModule_, pOldExportTable->AddressOfFunctions));
-      auto*const pNames        = static_cast<uint32*>(PtrInc(hModule_, pOldExportTable->AddressOfNames));
-      auto*const pNameOrdinals = static_cast<uint16*>(PtrInc(hModule_, pOldExportTable->AddressOfNameOrdinals));
+      auto*const pFunctions    = PtrInc<uint32*>(hModule_, pOldExportTable->AddressOfFunctions);
+      auto*const pNames        = PtrInc<uint32*>(hModule_, pOldExportTable->AddressOfNames);
+      auto*const pNameOrdinals = PtrInc<uint16*>(hModule_, pOldExportTable->AddressOfNameOrdinals);
 
       // Copy the module's exports.
       exports.reserve(pOldExportTable->NumberOfFunctions + exportInfos.Length());
@@ -2129,11 +2134,11 @@ Status PatchContext::EditExports(
 
     if (pAllocation != nullptr) {
       auto*const  pHeader              = static_cast<IMAGE_EXPORT_DIRECTORY*>(pAllocation);
-      auto*const  pAddressTable        = static_cast<uint32*>(PtrInc(pAllocation,     HeaderSize));        // By RVA
-      auto*       pNameTable           = static_cast<uint32*>(PtrInc(pAddressTable,   addressTableSize));  // By RVA
-      auto*       pNameOrdinalTable    = static_cast<uint16*>(PtrInc(pNameTable,      namePtrTableSize));
-      auto*       pStringBuffer        = static_cast<char*>(PtrInc(pNameOrdinalTable, nameOrdinalTableSize));
-      auto*       pForwardStringBuffer = static_cast<char*>(PtrInc(pStringBuffer,     totalNameStrlen));
+      auto*const  pAddressTable        = PtrInc<uint32*>(pAllocation,     HeaderSize);        // By RVA
+      auto*       pNameTable           = PtrInc<uint32*>(pAddressTable,   addressTableSize);  // By RVA
+      auto*       pNameOrdinalTable    = PtrInc<uint16*>(pNameTable,      namePtrTableSize);
+      auto*       pStringBuffer        = PtrInc<char*>(pNameOrdinalTable, nameOrdinalTableSize);
+      auto*       pForwardStringBuffer = PtrInc<char*>(pStringBuffer,     totalNameStrlen);
 
       // Initialize the Export Directory Table header.
       pHeader->Characteristics       = (pOldExportTable != nullptr) ? pOldExportTable->Characteristics : 0;

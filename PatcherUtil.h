@@ -1,6 +1,6 @@
 /*
  ***********************************************************************************************************************
- * Copyright (c) 2020, Brad Dorney
+ * Copyright (c) 2021, Brad Dorney
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without modification, are permitted provided that the
@@ -39,6 +39,7 @@
 
 // Defines
 
+// Compiler/ABI detection
 #if (defined(PATCHER_CLANG) || defined(PATCHER_ICC) || defined(PATCHER_GCC) || defined(PATCHER_MSVC)) == false
 # if   defined(__clang__) || defined(__INTEL_CLANG_COMPILER)
 #  define PATCHER_CLANG  1
@@ -50,7 +51,7 @@
 #  define PATCHER_MSVC   1
 # endif
 #endif
-#define  PATCHER_GXX    (PATCHER_GCC || PATCHER_CLANG || PATCHER_ICC)
+#define  PATCHER_GXX     (PATCHER_GCC || PATCHER_CLANG || PATCHER_ICC)
 
 #if (defined(PATCHER_MS_ABI) || defined(PATCHER_UNIX_ABI)) == false
 # if   defined(_MSC_VER) || defined(__ICL)
@@ -60,6 +61,7 @@
 # endif
 #endif
 
+// Build settings detection
 #if PATCHER_MSVC && defined(_DEBUG) && (defined(PATCHER_INCREMENTAL_LINKING) == false)
 # define PATCHER_INCREMENTAL_LINKING  1  // MSVC incremental linking is typically on in debug builds and off in release.
 #endif
@@ -75,6 +77,7 @@
 # define PATCHER_UNSAFE_TRY(...)     { __VA_ARGS__; }
 #endif
 
+// Architecture detection
 #if (defined(PATCHER_X86_32) || defined(PATCHER_X86_64)) == false
 # if   defined(_M_IX86) || (defined(__i386__) && (defined(__x86_64__) == false))
 #  define PATCHER_X86_32  1
@@ -82,8 +85,9 @@
 #  define PATCHER_X86_64  1
 # endif
 #endif
-#define  PATCHER_X86     (PATCHER_X86_32 || PATCHER_X86_64)
+#define  PATCHER_X86      (PATCHER_X86_32 || PATCHER_X86_64)
 
+// Calling conventions.  These are ignored if they do not exist for the given target ISA and build config.
 #if PATCHER_MSVC || defined(__ICL)
 # define  PATCHER_CDECL       __cdecl
 # define  PATCHER_STDCALL     __stdcall
@@ -198,17 +202,17 @@ enum class Call : uint32 {
 template <Call C>  struct AsCall{};
 
 ///@{ Pointer arithmetic helpers.
-inline void*       PtrInc(void*       p, size_t offset) { return static_cast<uint8*>(p)       + offset; }
-inline const void* PtrInc(const void* p, size_t offset) { return static_cast<const uint8*>(p) + offset; }
+template <typename T = void*>       T PtrInc(void*       p, size_t offset) { return T((uint8*)(p)       + offset); }
+template <typename T = const void*> T PtrInc(const void* p, size_t offset) { return T((const uint8*)(p) + offset); }
 
-inline void*       PtrDec(void*       p, size_t offset) { return static_cast<uint8*>(p)       - offset; }
-inline const void* PtrDec(const void* p, size_t offset) { return static_cast<const uint8*>(p) - offset; }
+template <typename T = void*>       T PtrDec(void*       p, size_t offset) { return T((uint8*)(p)       - offset); }
+template <typename T = const void*> T PtrDec(const void* p, size_t offset) { return T((const uint8*)(p) - offset); }
 
-inline size_t      PtrDelta(const void* pHigh, const void* pLow)
+inline size_t PtrDelta(const void* pHigh, const void* pLow)
   { return static_cast<size_t>(static_cast<const uint8*>(pHigh) - static_cast<const uint8*>(pLow)); }
 
 template <typename T = uint32>  T PcRelPtr(const void* pFrom, size_t fromSize, const void* pTo)
-  { return (T)(PtrDelta(pTo, PtrInc(pFrom, fromSize))); }  // C-style cast works for both T as integer or pointer type.
+  { return T(PtrDelta(pTo, PtrInc(pFrom, fromSize))); }  // C-style cast works for both T as integer or pointer type.
 template <typename R = uint32, typename T>
 R PcRelPtr(const T* pFrom, const void* pTo) { return PcRelPtr<R>(pFrom, sizeof(T), pTo); }
 ///@}
@@ -472,7 +476,7 @@ private:
 class FunctionPtr {
   using Call = Util::Call;
 public:
-  template <typename StlFunction> using GetTargetFunc = void*(StlFunction* pStlFunction);  ///< Returns target()
+  template <typename StlFunction> using GetTargetFunc = void*(StlFunction* pStlFunction);  ///< Returns stdfunc.target()
   using FunctorDeleterFunc = void(void* pFunctor);
 
   /// Conversion constructor for void pointers.  Used when referencing e.g. JIT-compiled code.
@@ -506,13 +510,15 @@ public:
       pState_((pfnTarget && pObj_) ? pfnTarget(static_cast<Fn*>(pObj_)) : nullptr),
       pfnDel_([](void* pObj) { delete static_cast<Fn*>(pObj); }) { }
 
+  /// Frees any memory allocated by this FunctionPtr.  (Only relevant when backed by std::function.)
+  void Destroy() const { if ((pfnDel_ != nullptr) && (pObj_ != nullptr)) { pfnDel_(pObj_); } }
+
   constexpr operator       const void*() const { return pfn_;    }  ///< Implicit pointer conversion, yielding Pfn().
   constexpr const void*            Pfn() const { return pfn_;    }  ///< Gets a pointer to the underlying function.
   constexpr const RtFuncSig& Signature() const { return sig_;    }  ///< Gets function call signature information.
   constexpr void*              Functor() const { return pObj_;   }  ///< Gets the functor obj to call with, if needed.
   constexpr void*         FunctorState() const { return pState_; }  ///< Gets the functor obj internal state data.
   FunctorDeleterFunc*   FunctorDeleter() const { return pfnDel_; }  ///< Gets the functor obj deleter function.
-  void   Destroy() const { if (pfnDel_ && pObj_) pfnDel_(pObj_); }  ///< Deletes the functor obj, if needed.
 
 private:
   template <typename T>  using StlFunctionForFunctor = std::function<typename FuncTraitsNoThis<T>::Function>;
@@ -697,6 +703,7 @@ public:
   template <typename... Ts>  constexpr ConstArray(Ts... e) : data_{ T(e)... }, size_(sizeof...(e)) { }
   constexpr operator const Array<T, MaxSize>&() const { return data_; }  ///< Array conversion, provides operator[].
   constexpr size_t Size()                       const { return size_; }  ///< Size in elements.
+
 private:
   const T       data_[MaxSize];
   const size_t  size_;
@@ -707,6 +714,7 @@ private:
 template <typename T, bool = std::is_polymorphic<T>::value>
 struct DummyFactory { static T* Create(void* pPlacementAddr) { return nullptr; } static void Destroy(const void*) { } };
 
+// Used by DummyFactory::MatchCtor to find user-defined constructors.
 struct DummyArg {
   // Making this conversion operator const prevents ambiguous call errors with the other (preferred) conversion.
   template <typename T, typename = EnableIf<std::is_const<T>::value == false>>
@@ -734,7 +742,7 @@ struct DummyFactory<T, true> {
 
   // Try to use default constructor, or any user-defined constructor up to 25 params (unless it's an ambiguous call)
   // Warning:  If using non-default constructor, zeroed buffers as args may be unsafe depending on the implementation!
-  template <typename U = T>  static auto Create(void* pPlacementAddr) -> EnableIf<UseCopyMove<U>() == 0, T*>
+  template <typename U = T>  static auto Create(void* pPlacementAddr) -> EnableIf<UseCopyMove<U>() == false, T*>
     { return MatchCtor<>::Create(pPlacementAddr); }
 
   template <typename U = T>

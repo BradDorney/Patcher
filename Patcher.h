@@ -1,6 +1,6 @@
 /*
  ***********************************************************************************************************************
- * Copyright (c) 2020, Brad Dorney
+ * Copyright (c) 2021, Brad Dorney
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without modification, are permitted provided that the
@@ -116,9 +116,9 @@ public:
   /// @param [in]  pfnTrampolineOffset  (Optional) Offset or pointer-to-member into pfnNewFunction's functor object
   ///                                   state to pfnTrampoline.  Use SetCapturedTrampoline for the first lambda capture.
   ///
-  /// Examples:  Hook(&Function,   &NewFunction,                  &global_pfnOriginal)
+  /// Examples:  Hook(&Function,   &NewFunction)
   ///            Hook(0x439AB0,    0x439AF2,                      &global_pfnOriginal)
-  ///            Hook(0x507470,    Util::SetCapturedTrampoline,   [F = (int(*)(int))0](int a) -> int { return F(a*2); })
+  ///            Hook(&Fn,         Util::SetCapturedTrampoline,   [F = decltype(&Fn)0](int a) -> int { return F(a*2); })
   ///            Hook(&StdcallFn,  &Functor::member_pfnOriginal,  Util::StdcallFunctor(Functor{}))
   ///         ** Hook(&Class::Fn,  &HookClass::Fn,                &HookClass::static_pfnOriginal)
   ///         ** Hook(&Class::Fn,  Util::ThiscallLambdaPtr([](Class* pThis, int a) { return pThis->b - a; }))

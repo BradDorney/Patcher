@@ -112,7 +112,7 @@
 # define  PATCHER_SSEREGPARM  PATCHER_ATTRIBUTE(__sseregparm__)
 
 # define  PATCHER_ATTRIBUTE(attr)        PATCHER_ATTR_IMPL1((__has_attribute(attr), __attribute((attr))))
-# define  PATCHER_ATTR_PARM(attr, ...)   PATCHER_ATTR_IMPL1((__has_attribute(attr), __attribute((attr(__VA_ARGS__))))
+# define  PATCHER_ATTR_PARM(attr, ...)   PATCHER_ATTR_IMPL1((__has_attribute(attr), __attribute((attr(__VA_ARGS__)))))
 # define  PATCHER_ATTR_IMPL1(args)       PATCHER_ATTR_IMPL2 args
 # define  PATCHER_ATTR_IMPL2(has, attr)  PATCHER_ATTR_EXPAND_##has(attr)
 # define  PATCHER_ATTR_EXPAND_1(attr)    attr
@@ -295,9 +295,10 @@ namespace Util {
 ///@{ Converts a non-capturing lambda or stateless functor to a function pointer (of the specified calling convention).
 ///   The returned function pointer can be passed to PatchContext methods, as well as having general callable uses.
 #define PATCHER_LAMBDA_PTR_DEF(convention, name)  \
-template <typename T>          PATCHER_INVOKE(name)  name##LambdaPtr(T) { return &Impl::LambdaInvoker<T>::name;        }
-template <typename T>          PATCHER_INVOKE(Default)     LambdaPtr(T) { return &Impl::LambdaInvoker<T>::Default;     }
-template <Call C, typename T>  PATCHER_INVOKE(Enum<C>::Fn) LambdaPtr(T) { return &Impl::LambdaInvoker<T>::Enum<C>::Fn; }
+template <typename T>  PATCHER_INVOKE(name)  name##LambdaPtr(T) { return &Impl::LambdaInvoker<T>::name;    }
+template <typename T>  PATCHER_INVOKE(Default)     LambdaPtr(T) { return &Impl::LambdaInvoker<T>::Default; }
+template <Call C, typename T>
+PATCHER_INVOKE(template Enum<C>::Fn)  LambdaPtr(T) { return &Impl::LambdaInvoker<T>::template Enum<C>::Fn; }
 PATCHER_EMIT_CALLING_CONVENTIONS(PATCHER_LAMBDA_PTR_DEF);
 ///@}
 

@@ -155,7 +155,6 @@ public:
     }
   }
 
-  // Disassembles a number of instructions.
   std::vector<cs_insn> Disassemble(const void* pAddress, size_t numInsns) const {
     std::vector<cs_insn> out;
     out.reserve(numInsns);
@@ -685,7 +684,6 @@ static constexpr uintptr GetProgramCounter(
 #elif PATCHER_X86_64
   return static_cast<uintptr>(context.Rip);
 #else
-  assert(false);
   return 0;
 #endif
 }

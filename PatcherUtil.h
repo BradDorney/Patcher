@@ -51,7 +51,7 @@
 #  define PATCHER_MSVC   1
 # endif
 #endif
-#define  PATCHER_GXX     (PATCHER_GCC || PATCHER_CLANG || PATCHER_ICC)
+#define   PATCHER_GXX    (PATCHER_GCC || PATCHER_CLANG || PATCHER_ICC)
 
 #if (defined(PATCHER_MS_ABI) || defined(PATCHER_UNIX_ABI)) == false
 # if   defined(_MSC_VER) || defined(__ICL)
@@ -85,7 +85,7 @@
 #  define PATCHER_X86_64  1
 # endif
 #endif
-#define  PATCHER_X86      (PATCHER_X86_32 || PATCHER_X86_64)
+#define   PATCHER_X86     (PATCHER_X86_32 || PATCHER_X86_64)
 
 // Calling conventions.  These are ignored if they do not exist for the given target ISA and build config.
 #if PATCHER_MSVC || defined(__ICL)

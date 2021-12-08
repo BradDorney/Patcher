@@ -32,6 +32,7 @@
 #include <utility>
 #include <initializer_list>
 #include <functional>
+#include <memory>
 
 #include <cstdint>
 #include <cassert>
@@ -77,6 +78,18 @@
 # define PATCHER_UNSAFE_TRY(...)     { __VA_ARGS__; }
 #endif
 
+#if PATCHER_MSVC
+# define PATCHER_PRAGMA(expr)                      __pragma(expr)
+# define PATCHER_IGNORE_GCC_WARNING(warning, ...)  __VA_ARGS__
+#else
+# define PATCHER_PRAGMA(expr)                      _Pragma(#expr)
+# define PATCHER_IGNORE_GCC_WARNING(warning, ...)  \
+  PATCHER_PRAGMA(GCC diagnostic push)              \
+  PATCHER_PRAGMA(GCC diagnostic ignored warning)   \
+  __VA_ARGS__                                      \
+  PATCHER_PRAGMA(GCC diagnostic pop)
+#endif
+
 // Architecture detection
 #if (defined(PATCHER_X86_32) || defined(PATCHER_X86_64)) == false
 # if   defined(_M_IX86) || (defined(__i386__) && (defined(__x86_64__) == false))
@@ -119,19 +132,6 @@
 # define  PATCHER_ATTR_EXPAND_0(attr)
 #endif
 
-#if PATCHER_MSVC
-# define PATCHER_PRAGMA(expr)                      __pragma(expr)
-# define PATCHER_IGNORE_GCC_WARNING(warning, ...)  __VA_ARGS__
-#else
-# define PATCHER_PRAGMA(expr)                      _Pragma(#expr)
-# define PATCHER_IGNORE_GCC_WARNING(warning, ...)  \
-  PATCHER_PRAGMA(GCC diagnostic push)              \
-  PATCHER_PRAGMA(GCC diagnostic ignored warning)   \
-  __VA_ARGS__                                      \
-  PATCHER_PRAGMA(GCC diagnostic pop)
-#endif
-
-
 #define PATCHER_EMIT_CALLING_CONVENTIONS($)  PATCHER_IGNORE_GCC_WARNING("-Wignored-attributes",         \
   $(PATCHER_CDECL,       Cdecl)     $(PATCHER_STDCALL,    Stdcall)     $(PATCHER_FASTCALL,   Fastcall)  \
   $(PATCHER_THISCALL,    Thiscall)  $(PATCHER_VECTORCALL, Vectorcall)  $(PATCHER_REGCALL,    Regcall)   \
@@ -157,7 +157,6 @@ enum class PatcherStatus : int32_t {
   FailInvalidModule   = -12,
 };
 
-
 namespace Patcher {
 
 // Typedefs
@@ -175,18 +174,22 @@ using uintptr = uintptr_t;
 /// Forward declaration of Registers::Register enum class, an array of which is passed to PatchContext::LowLevelHook().
 namespace Registers { enum class Register : uint8; }
 
-namespace Util {
-/// Constant to specify to PatchContext::Hook() that the first lambda capture (which must be by value) is pfnTrampoline.
-/// For other functor types, it is recommended that you use a pointer-to-member-variable or offsetof() instead.
-constexpr size_t SetCapturedTrampoline = 0;
+/// Info about registers requested by LowLevelHook().
+struct RegisterInfo {
+  Registers::Register regType;      ///< Register type.
+  bool                byReference;  ///< Pass register by reference for writing? (Not needed with stack values)
+  uint32              offset;       ///< (Stack only) Offset into the stack associated with this value?
+};
 
 /// Enum specifying a function's calling convention.
 enum class Call : uint32 {
 #define PATCHER_CALLING_CONVENTION_ENUM_DEF(conv, name) name,
 #define PATCHER_DEFAULT_CALLING_CONVENTION_ENUM_DEF(conv, name) std::is_same<void(*)(), void(conv*)()>::value ? name :
 
-  Unknown    = 0,
+  Unknown = 0,
   PATCHER_EMIT_CALLING_CONVENTIONS(PATCHER_CALLING_CONVENTION_ENUM_DEF)
+  Count,
+
   Default    = PATCHER_EMIT_CALLING_CONVENTIONS(PATCHER_DEFAULT_CALLING_CONVENTION_ENUM_DEF) Unknown,
 #if   PATCHER_MS_ABI
   Membercall = Thiscall,
@@ -197,6 +200,11 @@ enum class Call : uint32 {
 #endif
   Variadic   = Cdecl,
 };
+
+namespace Util {
+/// Constant to specify to PatchContext::Hook() that the first lambda capture (which must be by value) is pfnTrampoline.
+/// For other functor types, it is recommended that you use a pointer-to-member-variable or offsetof() instead.
+constexpr size_t SetCapturedTrampoline = 0;
 
 /// Templated dummy parameter type that can be used to pass a calling convention as a templated function argument.
 template <Call C>  struct AsCall{};
@@ -211,9 +219,9 @@ template <typename T = const void*> T PtrDec(const void* p, size_t offset) { ret
 inline size_t PtrDelta(const void* pHigh, const void* pLow)
   { return static_cast<size_t>(static_cast<const uint8*>(pHigh) - static_cast<const uint8*>(pLow)); }
 
-template <typename T = uint32>  T PcRelPtr(const void* pFrom, size_t fromSize, const void* pTo)
+template <typename T = int32>  T PcRelPtr(const void* pFrom, size_t fromSize, const void* pTo)
   { return T(PtrDelta(pTo, PtrInc(pFrom, fromSize))); }  // C-style cast works for both T as integer or pointer type.
-template <typename R = uint32, typename T>
+template <typename R = int32, typename T>
 R PcRelPtr(const T* pFrom, const void* pTo) { return PcRelPtr<R>(pFrom, sizeof(T), pTo); }
 ///@}
 
@@ -272,16 +280,19 @@ PATCHER_EMIT_PMF_QUALIFIERS(PATCHER_LAMBDA_INVOKER_PMF_DEF);
 template <typename Lambda, typename Return, typename... Args>
 struct LambdaInvokerImpl<Return(Lambda::*)(Args...), true> {
   static constexpr Lambda* GetInvoker() { return nullptr; }
-  template <Util::Call C>  struct Enum{};
+  template <Call C>  struct As{};
 
 #define PATCHER_LAMBDA_INVOKER_CONVERSION_DEF(convention, name)                                      \
-  template <>  struct Enum<Util::Call::name>                                                         \
+  template <>  struct As<Call::name>                                                                 \
     { static Return convention    Fn(Args... args) { return GetInvoker()->operator()(args...); } };  \
   static     Return convention  name(Args... args) { return GetInvoker()->operator()(args...); }
   static     Return          Default(Args... args) { return GetInvoker()->operator()(args...); }
   PATCHER_EMIT_CALLING_CONVENTIONS(PATCHER_LAMBDA_INVOKER_CONVERSION_DEF);
 };
 ///@}
+
+/// Forward declation of template subclass of FunctionPtr that can be implicitly converted to a function pointer.
+template <typename T, Call Convention = Call::Cdecl>  class FunctorImpl;
 } // Impl
 
 namespace Util {
@@ -298,21 +309,25 @@ namespace Util {
 template <typename T>  PATCHER_INVOKE(name)  name##LambdaPtr(T) { return &Impl::LambdaInvoker<T>::name;    }
 template <typename T>  PATCHER_INVOKE(Default)     LambdaPtr(T) { return &Impl::LambdaInvoker<T>::Default; }
 template <Call C, typename T>
-PATCHER_INVOKE(template Enum<C>::Fn)  LambdaPtr(T) { return &Impl::LambdaInvoker<T>::template Enum<C>::Fn; }
+PATCHER_INVOKE(template As<C>::Fn)      LambdaPtr(T) { return &Impl::LambdaInvoker<T>::template As<C>::Fn; }
 PATCHER_EMIT_CALLING_CONVENTIONS(PATCHER_LAMBDA_PTR_DEF);
 ///@}
 
+
 ///@{ Converts any (non-overloaded) lambda or functor to a FunctionPtr object of the specified calling convention.
-///   Use this only to pass capturing lambdas or state-bound functors to PatchContext Hook methods.
+///   This can be passed to Hook and Write, be used as a callable, and implicitly converts to a function pointer.
+///   If created from a non-empty type, then the returned FunctionPtr needs to be kept alive or referenced by a patch.
 #define PATCHER_CREATE_FUNCTOR_INVOKER_DEF(convention, name)  template <typename T>  \
-Impl::FunctionPtr name##Functor(T&& f) { return Impl::FunctionPtr(std::forward<T>(f), AsCall<Call::name>{}); }
+Impl::FunctorImpl<T, Call::name> name##Functor(T&& f) { return Impl::FunctorImpl<T, Call::name>(std::forward<T>(f)); }
+template <Call C = Call::Default, typename T = void>
+Impl::FunctorImpl<T, C>                Functor(T&& f) { return Impl::FunctorImpl<T, C>(std::forward<T>(f));          }
 PATCHER_EMIT_CALLING_CONVENTIONS(PATCHER_CREATE_FUNCTOR_INVOKER_DEF);
 ///@}
 
 /// Cast pointer-to-member-function to a standard pointer-to-function using the thiscall convention.
 /// @note  If not compiling using GCC or ICC, for virtual PMFs, either an object instance must be provided, or a dummy
 ///        object instance will be attempted to be created (may be unsafe!).  Class cannot multiply inherit.
-/// @see   MFN_PTR() macro, which provides more flexibility for some compilers and sometimes expands to this function.
+/// @see   PATCHER_MFN_PTR() macro, which is more robust for certain compilers and more reliable for virtual methods.
 template <typename T, typename Pfn>
 auto   PmfCast(Pfn T::* pmf, const T* pThis = nullptr) -> typename Impl::FuncTraits<decltype(pmf)>::Pfn;
 
@@ -343,20 +358,20 @@ template <typename T>  constexpr size_t ArgSize()
 // ** TODO add vector type detection
 template <typename T>  constexpr bool IsVectorArg() { return std::is_floating_point<T>::value; }
 
-///@{ @internal  Helper metafunctions for converting function types to function pointers of other calling conventions.
-template <typename T, Util::Call C>  struct AddConvImpl{};
-template <typename T, Util::Call C>  using  AddConvention = typename AddConvImpl<Decay<T>, C>::Type;
+///@{ @internal  AddConvention helper to convert function types to function pointers of other calling conventions.
+template <typename T, Call C>  struct AddConvImpl{};
+template <typename T, Call C>  using  AddConvention = typename AddConvImpl<Decay<T>, C>::Type;
 
 #define PATCHER_ADD_CONVENTION_DEF(conv, name) \
-template <typename R, typename... A>  struct AddConvImpl<R(*)(A...), Util::Call::name> { using Type = R(conv*)(A...); };
-template <typename R, typename... A>  struct AddConvImpl<R(*)(A...), Util::Call::Unknown> { using Type = R(*)(A...);  };
-template <typename R, typename... A, Util::Call C>
+template <typename R, typename... A>  struct AddConvImpl<R(*)(A...), Call::name>    { using Type = R(conv*)(A...); };
+template <typename R, typename... A>  struct AddConvImpl<R(*)(A...), Call::Unknown> { using Type = R(*)(A...);     };
+template <typename R, typename... A, Call C>
 struct AddConvImpl<R(*)(A..., ...), C> { using Type = R(*)(A..., ...); };
 PATCHER_EMIT_CALLING_CONVENTIONS(PATCHER_ADD_CONVENTION_DEF);
 ///@}
 
 ///@{ @internal  Template that defines typed function call signature information for use at compile time.
-template <typename R, Util::Call Call = Util::Call::Default, bool Variadic = false, typename T = void, typename... A>
+template <typename R, Call Call = Call::Default, bool Variadic = false, typename T = void, typename... A>
 struct FuncSig {
   static constexpr size_t NumParams = std::is_void<T>::value ? 0 : (sizeof...(A) + 1);  ///< Number of function params.
   using Function = Conditional<NumParams == 0, R(A...), R(T, A...)>;                    ///< Signature w/o convention.
@@ -369,11 +384,11 @@ struct FuncSig {
   static constexpr bool   IsVariadic      = Variadic;                                   ///< Is function variadic?
   static constexpr auto   Convention      = Call;                                       ///< Calling convention.
 
-  using StripThis = Conditional<  ///< If Convention is Thiscall, returns a FuncSig with the "this" parameter removed.
-    Call != Util::Call::Unknown, FuncSig<R, Util::Call::Unknown, Variadic, A...>, FuncSig<R, Call, Variadic, T, A...>>;
+  using StripThis = Conditional<  ///< Returns a FuncSig with the "this" (first) parameter removed.
+    Call != Call::Unknown, FuncSig<R, Call::Unknown, Variadic, A...>, FuncSig<R, Call, Variadic, T, A...>>;
 };
 
-template <typename R, Util::Call Call, typename T, typename... A>
+template <typename R, Call Call, typename T, typename... A>
 struct FuncSig<R, Call, true, T, A...> : public FuncSig<R, Call, false, T, A...> {
   using First    = Conditional<std::is_void<T>::value, int, T>;                       ///< Placeholder for first param.
   using Function = Conditional<std::is_void<T>::value, R(...), R(First, A..., ...)>;  ///< Signature w/o convention.
@@ -385,7 +400,7 @@ struct FuncSig<R, Call, true, T, A...> : public FuncSig<R, Call, false, T, A...>
 /// @internal  Defines untyped function call signature information for use at runtime.
 struct RtFuncSig {
   /// Conversion constructor for the compile-time counterpart to this type, FuncSig.
-  template <typename R, Util::Call C, bool V, typename... A>
+  template <typename R, Call C, bool V, typename... A>
   constexpr RtFuncSig(const FuncSig<R, C, V, A...>&)
     : returnSize(SizeOfType<R>()),
       numParams(FuncSig<R, C, V, A...>::NumParams),
@@ -405,20 +420,20 @@ struct RtFuncSig {
   const bool*    pParamIsVector;  ///< Specifies whether each parameter is floating-point/intrinsic vector type.
   size_t         totalParamSize;  ///< Total size in bytes of all @ref numParams parameters and alignment padding.
   bool           isVariadic;      ///< Specifies whether this is a variadic function.
-  Util::Call     convention;      ///< Function calling convention.
+  Call           convention;      ///< Function calling convention.
 };
 
-///@{ @internal  Template metafunction used to obtain function call signature information from a callable.
+///@{ @internal  FuncTraitsImpl template metafunction used to obtain function call signature information from a callable
 #define PATCHER_FUNC_TRAITS_DEF(con, name)  template <typename R, typename... A>  struct FuncTraitsImpl<R(con*)(A...), \
-  Conditional<(Util::Call::Default == Util::Call::name) || (std::is_same<void(*)(), void(con*)()>::value == false), \
-              void, Util::AsCall<Util::Call::name>>> { using Type = FuncSig<R, Util::Call::name, false, A...>; };
+  Conditional<(Call::Default == Call::name) || (std::is_same<void(*)(), void(con*)()>::value == false),                \
+              void, Util::AsCall<Call::name>>> { using Type = FuncSig<R, Call::name, false, A...>; };
 #define PATCHER_FUNC_TRAITS_PMF_DEF(pThisQual, ...)  \
 template <typename R, typename T, typename... A> struct FuncTraitsImpl<R(T::*)(A...)      pThisQual __VA_ARGS__, void> \
-  { using Type = FuncSig<R, Util::Call::Membercall, false, pThisQual T*, A...>; };                                     \
+  { using Type = FuncSig<R, Call::Membercall, false, pThisQual T*, A...>; };                                           \
 template <typename R, typename T, typename... A> struct FuncTraitsImpl<R(T::*)(A..., ...) pThisQual __VA_ARGS__, void> \
-  { using Type = FuncSig<R, Util::Call::Variadic,   true,  pThisQual T*, A...>; };
+  { using Type = FuncSig<R, Call::Variadic,   true,  pThisQual T*, A...>; };
 template <typename R,             typename... A> struct FuncTraitsImpl<R(*)(A..., ...)>
-  { using Type = FuncSig<R, Util::Call::Variadic,   true,                A...>; };
+  { using Type = FuncSig<R, Call::Variadic,   true,                A...>; };
 PATCHER_EMIT_CALLING_CONVENTIONS(PATCHER_FUNC_TRAITS_DEF);
 PATCHER_EMIT_PMF_QUALIFIERS(PATCHER_FUNC_TRAITS_PMF_DEF);
 PATCHER_FUNC_TRAITS_PMF_DEF(,);
@@ -442,7 +457,7 @@ private:
 class TargetPtr {
 public:
   /// Conversion constructor for plain pointers.  Defaults to not relocated.
-  constexpr TargetPtr(void*  pAddress, bool relocate = false) : pAddress_(pAddress), relocate_(relocate) { }
+  constexpr TargetPtr(void* pAddress = nullptr, bool relocate = false) : pAddress_(pAddress), relocate_(relocate) { }
 
   /// Conversion constructor for raw uint addresses.  Defaults to relocated.
   constexpr TargetPtr(uintptr address, bool relocate = true)  :  address_(address),  relocate_(relocate) { }
@@ -473,53 +488,49 @@ private:
 };
 
 /// Type erasure wrapper for function pointer arguments passed to PatchContext.  Can implicitly convert most callables.
-/// @note PatchContext, not this class, takes responsibility for calling Destroy() to free memory if needed.
+/// With non-empty callable types, the object and its lifetime become bound to this and any patches referencing it.
 class FunctionPtr {
-  using Call = Util::Call;
 public:
   template <typename StlFunction> using GetTargetFunc = void*(StlFunction* pStlFunction);  ///< Returns stdfunc.target()
-  using FunctorDeleterFunc = void(void* pFunctor);
 
   /// Conversion constructor for void pointers.  Used when referencing e.g. JIT-compiled code.
-  constexpr FunctionPtr(const void* pFunction) : pfn_(pFunction), sig_(), pObj_(), pState_(), pfnDel_() { }
+  constexpr FunctionPtr(const void* pFunction) : pfn_(pFunction), sig_(), pObj_(), pState_() { }
 
   /// Conversion constructor for function pointers.
   template <typename T, typename = EnableIf<std::is_function<T>::value>>
   constexpr FunctionPtr(T* pfn)  // C-style cast due to constexpr quirks.
-    : pfn_((void*)(pfn)), sig_(FuncTraits<T>{}), pObj_(), pState_(), pfnDel_() { }
+    : pfn_((void*)(pfn)), sig_(FuncTraits<T>{}), pObj_(), pState_() { }
 
   /// Conversion constructor for pointers-to-member-functions.
-  /// @note Consider using the MFN_PTR() macro, which is more robust than PmfCast() which backs this constructor.
+  /// @ref pThis can be optionally provided to help look up the function address.  However, that will not bind pThis to
+  /// this FunctionPtr as its functor object; to do that, consider constructing a FunctionPtr from e.g. std::bind().
+  /// @note Consider using the PATCHER_MFN_PTR() macro, which is more robust than PmfCast() backing this constructor.
   template <typename T, typename Pfn, typename = EnableIf<std::is_function<Pfn>::value>>
   FunctionPtr(Pfn T::*pmf, const T* pThis = nullptr)
-    : pfn_((void*)(Util::PmfCast(pmf, pThis))), sig_(FuncTraits<decltype(pmf)>{}), pObj_(), pState_(), pfnDel_() { }
+    : pfn_((void*)(Util::PmfCast(pmf, pThis))), sig_(FuncTraits<decltype(pmf)>{}), pObj_(), pState_() { }
 
-  /// Conversion constructor for (non-overloaded) functors and lambas, using the cdecl convention by default.
-  /// @note If this is a capturing lambda or state-bound functor, then this will chain to the std::function conversion.
+  /// Conversion constructor for callable objects.  This works with lambdas, std::bind, (non-overloaded) functors, etc.
+  /// @note To hook T::operator() itself, consider constructing a FunctionPtr from &T::operator().
   template <
     typename T, Call C = Call::Cdecl, typename E = typename std::is_empty<T>::type, typename = decltype(&T::operator())>
   constexpr FunctionPtr(T&& functor, Util::AsCall<C> call = {}) : FunctionPtr(std::forward<T>(functor), call, E{}) { }
 
-  /// Conversion constructor for std::function, using the cdecl convention by default.
+  /// Conversion constructor for std::function.
   /// @note Conventions that use vector registers (vectorcall, sseregparm, regcall) are currently not supported.
   template <typename R, typename... A, typename Fn = std::function<R(A...)>, Call C = Call::Cdecl>
   FunctionPtr(
-    std::function<R(A...)> functor, Util::AsCall<C> = {}, GetTargetFunc<decltype(functor)>* pfnTarget = nullptr)
-    : pfn_(reinterpret_cast<void*>(&InvokeFunctor<Fn, R, A...>)),
-      sig_(FuncSig<R, C, false, const Fn*, void*, A...>{}),
-      pObj_(new Fn(std::move(functor))),
-      pState_((pfnTarget && pObj_) ? pfnTarget(static_cast<Fn*>(pObj_)) : nullptr),
-      pfnDel_([](void* pObj) { delete static_cast<Fn*>(pObj); }) { }
-
-  /// Frees any memory allocated by this FunctionPtr.  (Only relevant when backed by std::function.)
-  void Destroy() const { if ((pfnDel_ != nullptr) && (pObj_ != nullptr)) { pfnDel_(pObj_); } }
+    std::function<R(A...)> functor, Util::AsCall<C> = {}, GetTargetFunc<decltype(functor)>* pfnGetTarget = nullptr)
+    : pfn_(), sig_(FuncSig<R, C, false, const Fn*, void*, A...>{}), pObj_(), pState_()
+  {
+    InitFunctorThunk(new Fn(std::move(functor)), [](void* p) { delete (Fn*)p; }, (void*)(&InvokeFunctor<Fn, R, A...>));
+    pState_ = ((pfnGetTarget != nullptr) && (pObj_ != nullptr)) ? pfnGetTarget(static_cast<Fn*>(pObj_.get())) : nullptr;
+  }
 
   constexpr operator       const void*() const { return pfn_;    }  ///< Implicit pointer conversion, yielding Pfn().
   constexpr const void*            Pfn() const { return pfn_;    }  ///< Gets a pointer to the underlying function.
   constexpr const RtFuncSig& Signature() const { return sig_;    }  ///< Gets function call signature information.
-  constexpr void*              Functor() const { return pObj_;   }  ///< Gets the functor obj to call with, if needed.
+  std::shared_ptr<void>        Functor() const { return pObj_;   }  ///< Gets the functor obj to call with, if present.
   constexpr void*         FunctorState() const { return pState_; }  ///< Gets the functor obj internal state data.
-  FunctorDeleterFunc*   FunctorDeleter() const { return pfnDel_; }  ///< Gets the functor obj deleter function.
 
 private:
   template <typename T>  using StlFunctionForFunctor = std::function<typename FuncTraitsNoThis<T>::Function>;
@@ -531,8 +542,12 @@ private:
   /// Conversion constructor for state-bound functors and capturing lambdas.
   template <typename T, Call C, typename = decltype(&T::operator()), typename Fn = StlFunctionForFunctor<T>>
   FunctionPtr(T&& functor, Util::AsCall<C> call, std::false_type)
-    : FunctionPtr(Fn(std::forward<T>(functor)), call, [](Fn* pObj) -> void* { return pObj->target<T>(); }) {}
+    : FunctionPtr(Fn(std::forward<T>(functor)), call, [](Fn* pObj) -> void* { return pObj->target<T>(); }) { }
 
+  /// Initializes the thunk for calling InvokeFunctor() with @ref pObj_ (state-bound functor or capturing lambda).
+  void InitFunctorThunk(void* pFunctorObj, void(*pfnDeleteFunctor)(void*), void* pfnInvokeFunctor);
+
+  /// Target of the thunk created by InitFunctorThunk().
   template <typename T, typename Return, typename... Args>
   static Return PATCHER_CDECL InvokeFunctor(
 #if   PATCHER_X86_64 && PATCHER_MSVC
@@ -541,52 +556,67 @@ private:
     int, int, int, int, int, int,  // Ignore 6 register arg slots, so our args are on the stack.
 #endif
     T* pFunctor, void* pPrevReturnAddr, Args... args) { return (*pFunctor)(args...); }
-  
-  const void*          pfn_;     ///< Unqualified pointer to the underlying function.
-  RtFuncSig            sig_;     ///< Function call signature information about pfn_, if it is known at compile time.
-  void*                pObj_;    ///< If created from a state-bound functor, std::function object needed to call pfn_.
-  void*                pState_;  ///< If created from a state-bound functor, pointer to the state managed by pObj_.
-  FunctorDeleterFunc*  pfnDel_;  ///< If created from a state-bound functor, pointer to the function to delete pObj_.
+
+  const void*           pfn_;     ///< Unqualified pointer to the underlying function.
+  RtFuncSig             sig_;     ///< Function call signature information about pfn_, if it is known at compile time.
+  std::shared_ptr<void> pObj_;    ///< If created from a state-bound functor, std::function object needed to call pfn_.
+  void*                 pState_;  ///< If created from a state-bound functor, pointer to the state managed by pObj_.
 };
 
+/// Template subclass of FunctionPtr that can be implicitly converted to a plain function pointer and used as a callable
+/// This allows capturing lambdas and state-bound functors to be passed as function pointers of any calling convention.
+template <typename T, Call Convention>
+class FunctorImpl : public FunctionPtr {
+  using PfnType = AddConvention<typename FuncTraitsNoThis<T>::Function, Convention>;
+public:
+  /// Conversion constructor for (non-overloaded) functors and lambas, using the cdecl convention by default.
+  FunctorImpl(T&& f) : FunctionPtr(std::forward<T>(f), Util::AsCall<Convention>{}) { }
 
-///@{ @internal  Helper metafunctions for implementing register type and by reference deduction for LowLevelHook().
-template <typename... Ts>
-constexpr EnableIf<sizeof...(Ts) == 0, uint32>          MakeByRefMask(uint32 mask = 0, uint32 x = 1) { return mask; }
-template <typename T, typename... Ts>  constexpr uint32 MakeByRefMask(uint32 mask = 0, uint32 x = 1)
-  { return MakeByRefMask<Ts...>(mask | ((std::is_pointer<T>::value || std::is_reference<T>::value) ? x : 0u), x << 1); }
+  /// Gets a type-qualified function pointer to the underlying function.
+  PfnType  Pfn()       const { return static_cast<PfnType>(const_cast<void*>(FunctionPtr::Pfn())); }
+  operator PfnType()   const { return Pfn(); }  ///< Implicit function pointer conversion.  Forwards operator(), *, etc.
+  PfnType  operator+() const { return Pfn(); }  ///< Explicit convert to function pointer;  semantics similar to +[]{}.
+};
 
-template <typename    T>  struct ByRefMask : public ByRefMask<typename FuncTraitsNoThis<T>::Params>{};
-template <typename... A>  struct ByRefMask<std::tuple<A...>> { static constexpr uint32 Mask = MakeByRefMask<A...>(); };
-
-template <typename    T>  struct RegIds : public RegIds<typename FuncTraitsNoThis<T>::Params>{};
-template <typename... A>  struct RegIds<std::tuple<A...>> {
-  using Arr = Conditional<(sizeof...(A) == 0), std::nullptr_t, Registers::Register[sizeof...(A) + (sizeof...(A) == 0)]>;
-  static constexpr Arr Ids = { RemoveCvRefPtr<A>::RegisterId... };
+///@{ @internal  Helper metafunction for implementing register type and by reference deduction for LowLevelHook().
+template <typename    T>  struct GetRegisterInfo : public GetRegisterInfo<typename FuncTraitsNoThis<T>::Params>{};
+template <typename... A>  struct GetRegisterInfo<std::tuple<A...>> {
+  template <typename T>
+  static constexpr bool IsRefPtr() { return (std::is_pointer<T>::value || std::is_reference<T>::value); }
+  using Arr = Conditional<(sizeof...(A) == 0), std::nullptr_t, RegisterInfo[sizeof...(A) + (sizeof...(A) == 0)]>;
+  static constexpr Arr Info = { { RemoveCvRefPtr<A>::RegisterId, IsRefPtr<A>(), RemoveCvRefPtr<A>::StackOffset }... };
 };
 ///@}
 } // Impl
 
 
-namespace LowLevelHookOpt {
-enum : uint32 {
-  NoBaseRelocReturn  = (1 << 0), ///< Do not automatically adjust custom return destinations for module base relocation.
-  NoCustomReturnAddr = (1 << 1), ///< Custom return addresses are not allowed.  Use for hook functions that return void.
-  NoShortReturnAddr  = (1 << 2), ///< Assume custom return addresses do not overlap overwritten area (5 bytes on x86).
-  NoNullReturnAdjust = (1 << 3), ///< Do not reinterpret custom return address of nullptr as jump to original code.
-  ArgsAsStructPtr    = (1 << 4), ///< Args are passed to the callback as a pointer to a struct that contains them.
+/// Settings passed to LowLevelHook() for hook callback behavior, performance, etc.  Some flags can be template-deduced.
+struct LowLevelHookInfo {
+  union {
+    struct {
+      uint32 noBaseRelocReturn   :  1; ///< Do not auto-adjust callback return address for module base relocation.
+      uint32 noCustomReturnAddr  :  1; ///< Callback return address not allowed (for hook functions that return void).
+      uint32 noShortReturnAddr   :  1; ///< Assume callback return address can't overlap overwritten area (x86: 5 bytes)
+      uint32 noNullReturnDefault :  1; ///< Do not reinterpret callback return address of nullptr to default address.
+      uint32 argsAsStructPtr     :  1; ///< Args are passed to the callback as a pointer to a struct that contains them.
+      uint32 reserved            : 27; ///< Reserved for future use.
+    };
+    uint32 flags;  ///< All bitflags packed as an unsigned integer.
+  };
+
+  Impl::TargetPtr pDefaultReturnAddr; ///< If set, overrides the default return address when callback returns nullptr or
+                                      ///  void.  Otherwise, the default return address will be to the original code.
 };
 
-/// Gets default LowLevelHook options based on the callback's function signature.
-template <typename R, Util::Call C, bool V, typename... A>  constexpr uint32 GetDefaults(Impl::FuncSig<R, C, V, A...>)
-  { return ((std::is_pointer<R>::value ? NoBaseRelocReturn : 0) | (std::is_void<R>::value ? NoCustomReturnAddr : 0)); }
-}
-
-
 namespace Impl {
+/// @internal  Sets default LowLevelHook options based on the callback's function signature.
+template <typename R, Call C, bool V, typename... A>
+constexpr LowLevelHookInfo& DeduceLowLevelHookSettings(LowLevelHookInfo& info, Impl::FuncSig<R, C, V, A...>)
+  { info.noBaseRelocReturn = std::is_pointer<R>::value; info.noCustomReturnAddr = std::is_void<R>::value; return info; }
+
 /// Transparent wrapper around a type that has a Register enum value attached to it, allowing for deducing the desired
 /// register for the arg for LowLevelHook() at compile time.
-template <Registers::Register Id, typename T>
+template <Registers::Register Id, typename T, uint32 Offset = 0>
 class RegisterArg {
   using Type     = RemoveRef<T>;
   using Element  = Conditional<std::is_array<T>::value, RemoveExtents<Type>, RemovePtr<Type>>;
@@ -600,19 +630,20 @@ public:
   operator Type&() { return data_; }  ///< Implicit conversion operator to a reference of the underlying type.
 
   ///@{ In lieu of no "operator.", dereference-like semantics are allowed for all types for struct field access, etc.
-  template <typename U = Element> auto operator->() -> EnableIf<std::is_same<U, T>::value,        T*> { return &data_; }
-  template <typename U = Element> auto operator->() -> EnableIf<std::is_same<U, T>::value == 0,   U*> { return  data_; }
-  template <typename U = Element> auto operator*()  -> EnableIf<std::is_same<U, T>::value == 0,   U&> { return *data_; }
-  template <typename U = Element> auto operator*()  -> EnableIf<std::is_same<U, T>::value, DataType&> { return  data_; }
+  template <typename U = Element> auto operator->() -> EnableIf<std::is_same<U, Type>::value,     U*> { return &data_; }
+  template <typename U = Element> auto operator->() -> EnableIf<std::is_same<U, Type>::value ==0, U*> { return  data_; }
+  template <typename U = Element> auto operator*()  -> EnableIf<std::is_same<U, Type>::value ==0, U&> { return *data_; }
+  template <typename U = Element> auto operator*()  -> EnableIf<std::is_same<U, Type>::value,     U&> { return  data_; }
   ///@}
 
   template <typename U>  Type& operator=(U&&      src) { return (data_ = std::forward<U>(src)); }  ///< Move-assignment.
   template <typename U>  Type& operator=(const U& src) { return (data_ = src);                  }  ///< Copy-assignment.
 
-  static constexpr Registers::Register RegisterId = Id;   ///< Register associated with this argument.
+  static constexpr Registers::Register RegisterId = Id;  ///< Register associated with this argument.
+  static constexpr uint32 StackOffset = Offset;          ///< (Stack only) Offset associated with this argument.
 
 private:
-  DataType  data_;
+  DataType data_;
 };
 } // Impl
 
@@ -622,15 +653,15 @@ namespace Registers {
 enum class Register : uint8 { Eax = 0, Ecx, Edx, Ebx, Esi, Edi, Ebp, GprLast = Ebp, Esp, Eflags, Count };
 
 ///@{ Shorthand aliases for RegisterArgs of each x86_32 Register type.  Used for LowLevelHook() hook functions.
-template <typename T>  using Eax    = Impl::RegisterArg<Register::Eax,    T>;
-template <typename T>  using Ecx    = Impl::RegisterArg<Register::Ecx,    T>;
-template <typename T>  using Edx    = Impl::RegisterArg<Register::Edx,    T>;
-template <typename T>  using Ebx    = Impl::RegisterArg<Register::Ebx,    T>;
-template <typename T>  using Esi    = Impl::RegisterArg<Register::Esi,    T>;
-template <typename T>  using Edi    = Impl::RegisterArg<Register::Edi,    T>;
-template <typename T>  using Ebp    = Impl::RegisterArg<Register::Ebp,    T>;
-template <typename T>  using Esp    = Impl::RegisterArg<Register::Esp,    T>;
-template <typename T>  using Eflags = Impl::RegisterArg<Register::Eflags, T>;
+template <typename T>                     using Eax    = Impl::RegisterArg<Register::Eax,    T>;
+template <typename T>                     using Ecx    = Impl::RegisterArg<Register::Ecx,    T>;
+template <typename T>                     using Edx    = Impl::RegisterArg<Register::Edx,    T>;
+template <typename T>                     using Ebx    = Impl::RegisterArg<Register::Ebx,    T>;
+template <typename T>                     using Esi    = Impl::RegisterArg<Register::Esi,    T>;
+template <typename T>                     using Edi    = Impl::RegisterArg<Register::Edi,    T>;
+template <typename T>                     using Ebp    = Impl::RegisterArg<Register::Ebp,    T>;
+template <typename T, uint32 Offset = 0>  using Esp    = Impl::RegisterArg<Register::Esp,    T, Offset>;
+template <typename T>                     using Eflags = Impl::RegisterArg<Register::Eflags, T>;
 ///@}
 #elif PATCHER_X86_64
 /// x86_64 Register types passed to PatchContext::LowLevelHook().
@@ -638,23 +669,23 @@ enum class Register : uint8
   { Rax = 0, Rcx, Rdx, Rbx, Rsi, Rdi, R8, R9, R10, R11, R12, R13, R14, R15, Rbp, GprLast = Rbp, Rsp, Rflags, Count };
 
 ///@{ Shorthand aliases for RegisterArgs of each x86_64 Register type.  Used for LowLevelHook() hook functions.
-template <typename T>  using Rax    = Impl::RegisterArg<Register::Rax,    T>;
-template <typename T>  using Rcx    = Impl::RegisterArg<Register::Rcx,    T>;
-template <typename T>  using Rdx    = Impl::RegisterArg<Register::Rdx,    T>;
-template <typename T>  using Rbx    = Impl::RegisterArg<Register::Rbx,    T>;
-template <typename T>  using Rsi    = Impl::RegisterArg<Register::Rsi,    T>;
-template <typename T>  using Rdi    = Impl::RegisterArg<Register::Rdi,    T>;
-template <typename T>  using Rbp    = Impl::RegisterArg<Register::Rbp,    T>;
-template <typename T>  using Rsp    = Impl::RegisterArg<Register::Rsp,    T>;
-template <typename T>  using R8     = Impl::RegisterArg<Register::R8,     T>;
-template <typename T>  using R9     = Impl::RegisterArg<Register::R9,     T>;
-template <typename T>  using R10    = Impl::RegisterArg<Register::R10,    T>;
-template <typename T>  using R11    = Impl::RegisterArg<Register::R11,    T>;
-template <typename T>  using R12    = Impl::RegisterArg<Register::R12,    T>;
-template <typename T>  using R13    = Impl::RegisterArg<Register::R13,    T>;
-template <typename T>  using R14    = Impl::RegisterArg<Register::R14,    T>;
-template <typename T>  using R15    = Impl::RegisterArg<Register::R15,    T>;
-template <typename T>  using Rflags = Impl::RegisterArg<Register::Rflags, T>;
+template <typename T>                     using Rax    = Impl::RegisterArg<Register::Rax,    T>;
+template <typename T>                     using Rcx    = Impl::RegisterArg<Register::Rcx,    T>;
+template <typename T>                     using Rdx    = Impl::RegisterArg<Register::Rdx,    T>;
+template <typename T>                     using Rbx    = Impl::RegisterArg<Register::Rbx,    T>;
+template <typename T>                     using Rsi    = Impl::RegisterArg<Register::Rsi,    T>;
+template <typename T>                     using Rdi    = Impl::RegisterArg<Register::Rdi,    T>;
+template <typename T>                     using Rbp    = Impl::RegisterArg<Register::Rbp,    T>;
+template <typename T, uint32 Offset = 0>  using Rsp    = Impl::RegisterArg<Register::Rsp,    T, Offset>;
+template <typename T>                     using R8     = Impl::RegisterArg<Register::R8,     T>;
+template <typename T>                     using R9     = Impl::RegisterArg<Register::R9,     T>;
+template <typename T>                     using R10    = Impl::RegisterArg<Register::R10,    T>;
+template <typename T>                     using R11    = Impl::RegisterArg<Register::R11,    T>;
+template <typename T>                     using R12    = Impl::RegisterArg<Register::R12,    T>;
+template <typename T>                     using R13    = Impl::RegisterArg<Register::R13,    T>;
+template <typename T>                     using R14    = Impl::RegisterArg<Register::R14,    T>;
+template <typename T>                     using R15    = Impl::RegisterArg<Register::R15,    T>;
+template <typename T>                     using Rflags = Impl::RegisterArg<Register::Rflags, T>;
 ///@}
 #endif
 } // Registers
@@ -717,10 +748,11 @@ struct DummyFactory { static T* Create(void* pPlacementAddr) { return nullptr; }
 
 // Used by DummyFactory::MatchCtor to find user-defined constructors.
 struct DummyArg {
+  template <typename T>  using DummyType = Conditional<std::is_default_constructible<T>::value, T, TypeStorage<T>>;
   // Making this conversion operator const prevents ambiguous call errors with the other (preferred) conversion.
   template <typename T, typename = EnableIf<std::is_const<T>::value == false>>
-                         operator T&() const { static TypeStorage<T> x;  x = { };  return reinterpret_cast<T&>(x); }
-  template <typename T>  operator T()        {        TypeStorage<T>     x = { };  return reinterpret_cast<T&>(x); }
+                         operator T&() const { static DummyType<T> x{};  return reinterpret_cast<T&>(x); }
+  template <typename T>  operator T()        {        DummyType<T> x{};  return reinterpret_cast<T&>(x); }
 };
 
 template <typename T>
@@ -806,10 +838,18 @@ auto PmfCast(
     size_t         vftOffset;
   } cast = {pmf};
 
-  // Test if this is a virtual PMF, which requires special compiler-specific handling and an object instance.
+  // Test if this is a virtual PMF, which requires special compiler-specific handling and an object instance.  If so and
+  // pThis was not provided, then we will need to try to create a dummy object instance in order to get the vftable. 
   // Non-virtual PMFs are straightforward to convert, and do not require an object instance.
-
-#if PATCHER_MS_ABI
+  
+#if PATCHER_UNIX_ABI
+  // In the Itanium ABI (used by GCC, Clang, etc. for x86), virtual PMFs have the low bit set to 1.
+  if (std::is_polymorphic<T>::value && (cast.vftOffset & 1)) {
+    // We need an object instance to get the vftable pointer, which is typically initialized during the constructor.
+    void**const pVftable = GetVftable(pThis);
+    cast.pOut = (pVftable != nullptr) ? pVftable[((cast.vftOffset - 1) / sizeof(void*))] : nullptr;
+  }
+#elif PATCHER_MS_ABI
   // MS ABI uses compiler-generated "vcall" thunks for calling through pointers-to-virtual-member-functions.
   // We have to parse the assembly of the thunk in order to get the offset into the vftable.
   // ** TODO need to check what ICC does in MS mode
@@ -845,27 +885,20 @@ auto PmfCast(
 # endif
 
     for (const auto& vcall : Vcalls) {
-      auto*const pOperand = static_cast<uint8*>(PtrInc(cast.pOut, vcall.bytes.Size()));
+      auto*const pOperand = PtrInc<uint8*>(cast.pOut, vcall.bytes.Size());
       if ((memcmp(cast.pOut, &vcall.bytes[0], vcall.bytes.Size()) == 0) && (*pOperand & vcall.operandBase)) {
         // We need an object instance to get the vftable pointer, which is typically initialized during the constructor.
         void**const pVftable = GetVftable(pThis);
 
         const size_t offset =
-          (*pOperand == vcall.operandBase + 0x40) ? pOperand[1]                            :  // Byte  operand size.
-          (*pOperand == vcall.operandBase + 0x80) ? reinterpret_cast<uint32&>(pOperand[1]) :  // Dword operand size.
+          ((*pOperand) == (vcall.operandBase + 0x40)) ? pOperand[1]                            :  // Byte  operand size.
+          ((*pOperand) == (vcall.operandBase + 0x80)) ? reinterpret_cast<uint32&>(pOperand[1]) :  // Dword operand size.
           0;
 
         cast.pOut = (pVftable != nullptr) ? pVftable[(offset / sizeof(void*))] : nullptr;
         break;
       }
     }
-  }
-#elif PATCHER_UNIX_ABI
-  // In the Itanium ABI (used by GCC, Clang, etc. for x86), virtual PMFs have the low bit set to 1.
-  if (std::is_polymorphic<T>::value && (cast.vftOffset & 1)) {
-    // We need an object instance to get the vftable pointer, which is typically initialized during the constructor.
-    void**const pVftable = GetVftable(pThis);
-    cast.pOut = (pVftable != nullptr) ? pVftable[((cast.vftOffset - 1) / sizeof(void*))] : nullptr;
   }
 #else
   static_assert(std::is_void<T>::value, "PmfCast is only supported in MSVC, GCC, ICC, or Clang.");
@@ -875,17 +908,18 @@ auto PmfCast(
 }
 
 /// Helper macro to get the raw address of a class member function without requiring an object instance.
-/// Usage: Hook(MFN_PTR(ClassA::Function), MFN_PTR(HookClassA::Function));  This takes an identifier, not a PMF.
-/// A pointer to an object instance may optionally be passed as a second arg, e.g. MFN_PTR(ClassA::Function, &obj).
+/// Usage: Hook(PATCHER_MFN_PTR(ClassA::Func), PATCHER_MFN_PTR(HookClassA::Func))
+/// Notice that this takes a function identifier, not a pointer-to-member-function!
+/// A pointer to an object instance may optionally be passed as a second arg, e.g. PATCHER_MFN_PTR(ClassA::Func, &obj).
 /// @note  This does not work on overloaded functions.  There may be compiler-specific limitations.
 #if PATCHER_MSVC && PATCHER_X86_32
 // MSVC (x86_32):  Inline __asm can reference C++ symbols, including virtual methods, by address.
 # if PATCHER_INCREMENTAL_LINKING == false
-#  define MFN_PTR(method, ...)  [] { using Pfn = typename Patcher::Impl::FuncTraits<decltype(&method)>::Pfn;  \
+#  define PATCHER_MFN_PTR(method, ...)  [] { using Pfn = typename Patcher::Impl::FuncTraits<decltype(&method)>::Pfn;  \
      struct { static Pfn Get() { __asm mov eax, method } } p;  return p.Get(); }()
 # else
 // Incremental linking (debug) conflicts with this method somewhat and gives you a pointer to a jump thunk instead.
-#  define MFN_PTR(method, ...)  [] {                                                                       \
+#  define PATCHER_MFN_PTR(method, ...)  [] {                                                               \
      struct { static Patcher::uint8* Get() { __asm mov eax, method } } p;                                  \
      auto*const pfn     = p.Get();                                                                         \
      void*const realPfn = (pfn[0] == 0xE9) ? (pfn + 5 + reinterpret_cast<Patcher::int32&>(pfn[1])) : pfn;  \
@@ -894,11 +928,11 @@ auto PmfCast(
 # endif
 #elif PATCHER_GXX && (PATCHER_CLANG == false)
 // GCC-compliant:  GCC has an extension to cast PMF constants to pointers without an object instance, which is ideal.
-# define MFN_PTR(method, ...)  [] { PATCHER_IGNORE_GCC_WARNING("-Wpmf-conversions",  \
+# define PATCHER_MFN_PTR(method, ...)  [] { PATCHER_IGNORE_GCC_WARNING("-Wpmf-conversions",  \
    return reinterpret_cast<typename Patcher::Impl::FuncTraits<decltype(&method)>::Pfn>(&method);) }()
 #else
 // MSVC (non-x86_32), Clang, other:  See comments of PmfCast about restrictions.
-# define MFN_PTR(method, ...)  Patcher::Util::PmfCast(&method, {__VA_ARGS__})
+# define PATCHER_MFN_PTR(method, ...)  Patcher::Util::PmfCast(&method, {__VA_ARGS__})
 #endif
 } // Util
 
@@ -944,11 +978,7 @@ public:
   template <size_t N>  ByteArray(const ByteArray<N>& src) : ByteArray(src.Data(), src.Size()) { }
   template <size_t N>  ByteArray(ByteArray<N>&& src);
 
-  ~ByteArray() {
-    if (pData_ != &localStorage_[0]) {
-      free(pData_);
-    }
-  }
+  ~ByteArray() { if (pData_ != &localStorage_[0]) { free(pData_); } }
 
   size_t Size() const { return size_; }
 

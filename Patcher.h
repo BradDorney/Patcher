@@ -36,9 +36,9 @@
 namespace Patcher {
 
 /// @brief  RAII memory patch context class.  Allows for safe writes and insertion of code hooks into process memory.
-///
+/// 
 /// The first time some memory is modified, the original data is tracked, and is automatically restored when the context
-/// object instance is destroyed.
+/// object instance is destroyed.  Contexts should be declared as function-level statics, globals, or smart pointers.
 ///
 /// Methods that return a PatcherStatus also update an internally-tracked status.  If the internal status is an error,
 /// all subsequent calls become a no-op and return the last error until it is reset by ResetStatus() or RevertAll().
@@ -83,16 +83,23 @@ public:
 
   ///@{ Fixes up a raw address, adjusting it for module base relocation.
   template <typename T>         T* FixPtr(T*     pAddress) const
-    { return (pAddress == nullptr) ? pAddress : static_cast<T*>(Util::PtrInc(pAddress, moduleRelocDelta_)); }
+    { return (pAddress == nullptr) ? pAddress : Util::PtrInc<T*>(pAddress, moduleRelocDelta_); }
   template <typename T = void>  T* FixPtr(uintptr address) const { return FixPtr(reinterpret_cast<T*>(address)); }
   ///@}
 
-  ///@{ Writes the given value to module memory.
-  template <typename T>
+  /// Writes the given value to module memory.
+  template <typename T, typename = Impl::EnableIf<std::is_base_of<FunctionPtr, T>::value == false>>
   PatcherStatus Write(TargetPtr pAddress, const T& value) { return Memcpy<sizeof(T)>(pAddress, &value); }
-  template <size_t Size, typename T>
-  PatcherStatus Write(TargetPtr pAddress, const T& value) { return Memcpy<Size>(pAddress, &value); }
-  ///@}
+
+  /// Writes the given FunctionPtr address to module memory.
+  PatcherStatus Write(TargetPtr pAddress, const FunctionPtr& pfnNewFunction) {
+    status_ = ((status_ == PatcherStatus::Ok) && (pfnNewFunction == nullptr)) ? PatcherStatus::FailInvalidCallback
+                                                                              : status_;
+    if (Write(pAddress, pfnNewFunction.Pfn()) == PatcherStatus::Ok) {
+      historyAt_[MaybeFixTargetPtr(pAddress)]->pFunctorObj = pfnNewFunction.Functor();
+    }
+    return status_;
+  }
 
   /// Writes the given bytes to module memory.
   PatcherStatus WriteBytes(TargetPtr pAddress, Span<uint8> bytes)
@@ -104,26 +111,27 @@ public:
 
   ///@{ Adds the specified module memory to the history tracker so it can be restored via Revert().
   PatcherStatus Touch(TargetPtr pAddress, size_t size);
-  template <typename T>  PatcherStatus Touch(T* pAddress) { return Touch(pAddress, sizeof(T)); };
+  template <typename T, typename = decltype(sizeof(T))>
+  PatcherStatus Touch(T* pAddress) { return Touch(pAddress, sizeof(T)); };
   ///@}
 
   ///@{ Hooks the beginning of a function in module memory, and optionally returns a pointer to a trampoline function
   ///   that can be used to call the original function.  New function's signature must match the original's.
   ///
   /// @param [in]  pAddress             Function or address of where to insert the hook.
-  /// @param [in]  pfnNewFunction       The hook function or address to call instead.
+  /// @param [in]  pfnNewFunction       The hook callable or address to call instead.
   /// @param [out] pPfnTrampoline       (Optional) Pointer to where to store a callback pointer to the original code.
-  /// @param [in]  pfnTrampolineOffset  (Optional) Offset or pointer-to-member into pfnNewFunction's functor object
+  /// @param [in]  pfnTrampolineOffset  (Optional) Offset or pointer-to-member into pfnNewFunction's functor object.
   ///                                   state to pfnTrampoline.  Use SetCapturedTrampoline for the first lambda capture.
   ///
   /// Examples:  Hook(&Function,   &NewFunction)
   ///            Hook(0x439AB0,    0x439AF2,                      &global_pfnOriginal)
-  ///            Hook(&Fn,         Util::SetCapturedTrampoline,   [F = decltype(&Fn)0](int a) -> int { return F(a*2); })
+  ///            Hook(&Fn,         Util::SetCapturedTrampoline,   [F = (decltype(&Fn))0](int a) { return F(a * 2); })
   ///            Hook(&StdcallFn,  &Functor::member_pfnOriginal,  Util::StdcallFunctor(Functor{}))
   ///         ** Hook(&Class::Fn,  &HookClass::Fn,                &HookClass::static_pfnOriginal)
-  ///         ** Hook(&Class::Fn,  Util::ThiscallLambdaPtr([](Class* pThis, int a) { return pThis->b - a; }))
+  ///         ** Hook(&Class::Fn,  Util::ThiscallFunctor([](Class* pThis, int a) { return pThis->b - a; }))
   ///
-  /// ** Consider using MFN_PTR() instead of implicit class method pointer conversion, especially for virtual methods.
+  /// ** Consider using PATCHER_MFN_PTR(Class::Fn) explicitly, especially for virtual methods.
   ///
   /// @note  32-bit x86 only.
   PatcherStatus Hook(TargetPtr pAddress, const FunctionPtr& pfnNewFunction, void* pPfnTrampoline = nullptr);
@@ -141,9 +149,9 @@ public:
   ///   pointer to the original function if possible, else nullptr.  New function's signature must match the original's.
   ///
   /// @param [in]  pAddress           Address of the call instruction to fix up.
-  /// @param [in]  pfnNewFunction     The hook function or address to call instead.
+  /// @param [in]  pfnNewFunction     The hook callable or address to call instead.
   /// @param [out] pPfnOriginal       (Optional) Pointer to where to store a callback pointer to the original function.
-  /// @param [in]  pfnOriginalOffset  (Optional) Offset or pointer-to-member into pfnNewFunction's functor object
+  /// @param [in]  pfnOriginalOffset  (Optional) Offset or pointer-to-member into pfnNewFunction's functor object.
   ///                                 state to pfnOriginal.  Use SetCapturedTrampoline for the first lambda capture.
   ///
   /// @see   Comments of @ref Hook for examples, which has similar usage.
@@ -161,32 +169,39 @@ public:
   ///@{ Hooks an instruction (almost) anywhere in module memory.  Read and write access to the state of standard
   ///   registers is provided via function args, and control flow can be manipulated via the returned value.
   ///
-  /// Examples:  LowLevelHook(0x402044,  [](Registers::Eax<int>& a, Esi<bool> b) { ++a;  return b ? 0 : 0x402107; })
+  /// @param [in] pAddress   Address of the instruction where to insert the hook.
+  /// @param [in] registers  Registers to pass to the hook function.  Can be template-deduced.
+  /// @param [in] pfnHookCb  The hook callable or address to call instead.
+  /// @param [in] info       (Optional) Settings for callback behavior, performance, etc.  Can be template-deduced.
+  ///
+  /// Examples:  LowLevelHook(0x402044,  [](Registers::Eax<int>& rw, Esi<bool> r) { ++rw;  return r ? 0 : 0x402046; })
   ///            LowLevelHook(0x5200AF,  { Registers::Register::Eax, Register::Edx },  [](int64& val) { val = -val; })
+  ///            LowLevelHook(0x542080,  [=](Registers::Esp<int&, 12> stackVar) { stackVar /= someCapturedLocal; })
   ///
   /// Available registers: [Eax, Ecx, Edx, Ebx, Esi, Edi, Ebp, Esp, Eflags].  Arg types must fit within register size.
   /// To write to registers, declare args with >& or >*, e.g. Eax<int>&, Ecx<int>*, Ebp<char*>&, Edi<int*>*
-  /// Hook must use cdecl, and return either void (with template deduction or @ref LowLevelHookOpt::NoCustomReturnAddr)
+  /// To read/write stack values, declare args with Esp<T&, N> or Esp<T*, N>, where N is offset in bytes into the stack.
+  /// Hook must use cdecl, and return either void (with template deduction or @ref LowLevelHookInfo::noCustomReturnAddr)
   /// or an address to jump to, where nullptr = original address (addresses within the overwritten area are allowed).
   ///
   /// @warning  This requires 5 bytes at pAddress; if the last 4 bytes overlap any jump targets, this could crash.
   /// @note     32-bit x86 only.
-  PatcherStatus LowLevelHook(TargetPtr           pAddress,      ///< [in] Address of where to insert the hook.
-                             Span<Register>      registers,     ///< [in] Registers to pass to the hook function.
-                             uint32              byRefMask,     ///< [in] Bitmask of args to pass by reference.
-                             const FunctionPtr&  pfnHookCb,     ///< [in] User hook callback (any callable).
-                             uint32              options = 0);  ///< [in] Options.  See @ref LowLevelHookOpt.
+  PatcherStatus LowLevelHook(
+    TargetPtr pAddress, Span<RegisterInfo> registers, const FunctionPtr& pfnHookCb, const LowLevelHookInfo& info = {});
   ///< Insert a low-level hook with a callback function that takes RegisterArgs or no args.
   template <typename T, typename Enable = decltype(FunctionPtr(std::declval<T>()))>
-  PatcherStatus LowLevelHook(TargetPtr pAddress, T&& pfnHookCb, uint32 options = 0) {
-    options |= LowLevelHookOpt::GetDefaults(Impl::FuncTraits<T>{});
-    return LowLevelHook(pAddress, Impl::RegIds<T>::Ids, Impl::ByRefMask<T>::Mask, std::forward<T>(pfnHookCb), options);
+  PatcherStatus LowLevelHook(TargetPtr pAddress, T&& pfnHookCb, LowLevelHookInfo info = {}) {
+    Impl::DeduceLowLevelHookSettings(info, Impl::FuncTraits<T>{});
+    return LowLevelHook(pAddress, Impl::GetRegisterInfo<T>::Info, std::forward<T>(pfnHookCb), info);
   }
   ///< Insert a low-level hook with a callback function that takes a struct pointer or reference as a single parameter.
+  // ** TODO use SFINAE to clarify disambiguation between this LowLevelHook overload and the non-templated one
   template <typename T, typename Enable = decltype(FunctionPtr(std::declval<T>()))>
-  PatcherStatus LowLevelHook(TargetPtr pAddress, Span<Register> registers, T&& pfnHookCb, uint32 options = 0) {
-    options |= (LowLevelHookOpt::ArgsAsStructPtr | LowLevelHookOpt::GetDefaults(Impl::FuncTraits<T>{}));
-    return LowLevelHook(pAddress, registers, 0, std::forward<T>(pfnHookCb), options);
+  PatcherStatus LowLevelHook(TargetPtr pAddress, Span<Register> registers, T&& pfnHookCb, LowLevelHookInfo info = {}) {
+    Impl::DeduceLowLevelHookSettings(info, Impl::FuncTraits<T>{}).argsAsStructPtr = 1;
+    std::vector<RegisterInfo> registerInfos;
+    for (Register reg : registers) { registerInfos.push_back({ reg }); }
+    return LowLevelHook(pAddress, registerInfos, std::forward<T>(pfnHookCb), info);
   }
   ///@}
 
@@ -275,12 +290,11 @@ private:
 
   /// @internal  Struct for storing mappings of patch addresses to infomation required for cleanup and other purposes.
   struct PatchInfo {
-    void*                             pAddress;           ///< Actual patch address (may differ from requested address)
-    Impl::ByteArray<StorageSize>      oldData;            ///< Old memory copy
-    void*                             pTrackedAlloc;      ///< Tracked allocation, e.g. trampoline code (optional)
-    size_t                            trackedAllocSize;   ///< Tracked allocation size (optional)
-    void*                             pFunctorObj;        ///< Pointer to functor object (optional)
-    FunctionPtr::FunctorDeleterFunc*  pfnFunctorDeleter;  ///< Pointer to functor object deleter function (optional)
+    void*                        pAddress;          ///< Actual patch address (may differ from requested address)
+    Impl::ByteArray<StorageSize> oldData;           ///< Old memory copy
+    void*                        pTrackedAlloc;     ///< Tracked allocation, e.g. trampoline code (optional)
+    size_t                       trackedAllocSize;  ///< Tracked allocation size (optional)
+    std::shared_ptr<void>        pFunctorObj;       ///< Pointer to functor object (optional)
   };
 
   /// Patch history, sorted from newest to oldest.

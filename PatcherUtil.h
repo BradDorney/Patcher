@@ -69,13 +69,13 @@
 
 #if ((PATCHER_MSVC && _CPPUNWIND) || (PATCHER_GXX && (__cpp_exceptions || __EXCEPTIONS))) &&  \
     (defined(PATCHER_EXCEPTIONS) == false)
-# define PATCHER_EXCEPTIONS 1
+# define PATCHER_EXCEPTIONS  1
 #endif
 
 #if PATCHER_EXCEPTIONS
-# define PATCHER_UNSAFE_TRY(...) try { __VA_ARGS__; } catch(...) { }
+# define PATCHER_UNSAFE_TRY(...)  try { __VA_ARGS__; } catch(...) { }
 #else
-# define PATCHER_UNSAFE_TRY(...)     { __VA_ARGS__; }
+# define PATCHER_UNSAFE_TRY(...)      { __VA_ARGS__; }
 #endif
 
 #if PATCHER_MSVC
@@ -176,7 +176,7 @@ namespace Registers { enum class Register : uint8; }
 
 /// Info about registers requested by LowLevelHook().
 struct RegisterInfo {
-  Registers::Register regType;      ///< Register type.
+  Registers::Register type;         ///< Register type.
   bool                byReference;  ///< Pass register by reference for writing? (Not needed with stack values)
   uint32              offset;       ///< (Stack only) Offset into the stack associated with this value?
 };
@@ -239,6 +239,7 @@ template <typename T, typename... Ts>  constexpr T Sum(T a, Ts... next) { return
 ///@{ @internal  Type traits convenience aliases.
 template <typename T>                using RemovePtr      = typename std::remove_pointer<T>::type;
 template <typename T>                using RemoveRef      = typename std::remove_reference<T>::type;
+template <typename T>                using RemoveConst    = typename std::remove_const<T>::type;
 template <typename T>                using RemoveCv       = typename std::remove_cv<T>::type;
 template <typename T>                using RemoveCvRef    = RemoveCv<RemoveRef<T>>;
 template <typename T>                using RemoveCvRefPtr = RemoveCvRef<RemovePtr<T>>;
@@ -315,7 +316,7 @@ PATCHER_EMIT_CALLING_CONVENTIONS(PATCHER_LAMBDA_PTR_DEF);
 
 
 ///@{ Converts any (non-overloaded) lambda or functor to a FunctionPtr object of the specified calling convention.
-///   This can be passed to Hook and Write, be used as a callable, and implicitly converts to a function pointer.
+///   This can be passed to PatchContext methods, be used as a callable, and implicitly converts to a function pointer.
 ///   If created from a non-empty type, then the returned FunctionPtr needs to be kept alive or referenced by a patch.
 #define PATCHER_CREATE_FUNCTOR_INVOKER_DEF(convention, name)  template <typename T>  \
 Impl::FunctorImpl<T, Call::name> name##Functor(T&& f) { return Impl::FunctorImpl<T, Call::name>(std::forward<T>(f)); }
@@ -401,7 +402,7 @@ struct FuncSig<R, Call, true, T, A...> : public FuncSig<R, Call, false, T, A...>
 struct RtFuncSig {
   /// Conversion constructor for the compile-time counterpart to this type, FuncSig.
   template <typename R, Call C, bool V, typename... A>
-  constexpr RtFuncSig(const FuncSig<R, C, V, A...>&)
+  constexpr RtFuncSig(FuncSig<R, C, V, A...>)
     : returnSize(SizeOfType<R>()),
       numParams(FuncSig<R, C, V, A...>::NumParams),
       pParamSizes(&FuncSig<R, C, V, A...>::ParamSizes[0]),
@@ -488,7 +489,7 @@ private:
 };
 
 /// Type erasure wrapper for function pointer arguments passed to PatchContext.  Can implicitly convert most callables.
-/// With non-empty callable types, the object and its lifetime become bound to this and any patches referencing it.
+/// With non-empty callable types, the object and its lifetime become bound to this and to any patches referencing it.
 class FunctionPtr {
 public:
   template <typename StlFunction> using GetTargetFunc = void*(StlFunction* pStlFunction);  ///< Returns stdfunc.target()
@@ -595,11 +596,13 @@ struct LowLevelHookInfo {
   union {
     struct {
       uint32 noBaseRelocReturn   :  1; ///< Do not auto-adjust callback return address for module base relocation.
-      uint32 noCustomReturnAddr  :  1; ///< Callback return address not allowed (for hook functions that return void).
+      uint32 noCustomReturnAddr  :  1; ///< Callback return address not allowed (i.e. callback function returns void).
       uint32 noShortReturnAddr   :  1; ///< Assume callback return address can't overlap overwritten area (x86: 5 bytes)
       uint32 noNullReturnDefault :  1; ///< Do not reinterpret callback return address of nullptr to default address.
       uint32 argsAsStructPtr     :  1; ///< Args are passed to the callback as a pointer to a struct that contains them.
-      uint32 reserved            : 27; ///< Reserved for future use.
+      uint32 propagateFlagsReg   :  1; ///< Callback's changes to flags register persist, rather than restore old flags.
+      uint32 debugBreakpoint     :  1; ///< Adds a debug breakpoint to the start of the trampoline code.
+      uint32 reserved            : 25; ///< Reserved for future use.
     };
     uint32 flags;  ///< All bitflags packed as an unsigned integer.
   };
@@ -626,8 +629,9 @@ class RegisterArg {
                 "Type does not fit in register size.");
 
 public:
-  Type& Get()      { return data_; }  ///< Explicitly retrieves the underlying data.
-  operator Type&() { return data_; }  ///< Implicit conversion operator to a reference of the underlying type.
+  Type& Get()          { return data_; } ///< Explicitly retrieves the underlying data.
+  operator Type&()     { return data_; } ///< Implicit conversion operator to a reference of the underlying type.
+  operator Type&&() && { return data_; } ///< Implicit conversion operator to a rvalue reference of the underlying type.
 
   ///@{ In lieu of no "operator.", dereference-like semantics are allowed for all types for struct field access, etc.
   template <typename U = Element> auto operator->() -> EnableIf<std::is_same<U, Type>::value,     U*> { return &data_; }
@@ -742,7 +746,7 @@ private:
 };
 
 
-///@{ @internal  Helper functions for creating a dummy object instance.  Used as a target for GetVftable().
+///@{ @internal  Helpers for creating a dummy object instance.  Used as a target for GetVftable() in PmfCast().
 template <typename T, bool = std::is_polymorphic<T>::value>
 struct DummyFactory { static T* Create(void* pPlacementAddr) { return nullptr; } static void Destroy(const void*) { } };
 

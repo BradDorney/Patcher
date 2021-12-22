@@ -1019,7 +1019,7 @@ void FunctionPtr::InitFunctorThunk(
       CatValue(&pWriter, Call32{ 0xE8, PcRelPtr(pWriter, sizeof(Call32), pfnInvokeFunctor) });  // call pFunction
     };
 
-    auto WriteCallAndCalleeCleanup = [&pWriter, &sig, &WriteCall, functorAddr] {
+    auto WriteCallAndCalleeCleanup = [&pWriter, &sig, &WriteCall] {
       const auto stackDelta = static_cast<int32>(sig.totalParamSize);
       if (sig.returnSize > (RegisterSize * 2)) {
         pWriter = nullptr;  // ** TODO need to handle oversized return types
@@ -1450,6 +1450,7 @@ Status PatchContext::HookCall(
     // Call r32 (+ r32) (* {2,4,8}) + i32
     case 0x90:  case 0x91:  case 0x92:  case 0x93:  case 0x95:  case 0x96:  case 0x97:  insnSize = 6;  break;
     case 0x94:                                                                          insnSize = 7;  break;
+    default:                                                                                           break;
     }
 
     if (insnSize >= sizeof(Call32)) {
@@ -1502,9 +1503,10 @@ static size_t CreateLowLevelHookTrampoline(
 #if PATCHER_X86_32  //                       Eax:    Ecx:    Edx:    Ebx:    Esi:    Edi:    Ebp:    Esp:    Eflags:
   static constexpr Insn     PushInsns[] = { {0x50}, {0x51}, {0x52}, {0x53}, {0x56}, {0x57}, {0x55}, {0x54}, {0x9C} };
   static constexpr Insn     PopInsns[]  = { {0x58}, {0x59}, {0x5A}, {0x5B}, {0x5E}, {0x5F}, {0x5D}, {0x5C}, {0x9D} };
-  static constexpr Register VolatileRegisters[] = { Register::Eflags, Register::Ecx, Register::Edx, Register::Eax };
+  static constexpr Register VolatileRegisters[] = { Register::Ecx, Register::Edx, Register::Eax };
   static constexpr Register ReturnRegister      = Register::Eax;
   static constexpr Register StackRegister       = Register::Esp;
+  static constexpr Register FlagsRegister       = Register::Eflags;
 #elif PATCHER_X86_64
   static constexpr Insn     PushInsns[] = {
   // Rax:    Rcx:    Rdx:    Rbx:    Rsi:    Rdi:    Rbp:    R8:           R9:           R10:          R11:
@@ -1517,11 +1519,12 @@ static size_t CreateLowLevelHookTrampoline(
     {0x41, 0x5C}, {0x41, 0x5D}, {0x41, 0x5E}, {0x41, 0x5F}, {0x5C}, {0x9D}
   };
   static constexpr Register VolatileRegisters[] = {
-    Register::R8,  Register::R9,  Register::R10, Register::R11, Register::Rflags, Register::Rdi, Register::Rsi,
-    Register::Rcx, Register::Rdx, Register::Rax
+    Register::R8,  Register::R9,  Register::R10, Register::R11, Register::Rdi, Register::Rsi, Register::Rcx,
+    Register::Rdx, Register::Rax
   };
   static constexpr Register ReturnRegister      = Register::Rax;
   static constexpr Register StackRegister       = Register::Rsp;
+  static constexpr Register FlagsRegister       = Register::Rflags;
 #endif
   static constexpr Register ByReference         = Register::Count;  // Placeholder for args by reference.
 
@@ -1540,17 +1543,17 @@ static size_t CreateLowLevelHookTrampoline(
   }
 
   std::vector<RegisterInfo> stackRegisters;  // Registers, in order they are pushed to the stack in (RTL).
-  stackRegisters.reserve(registers.Length() + ArrayLen(VolatileRegisters) + numByRef);
+  stackRegisters.reserve(registers.Length() + ArrayLen(VolatileRegisters) + numByRef + 1);
   uint32 returnRegIndex = UINT_MAX;
   uint32 stackRegIndex  = UINT_MAX;
   uint32 stackRegOffset = 0;
   uint32 firstArgIndex  = 0;
 
   auto AddRegisterToStack = [&stackRegisters, &returnRegIndex, &stackRegIndex, &stackRegOffset](RegisterInfo reg) {
-    if ((reg.regType == ReturnRegister) && (returnRegIndex == UINT_MAX)) {
+    if ((reg.type == ReturnRegister) && ((returnRegIndex == UINT_MAX) || reg.byReference)) {
       returnRegIndex = stackRegisters.size();
     }
-    else if ((reg.regType == StackRegister) && (stackRegIndex == UINT_MAX)) {
+    else if ((reg.type == StackRegister) && ((stackRegIndex == UINT_MAX) || ((reg.offset == 0) && reg.byReference))) {
       stackRegIndex  = stackRegisters.size();
       stackRegOffset = reg.offset;
     }
@@ -1562,12 +1565,18 @@ static size_t CreateLowLevelHookTrampoline(
   uint32 requestedRegMask = 0;
   if (registers.IsEmpty() == false) {
     for (uint32 i = 0; i < registers.Length(); ++i) {
-      assert(registers[i].regType < Register::Count);
-      requestedRegMask |= (1u << static_cast<uint32>(registers[i].regType));
+      assert(registers[i].type < Register::Count);
+      requestedRegMask |= (1u << static_cast<uint32>(registers[i].type));
     }
   }
+  auto IsRegisterRequested = [&requestedRegMask](Register reg)
+    { return BitFlagTest(requestedRegMask, 1u << static_cast<uint32>(reg)); };
+
+  if ((settings.propagateFlagsReg == false) && (IsRegisterRequested(FlagsRegister) == false)) {
+    AddRegisterToStack({ FlagsRegister });
+  }
   for (const Register reg : VolatileRegisters) {
-    if (BitFlagTest(requestedRegMask, 1u << static_cast<uint32>(reg)) == false) {
+    if (IsRegisterRequested(reg) == false) {
       AddRegisterToStack({ reg });
     }
   }
@@ -1596,6 +1605,10 @@ static size_t CreateLowLevelHookTrampoline(
   // Write the low-level hook trampoline code.
   uint8* pWriter = static_cast<uint8*>(pLowLevelHook);
 
+  if (settings.debugBreakpoint) {
+    CatByte(&pWriter, 0xCC);  // int 3
+  }
+
   auto Push = [&pWriter](Register r)
     { const auto& insn = PushInsns[static_cast<uint32>(r)];  CatBytes(&pWriter, &insn[0], insn.Size()); };
   auto Pop  = [&pWriter](Register r)
@@ -1612,7 +1625,7 @@ static size_t CreateLowLevelHookTrampoline(
       // See if there's an already-stored register we can use.
       if (spareRegister == Register::Count) {
         for (auto it = stackRegisters.begin(); it != (stackRegisters.begin() + index); ++it) {
-          const Register reg = it->regType;
+          const Register reg = it->type;
           if (reg < Register::GprLast) {
             spareRegister = reg;
             break;
@@ -1656,7 +1669,7 @@ static size_t CreateLowLevelHookTrampoline(
   // Push required registers to the stack in RTL order, per the cdecl calling convention.
   uint8 numReferencesPushed = 0;
   for (auto it = stackRegisters.begin(); it != stackRegisters.end(); ++it) {
-    const Register reg   = it->regType;
+    const Register reg   = it->type;
     const size_t   index = (it - stackRegisters.begin());
     if (reg == StackRegister) {
       PushAdjustedStackReg(index, (RegisterSize * index) + it->offset);
@@ -1673,9 +1686,9 @@ static size_t CreateLowLevelHookTrampoline(
 
   auto PopNil = [&pWriter, pLowLevelHook](int8 count = 1) {
 #if PATCHER_X86_32
-    constexpr uint8 SkipPop[] = { 0x83, 0xC4, 0x00 };        // add esp, 0x0
+    constexpr uint8 SkipPop[] = { 0x83, 0xC4, 0x00 };        // add esp, 0
 #elif PATCHER_X86_64
-    constexpr uint8 SkipPop[] = { 0x48, 0x83, 0xC4, 0x00 };  // add rsp, 0x0
+    constexpr uint8 SkipPop[] = { 0x48, 0x83, 0xC4, 0x00 };  // add rsp, 0
 #endif
     assert(count <= (INT8_MAX / RegisterSize));
     const int8 skipSize = (count * RegisterSize);
@@ -1698,7 +1711,7 @@ static size_t CreateLowLevelHookTrampoline(
   //         dependencies (if any arg registers e.g. RCX are requested), and reorder the movs or fall back to
   //         xchg/push+pop as needed.
   static constexpr Register ArgRegisters[] = { Register::Rcx, Register::Rdx, Register::R8, Register::R9 };
-  const size_t numArgRegisters = (std::min)(stackRegisters.size(), 4u);
+  const size_t numArgRegisters = (std::min)(stackRegisters.size(), ArrayLen(ArgRegisters));
   for (uint32 i = 0; i < numArgRegisters; ++i) {
     Pop(ArgRegisters[i]);
     stackRegisters.pop_back();
@@ -1711,14 +1724,14 @@ static size_t CreateLowLevelHookTrampoline(
   // Write the call instruction to our hook callback function.
   // If return value == nullptr, or custom return destinations aren't allowed, we can take a simpler path.
   if (pfnHookCb.Functor() == nullptr) {
-    CatValue(&pWriter, Call32{ 0xE8, PcRelPtr(pWriter, sizeof(Call32), pfnHookCb) });         // call pcrel32
+    CatValue(&pWriter, Call32{ 0xE8, PcRelPtr(pWriter, sizeof(Call32), pfnHookCb) });        // call pcrel32
   }
   else {
     // ** TODO this needs to be fixed for x64
-    CatBytes(&pWriter, { 0x6A, 0x00 });                                                       // push 0x0
-    CatValue(&pWriter, Op1_4{ 0x68, reinterpret_cast<uintptr>(pfnHookCb.Functor().get()) });  // push pFunctor
-    CatValue(&pWriter, Call32{ 0xE8, PcRelPtr(pWriter, sizeof(Call32), pfnHookCb) });         // call pcrel32
-    PopNil(2);                                                                                // add  esp, 0x8
+    CatBytes(&pWriter, { 0x6A, 0x00 });                                                      // push 0 (pPrevReturnAddr)
+    CatValue(&pWriter, Op1_4{ 0x68, reinterpret_cast<uintptr>(pfnHookCb.Functor().get()) }); // push pFunctor
+    CatValue(&pWriter, Call32{ 0xE8, PcRelPtr(pWriter, sizeof(Call32), pfnHookCb) });        // call pcrel32
+    PopNil(2);                                                                               // add  esp, 8
   }
 
   if ((settings.noCustomReturnAddr || settings.noNullReturnDefault) == false) {
@@ -1734,8 +1747,8 @@ static size_t CreateLowLevelHookTrampoline(
     // Case 1: Return to default address (hook function returned nullptr, or custom returns are disabled)
     // (Re)store register values from the stack.
     for (auto it = stackRegisters.rbegin(); it != stackRegisters.rend(); ++it) {
-      const Register reg = it->regType;
-      if ((((stackRegIndex == 0) && (stackRegOffset == 0)) || (reg != StackRegister)) && (reg != ByReference)) {
+      const Register reg = it->type;
+      if (((reg != StackRegister) || ((stackRegIndex == 0) && (stackRegOffset == 0))) && (reg != ByReference)) {
         Pop(reg);  // pop r32
       }
       else {
@@ -1744,8 +1757,7 @@ static size_t CreateLowLevelHookTrampoline(
       }
     }
 
-    const bool requestedStackReg = BitFlagTest(requestedRegMask, 1u << static_cast<uint32>(StackRegister));
-    if (requestedStackReg && (stackRegIndex != 0) && (stackRegOffset == 0)) {
+    if (IsRegisterRequested(StackRegister) && (stackRegIndex != 0) && (stackRegOffset == 0)) {
       // (Re)store ESP.
       const uint8 offset = static_cast<uint8>(-static_cast<int32>(RegisterSize) * (stackRegIndex + 1));
 #if PATCHER_X86_32
@@ -1756,9 +1768,8 @@ static size_t CreateLowLevelHookTrampoline(
     }
 
     // If there's a user-specified default return address, relocate and use that;  otherwise, return to original code.
-    void* pDefaultReturnAddr = (settings.pDefaultReturnAddr != nullptr)
-      ? PtrInc(settings.pDefaultReturnAddr, (settings.pDefaultReturnAddr.ShouldRelocate() ? moduleRelocDelta : 0))
-      : pTrampolineToOld;
+    void* pDefaultReturnAddr = (settings.pDefaultReturnAddr == nullptr) ? pTrampolineToOld :
+      PtrInc(settings.pDefaultReturnAddr, (settings.pDefaultReturnAddr.ShouldRelocate() ? moduleRelocDelta : 0));
     if ((pDefaultReturnAddr >= pAddress) && (pDefaultReturnAddr < PtrInc(pAddress, overwrittenSize))) {
       pDefaultReturnAddr = PtrInc(pTrampolineToOld, offsetLut[PtrDelta(pDefaultReturnAddr, pAddress)]);
     }
@@ -1788,7 +1799,7 @@ PATCHER_PACK
 
       struct {
         Op1_4  testBeforeOverwrite = { 0x3D, };                   // cmp eax, u32
-        Jmp8   skipBranch1A        = { 0x72, sizeof(branch1A) };  // jb short i8
+        Jmp8   skipBranch1A        = { 0x72, sizeof(branch1A) };  // jb  short i8
 
         struct { // Relocate destination into the trampoline to the original function.
           Op1_4  subtractOldAddress  = { 0x2D, };                 // sub eax, u32
@@ -1812,7 +1823,7 @@ PATCHER_ENDPACK
 
     // (Re)store register values from the stack.
     for (auto it = stackRegisters.rbegin(); it != stackRegisters.rend(); ++it) {
-      const Register reg = it->regType;
+      const Register reg = it->type;
       if (reg == ReturnRegister) {
         // Return register currently holds our return address, so it needs to be special cased.
         if (returnRegIndex != 0) {
@@ -1830,22 +1841,29 @@ PATCHER_ENDPACK
       }
     }
 
-    if (BitFlagTest(requestedRegMask, 1u << static_cast<uint32>(StackRegister))) {
-      // ** TODO Implement overwriting ESP in the custom return destination path
+    if ((stackRegIndex != UINT_MAX) && (stackRegOffset == 0) && stackRegisters[stackRegIndex].byReference) {
+      const uint8 addend          = ((returnRegIndex == 0) || (stackRegIndex == 0)) ? 1 : 0;  // ** TODO test this = 1
+      const uint8 stackValOffset  = static_cast<uint8>(-static_cast<int32>(RegisterSize) * (stackRegIndex  + addend));
+      const uint8 returnValOffset = static_cast<uint8>(-static_cast<int32>(RegisterSize) * (returnRegIndex + addend));
+      Push(ReturnRegister);                                   // push eax (return address)
+      CatBytes(&pWriter, { 0x89, 0xE0,                        // mov  eax, esp (set EAX to address of return address)
+                           0x8B, 0x64, 0x24, stackValOffset,  // mov  esp, dword ptr [esp + i8] (set ESP to user value)
+                           0xFF, 0x30,                        // push dword ptr [eax] (push return address used by retn)
+                           0x8B, 0x40, returnValOffset,       // mov  eax, [eax + i8] (set EAX to user value)
+                           0xC3 });                           // retn
     }
-
-    if (returnRegIndex != 0) {
+    else if (returnRegIndex != 0) {
       // Push the return address to the stack, mov the stack variable we skipped earlier to EAX, and return.
       const uint8 offset = static_cast<uint8>(-static_cast<int32>(RegisterSize) * returnRegIndex);
-      Push(ReturnRegister);                            // push eax
-      CatBytes(&pWriter, { 0x8B, 0x44, 0x24, offset,   // mov  eax, dword ptr [esp + i8]
-                           0xC3 });                    // retn
+      Push(ReturnRegister);                                   // push eax
+      CatBytes(&pWriter, { 0x8B, 0x44, 0x24, offset,          // mov  eax, dword ptr [esp + i8]
+                           0xC3 });                           // retn
     }
     else {
       // EAX is the last to pop.  Put the address on the stack just before EAX's value, pop EAX, then jmp to the former.
-      CatBytes(&pWriter, { 0x89, 0x44, 0x24, 0xFC });  // mov dword ptr [esp - 4], eax
-      Pop(ReturnRegister);                             // pop eax
-      CatBytes(&pWriter, { 0xFF, 0x64, 0x24, 0xF8 });  // jmp dword ptr [esp - 8]
+      CatBytes(&pWriter, { 0x89, 0x44, 0x24, 0xFC });         // mov dword ptr [esp - 4], eax
+      Pop(ReturnRegister);                                    // pop eax
+      CatBytes(&pWriter, { 0xFF, 0x64, 0x24, 0xF8 });         // jmp dword ptr [esp - 8]
     }
 
     if (settings.noShortReturnAddr == false) {
@@ -1968,9 +1986,9 @@ Status PatchContext::EditExports(
     }
     else {
       // Module has an export table.
-      pOldExportTable = static_cast<IMAGE_EXPORT_DIRECTORY*>(PtrInc(hModule_, pExportDataDir->VirtualAddress));
+      pOldExportTable = PtrInc<IMAGE_EXPORT_DIRECTORY*>(hModule_, pExportDataDir->VirtualAddress);
       strncpy_s(
-        &moduleName[0], sizeof(moduleName), static_cast<char*>(PtrInc(hModule_, pOldExportTable->Name)), _TRUNCATE);
+        &moduleName[0], sizeof(moduleName), PtrInc<char*>(hModule_, pOldExportTable->Name), _TRUNCATE);
 
       auto*const pFunctions    = PtrInc<uint32*>(hModule_, pOldExportTable->AddressOfFunctions);
       auto*const pNames        = PtrInc<uint32*>(hModule_, pOldExportTable->AddressOfNames);
@@ -1981,7 +1999,7 @@ Status PatchContext::EditExports(
       for (uint32 i = 0; i < pOldExportTable->NumberOfNames; ++i) {
         namesToOrdinals.emplace_hint(namesToOrdinals.end(),
                                      std::piecewise_construct,
-                                     std::forward_as_tuple(static_cast<const char*>(PtrInc(hModule_, pNames[i]))),
+                                     std::forward_as_tuple(PtrInc<const char*>(hModule_, pNames[i])),
                                      std::forward_as_tuple(pNameOrdinals[i]));
       }
       for (uint32 i = 0; i < pOldExportTable->NumberOfFunctions; ++i) {

@@ -135,10 +135,15 @@ public:
   ///
   /// @note  32-bit x86 only.
   PatcherStatus Hook(TargetPtr pAddress, const FunctionPtr& pfnNewFunction, void* pPfnTrampoline = nullptr);
-  template <typename T>  PatcherStatus Hook(TargetPtr pAddress, const FunctionPtr& pfnNewFunction, T** pPfnTrampoline)
-    { return Hook(pAddress, pfnNewFunction,    static_cast<void*>(pPfnTrampoline)); }
-  template <typename T = void>  PatcherStatus Hook(TargetPtr pAddress, uintptr toAddress, T** pPfnTrampoline = nullptr)
+
+  template <typename T>
+  PatcherStatus Hook(TargetPtr pAddress, const FunctionPtr& pfnNewFunction, T** pPfnTrampoline)
+    { return Hook(pAddress, pfnNewFunction, static_cast<void*>(pPfnTrampoline)); }
+
+  template <typename T = void>
+  PatcherStatus Hook(TargetPtr pAddress, uintptr toAddress, T** pPfnTrampoline = nullptr)
     { return Hook(pAddress, FixPtr(toAddress), static_cast<void*>(pPfnTrampoline)); }
+
   PatcherStatus Hook(TargetPtr pAddress, Offset pfnTrampolineOffset, const FunctionPtr& pfnNewFunction) {
     void*const pState = pfnNewFunction.FunctorState();
     return Hook(pAddress, pfnNewFunction, (pState == nullptr) ? nullptr : Util::PtrInc(pState, pfnTrampolineOffset));
@@ -157,10 +162,15 @@ public:
   /// @see   Comments of @ref Hook for examples, which has similar usage.
   /// @note  32-bit x86 only.
   PatcherStatus HookCall(TargetPtr pAddress, const FunctionPtr& pfnNewFunction, void* pPfnOriginal = nullptr);
-  template <typename T>  PatcherStatus HookCall(TargetPtr pAddress, const FunctionPtr& pfnNewFunction, T** pPfnOriginal)
-    { return HookCall(pAddress, pfnNewFunction,    static_cast<void*>(pPfnOriginal)); }
-  template <typename T = void> PatcherStatus HookCall(TargetPtr pAddress, uintptr toAddress, T** pPfnOriginal = nullptr)
+
+  template <typename T>
+  PatcherStatus HookCall(TargetPtr pAddress, const FunctionPtr& pfnNewFunction, T** pPfnOriginal)
+    { return HookCall(pAddress, pfnNewFunction, static_cast<void*>(pPfnOriginal)); }
+
+  template <typename T = void>
+  PatcherStatus HookCall(TargetPtr pAddress, uintptr toAddress, T** pPfnOriginal = nullptr)
     { return HookCall(pAddress, FixPtr(toAddress), static_cast<void*>(pPfnOriginal)); }
+
   PatcherStatus HookCall(TargetPtr pAddress, Offset pfnOriginalOffset, const FunctionPtr& pfnNewFunction) {
     void*const pState = pfnNewFunction.FunctorState();
     return HookCall(pAddress, pfnNewFunction, (pState == nullptr) ? nullptr : Util::PtrInc(pState, pfnOriginalOffset));
@@ -243,13 +253,13 @@ public:
   ///@{ Reassigns an object within module memory.
   template <typename T1, typename T2>  PatcherStatus Assign(T1*    pAddress, T2&& value);
   template <typename T>                PatcherStatus Assign(uintptr address,  T&& value)
-    { return Assign(FixPtr<T*>(address), std::forward<T>(value)); }
+    { return Assign(FixPtr<Impl::RemoveConst<Impl::RemoveRef<T>>>(address), std::forward<T>(value)); }
   ///@}
 
   ///@{ In-place constructs an object within module memory.
   template <typename T, typename... Args>  PatcherStatus Construct(T*     pAddress, Args&&... args);
   template <typename T, typename... Args>  PatcherStatus Construct(uintptr address, Args&&... args)
-    { return Construct<T>(FixPtr<T*>(address), std::forward<Args>(args)...); }
+    { return Construct<T>(FixPtr<T>(address), std::forward<Args>(args)...); }
   ///@}
 
   PatcherStatus LockThreads();    ///< Freezes all other process threads to avoid races between writing and executing.
@@ -282,7 +292,7 @@ private:
 
   void*          hModule_;          ///< Handle to the module this PatchContext operates on.
   bool           hasModuleRef_;     ///< If set, this PatchContext has acquired a reference to @ref hModule_.
-  intptr_t       moduleRelocDelta_; ///< Delta between the module's preferred base address and its loaded address.
+  ptrdiff_t      moduleRelocDelta_; ///< Delta between the module's preferred base address and its loaded address.
   uint32         moduleHash_;       ///< Hash identifying the module based on its header attributes.
   PatcherStatus  status_;           ///< Status of this PatchContext.  If this is an error, most methods become a no-op.
 
@@ -290,11 +300,11 @@ private:
 
   /// @internal  Struct for storing mappings of patch addresses to infomation required for cleanup and other purposes.
   struct PatchInfo {
-    void*                        pAddress;          ///< Actual patch address (may differ from requested address)
-    Impl::ByteArray<StorageSize> oldData;           ///< Old memory copy
-    void*                        pTrackedAlloc;     ///< Tracked allocation, e.g. trampoline code (optional)
-    size_t                       trackedAllocSize;  ///< Tracked allocation size (optional)
-    std::shared_ptr<void>        pFunctorObj;       ///< Pointer to functor object (optional)
+    void*                        pAddress;         ///< Actual patch address (may differ from requested address)
+    Impl::ByteArray<StorageSize> oldData;          ///< Old memory copy
+    void*                        pTrackedAlloc;    ///< Tracked allocation, e.g. trampoline code (optional)
+    size_t                       trackedAllocSize; ///< Tracked allocation size (optional)
+    std::shared_ptr<void>        pFunctorObj;      ///< Pointer to functor object; also owns thunk allocation (optional)
   };
 
   /// Patch history, sorted from newest to oldest.

@@ -152,8 +152,7 @@ using uint32  = uint32_t;
 using uint64  = uint64_t;
 using uintptr = uintptr_t;
 
-/// Forward declaration of Registers::Register enum class, an array of which is passed to PatchContext::LowLevelHook().
-namespace Registers { enum class Register : uint8; }
+namespace Registers { enum class Register : uint8; }  // Forward declaration of Registers::Register enum class.
 
 /// Info about registers requested by LowLevelHook().
 struct RegisterInfo {
@@ -186,10 +185,28 @@ namespace Util {
 /// Templated dummy parameter type that can be used to pass a calling convention as a templated function argument.
 template <Call C>  struct AsCall{};
 
+
+///@{ Pointer arithmetic helpers.
+template <typename T = void*>       T PtrInc(void*       p, size_t offset) { return T((uint8*)(p)       + offset); }
+template <typename T = const void*> T PtrInc(const void* p, size_t offset) { return T((const uint8*)(p) + offset); }
+
+template <typename T = void*>       T PtrDec(void*       p, size_t offset) { return T((uint8*)(p)       - offset); }
+template <typename T = const void*> T PtrDec(const void* p, size_t offset) { return T((const uint8*)(p) - offset); }
+
+inline size_t PtrDelta(const void* pHigh, const void* pLow)
+  { return static_cast<size_t>(static_cast<const uint8*>(pHigh) - static_cast<const uint8*>(pLow)); }
+
+template <typename T = int32>  T PcRelPtr(const void* pFrom, size_t fromSize, const void* pTo)
+  { return T(PtrDelta(pTo, PtrInc(pFrom, fromSize))); }  // C-style cast works for both T as integer or pointer type.
+template <typename R = int32, typename T>
+R PcRelPtr(const T* pFrom, const void* pTo) { return PcRelPtr<R>(pFrom, sizeof(T), pTo); }
+///@}
+
 /// Rounds value up to the nearest multiple of align, where align is a power of 2.
 template <typename T>
 constexpr T Align(T value, size_t align) { return (value + static_cast<T>(align - 1)) & ~static_cast<T>(align - 1); }
 } // Util
+
 
 namespace Impl {
 ///@{ Returns the sum of the values.  Intended usage is with an expanded non-type parameter pack.
@@ -219,6 +236,7 @@ template <size_t N, typename T>  struct TupleElementImpl<N, T, EnableIf<(N < std
 
 template <size_t N, typename T>  using TupleElement = typename TupleElementImpl<N, T>::Type;
 ///@}
+
 
 ///@{ @internal  Template metafunction used to obtain function call signature information from a callable.
 template <typename T, typename = void>  struct FuncTraitsImpl   :   public FuncTraitsImpl<decltype(&T::operator())>{};
@@ -930,7 +948,7 @@ bool ByteArray<InitialSize>::Append(
     }
   }
   if (result == true) {
-    memcpy(static_cast<uint8*>(pData_) + size_, pSrc, size);
+    memcpy(&pData_[size_], pSrc, size);
     size_ += size;
   }
 

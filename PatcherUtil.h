@@ -55,23 +55,6 @@ namespace Util {
 constexpr size_t SetCapturedTrampoline = 0;
 
 
-///@{ Pointer arithmetic helpers.
-template <typename T = void*>       T PtrInc(void*       p, size_t offset) { return T((uint8*)(p)       + offset); }
-template <typename T = const void*> T PtrInc(const void* p, size_t offset) { return T((const uint8*)(p) + offset); }
-
-template <typename T = void*>       T PtrDec(void*       p, size_t offset) { return T((uint8*)(p)       - offset); }
-template <typename T = const void*> T PtrDec(const void* p, size_t offset) { return T((const uint8*)(p) - offset); }
-
-inline size_t PtrDelta(const void* pHigh, const void* pLow)
-  { return static_cast<size_t>(static_cast<const uint8*>(pHigh) - static_cast<const uint8*>(pLow)); }
-
-template <typename T = int32>  T PcRelPtr(const void* pFrom, size_t fromSize, const void* pTo)
-  { return T(PtrDelta(pTo, PtrInc(pFrom, fromSize))); }  // C-style cast works for both T as integer or pointer type.
-template <typename R = int32, typename T>
-R PcRelPtr(const T* pFrom, const void* pTo) { return PcRelPtr<R>(pFrom, sizeof(T), pTo); }
-///@}
-
-
 ///@{ Converts any (non-overloaded) lambda or functor to a FunctionPtr object (of the specified calling convention).
 ///   This can be passed to PatchContext methods, be used as a callable, and implicitly converts to a function pointer.
 ///   If created from a non-empty type, then the returned FunctionPtr needs to be kept alive or referenced by a patch.

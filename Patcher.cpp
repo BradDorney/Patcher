@@ -488,6 +488,24 @@ Status PatchContext::Memset(
 }
 
 // =====================================================================================================================
+Status PatchContext::Write(
+  TargetPtr           pAddress,
+  const FunctionPtr&  pfnNewFunction)
+{
+  if ((status_ == Status::Ok) && (pfnNewFunction == nullptr)) {
+    status_ = Status::FailInvalidCallback;
+  }
+
+  if ((Write(pAddress, pfnNewFunction.Pfn()) == PatcherStatus::Ok) && (pfnNewFunction.Functor() != nullptr)) {
+    auto& entry = *historyAt_[MaybeFixTargetPtr(pAddress)];
+    entry.pFunctorObj     = pfnNewFunction.Functor();
+    entry.pfnFunctorThunk = pfnNewFunction;
+  }
+
+  return status_;
+}
+
+// =====================================================================================================================
 Status PatchContext::WriteNop(
   TargetPtr  pAddress,
   size_t     size)
@@ -560,6 +578,10 @@ Status PatchContext::Revert(
         g_allocator.Free(entry.pTrackedAlloc);
       }
 
+      if (entry.pfnFunctorThunk != nullptr) {
+        AdvanceThreads(entry.pfnFunctorThunk, MaxFunctorThunkSize);
+      }
+
       history_.erase(it->second);
       historyAt_.erase(it);
     }
@@ -591,11 +613,17 @@ Status PatchContext::RevertAll() {
   for (const auto& entry: history_) {
     Memcpy(entry.pAddress, entry.oldData.Data(), entry.oldData.Size());
 
-    if (((status_ == Status::Ok) || (status_ == Status::FailModuleUnloaded)) && (entry.pTrackedAlloc != nullptr)) {
-      AdvanceThreads(entry.pTrackedAlloc, entry.trackedAllocSize);
+    if ((status_ == Status::Ok) || (status_ == Status::FailModuleUnloaded)) {
+      if (entry.pTrackedAlloc != nullptr) {
+        AdvanceThreads(entry.pTrackedAlloc, entry.trackedAllocSize);
 
-      // If Memcpy failed, this won't get cleaned up until the trampoline allocation heap is destroyed.
-      g_allocator.Free(entry.pTrackedAlloc);
+        // If Memcpy failed, this won't get cleaned up until the trampoline allocation heap is destroyed.
+        g_allocator.Free(entry.pTrackedAlloc);
+      }
+
+      if (entry.pfnFunctorThunk != nullptr) {
+        AdvanceThreads(entry.pfnFunctorThunk, MaxFunctorThunkSize);
+      }
     }
 
     if (status_ != Status::Ok) {
@@ -756,8 +784,8 @@ static uintptr AdvanceThread(
 // =====================================================================================================================
 // Prevent race conditions between writing code and executing it.  This is a no-op if LockThreads() hasn't been called.
 Status PatchContext::AdvanceThreads(
-  void*   pAddress,
-  size_t  size)
+  const void*  pAddress,
+  size_t       size)
 {
   const uintptr address = reinterpret_cast<uintptr>(pAddress);
 
@@ -1395,9 +1423,12 @@ PATCHER_ENDPACK
     PatchInfo& entry = *historyAt_[pAddress];
 
     // Add trampoline/functor info to the history tracker entry for this patch so we can clean it up later.
-    entry.pTrackedAlloc    = pTrampoline;
-    entry.trackedAllocSize = trampolineSize;
-    entry.pFunctorObj      = pfnNewFunction.Functor();
+    entry.pTrackedAlloc     = pTrampoline;
+    entry.trackedAllocSize  = trampolineSize;
+    entry.pFunctorObj       = pfnNewFunction.Functor();
+    if (pfnNewFunction.Functor() != nullptr) {
+      entry.pfnFunctorThunk = pfnNewFunction;
+    }
 
     if (pPfnTrampoline != nullptr) {
       *static_cast<void**>(pPfnTrampoline) = pTrampoline;
@@ -1481,7 +1512,9 @@ PATCHER_ENDPACK
 
   if ((status_ == Status::Ok) && (pfnNewFunction.Functor() != nullptr)) {
     // Add trampoline info to the history tracker entry for this patch so we can clean it up later.
-    historyAt_[pAddress]->pFunctorObj = pfnNewFunction.Functor();
+    auto& entry = *historyAt_[pAddress];
+    entry.pFunctorObj     = pfnNewFunction.Functor();
+    entry.pfnFunctorThunk = pfnNewFunction;
   }
 
   return status_;
@@ -1948,9 +1981,12 @@ PATCHER_ENDPACK
     PatchInfo& entry = *historyAt_[pAddress];
 
     // Add trampoline (and functor) info to the history tracker entry for this patch so we can clean it up later.
-    entry.pTrackedAlloc    = pTrampoline;
-    entry.trackedAllocSize = trampolineSize;
-    entry.pFunctorObj      = pfnHookCb.Functor();
+    entry.pTrackedAlloc     = pTrampoline;
+    entry.trackedAllocSize  = trampolineSize;
+    entry.pFunctorObj       = pfnHookCb.Functor();
+    if (pfnHookCb.Functor() != nullptr) {
+      entry.pfnFunctorThunk = pfnHookCb;
+    }
   }
 
   if ((status_ != Status::Ok) && (pTrampoline != nullptr)) {

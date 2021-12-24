@@ -71,7 +71,7 @@ PATCHER_EMIT_CALLING_CONVENTIONS(PATCHER_CREATE_FUNCTOR_INVOKER_DEF);
 ///        object instance will be attempted to be created (may be unsafe!).  Class cannot multiply inherit.
 /// @see   PATCHER_MFN_PTR() macro, which is more robust for certain compilers and more reliable for virtual methods.
 template <typename T, typename Pfn>
-auto   PmfCast(Pfn T::* pmf, const T* pThis = nullptr) -> typename Impl::FuncTraits<decltype(pmf)>::Pfn;
+auto PmfCast(Pfn T::* pmf, const T* pThis = nullptr) -> typename Impl::FuncTraits<decltype(pmf)>::Pfn;
 } // Util
 
 

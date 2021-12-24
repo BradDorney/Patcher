@@ -92,14 +92,7 @@ public:
   PatcherStatus Write(TargetPtr pAddress, const T& value) { return Memcpy<sizeof(T)>(pAddress, &value); }
 
   /// Writes the given FunctionPtr address to module memory.
-  PatcherStatus Write(TargetPtr pAddress, const FunctionPtr& pfnNewFunction) {
-    status_ = ((status_ == PatcherStatus::Ok) && (pfnNewFunction == nullptr)) ? PatcherStatus::FailInvalidCallback
-                                                                              : status_;
-    if (Write(pAddress, pfnNewFunction.Pfn()) == PatcherStatus::Ok) {
-      historyAt_[MaybeFixTargetPtr(pAddress)]->pFunctorObj = pfnNewFunction.Functor();
-    }
-    return status_;
-  }
+  PatcherStatus Write(TargetPtr pAddress, const FunctionPtr& pfnNewFunction);
 
   /// Writes the given bytes to module memory.
   PatcherStatus WriteBytes(TargetPtr pAddress, Span<uint8> bytes)
@@ -219,7 +212,7 @@ public:
   ///   references to it.
   ///
   /// @param [in]  pOldGlobal  Pointer to the old global we want to replace.
-  /// @param [in]  size        Size in bytes of the global.
+  /// @param [in]  size        Size in bytes of the old global.
   /// @param [in]  pNewGlobal  Pointer to the new global we want to replace all references to pOldGlobal with.
   /// @param [out] pRefsOut    (Optional) Pointer to a vector to contain all locations that have been patched up.
   PatcherStatus ReplaceReferencesToGlobal(
@@ -287,7 +280,7 @@ private:
   ///@{ Helper functions for barriering around memory writes.
   uint32        BeginDeProtect(void* pAddress, size_t size);
   void          EndDeProtect(void*   pAddress, size_t size, uint32 oldAttr);
-  PatcherStatus AdvanceThreads(void* pAddress, size_t size);
+  PatcherStatus AdvanceThreads(const void* pAddress, size_t size);
   ///@}
 
   void*          hModule_;          ///< Handle to the module this PatchContext operates on.
@@ -305,6 +298,7 @@ private:
     void*                        pTrackedAlloc;    ///< Tracked allocation, e.g. trampoline code (optional)
     size_t                       trackedAllocSize; ///< Tracked allocation size (optional)
     std::shared_ptr<void>        pFunctorObj;      ///< Pointer to functor object; also owns thunk allocation (optional)
+    const void*                  pfnFunctorThunk;  ///< Pointer to functor thunk code allocation (optional)
   };
 
   /// Patch history, sorted from newest to oldest.

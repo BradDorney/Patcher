@@ -158,7 +158,7 @@ namespace Registers { enum class Register : uint8; }  // Forward declaration of 
 struct RegisterInfo {
   Registers::Register type;         ///< Register type.
   bool                byReference;  ///< Pass register by reference for writing? (Not needed with stack values)
-  uint32              offset;       ///< (Stack only) Offset into the stack associated with this value?
+  uint32              offset;       ///< (Stack only) Offset into the stack associated with this value.
 };
 
 /// Enum specifying a function's calling convention.
@@ -732,15 +732,15 @@ public:
     : pfn_((void*)(pfn)), sig_(FuncTraits<T>{}), pObj_(), pState_() { }
 
   /// Conversion constructor for pointers-to-member-functions.
-  /// @ref pThis can be optionally provided to help look up the function address.  However, that will not bind pThis to
-  /// this FunctionPtr as its functor object; to do that, consider constructing a FunctionPtr from e.g. std::bind().
+  /// @ref pThis can be optionally provided to help look up the function address, but is not bound to this FunctionPtr.
   /// @note Consider using the PATCHER_MFN_PTR() macro, which is more robust than PmfCast() backing this constructor.
   template <typename T, typename Pfn, typename = EnableIf<std::is_function<Pfn>::value>>
   FunctionPtr(Pfn T::*pmf, const T* pThis = nullptr)
     : pfn_((void*)(Util::PmfCast(pmf, pThis))), sig_(FuncTraits<decltype(pmf)>{}), pObj_(), pState_() { }
 
-  /// Conversion constructor for callable objects.  This works with lambdas, std::bind, (non-overloaded) functors, etc.
+  /// Conversion constructor for callable objects.  This works with lambdas, (non-overloaded) functors, etc.
   /// @note To hook T::operator() itself, consider constructing a FunctionPtr from &T::operator().
+  // ** TODO try to fix std::bind, which has overloaded operator()
   template <
     typename T, Call C = Call::Cdecl, typename E = typename std::is_empty<T>::type, typename = decltype(&T::operator())>
   constexpr FunctionPtr(T&& functor, Util::AsCall<C> call = {}) : FunctionPtr(std::forward<T>(functor), call, E{}) { }

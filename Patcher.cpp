@@ -155,6 +155,8 @@ static Status TranslateCsError(cs_err capstoneError) {
   }
 }
 
+using InsnVector = std::vector<cs_insn>;
+
 // Capstone disassembler helper class.
 template <cs_arch CsArchitecture, uint32 CsMode>
 class Disassembler {
@@ -176,10 +178,7 @@ public:
     }
   }
 
-  std::vector<cs_insn> Disassemble(const void* pAddress, size_t numInsns) const {
-    std::vector<cs_insn> out;
-    out.reserve(numInsns);
-
+  void Disassemble(const void* pAddress, size_t numInsns, InsnVector* pOut) const {
     if (refCount_ != 0) {
       cs_insn*      pInsns = nullptr;
       const size_t  count  = cs_disasm(
@@ -187,14 +186,15 @@ public:
 
       if (pInsns != nullptr) {
         if (GetLastError() == Status::Ok) {
-          out.insert(out.end(), pInsns, pInsns + count);
+          pOut->insert(pOut->end(), pInsns, pInsns + count);
         }
         cs_free(pInsns, count);
       }
     }
-
-    return out;
   }
+
+  InsnVector Disassemble(const void* pAddress, size_t numInsns) const
+    { InsnVector out;  Disassemble(pAddress, numInsns, &out);  return out; }
 
   Status GetLastError() const { return TranslateCsError(cs_errno(hDisasm_)); }
 
@@ -1170,23 +1170,19 @@ void FunctionPtr::InitFunctorThunk(
 // Functionally copies machine code instructions from one code memory location to another.
 // Note that this function does not flush the instruction cache.
 static void CopyInstructions(
-  uint8**         ppWriter,
-  const cs_insn*  pInsns,
-  size_t*         pCount,
-  uint8*          pOverwrittenSize,
-  uint8           offsetLut[MaxOverwriteSize])
+  uint8**            ppWriter,
+  const InsnVector&  insns,
+  uint8              overwrittenSize,
+  uint8              offsetLut[MaxOverwriteSize])
 {
-  assert(
-    (ppWriter != nullptr) && (pInsns != nullptr) && (pCount != nullptr) && (*pCount != 0) && (offsetLut != nullptr));
+  assert((ppWriter != nullptr) && (insns.empty() == false) && (offsetLut != nullptr));
 
   uint8*const  pBegin     = *ppWriter;
   size_t  curOldOffset    = 0;
-  size_t  count           = *pCount;
-  uint8   overwrittenSize = *pOverwrittenSize;
   std::vector<std::pair<uint32*, uint8>> internalRelocs;
 
-  for (size_t i = 0; i < count; ++i) {
-    const auto& insn  = pInsns[i];
+  for (size_t i = 0; i < insns.size(); ++i) {
+    const auto& insn  = insns[i];
     const auto& bytes = insn.bytes;
 
     ptrdiff_t pcRelTarget = 0;
@@ -1248,7 +1244,7 @@ PATCHER_ENDPACK
     else {
       // Instructions with PC rel operands must be fixed up.  The new opcode has already been written.
       const auto target = static_cast<uintptr>(pcRelTarget + insn.address + insn.size);
-      const auto offset = static_cast<ptrdiff_t>(target - pInsns[0].address);
+      const auto offset = static_cast<ptrdiff_t>(target - insns[0].address);
 
       if ((offset < 0) || (static_cast<size_t>(offset) >= overwrittenSize)) {
         // Target is to outside of the overwritten area.
@@ -1270,20 +1266,16 @@ PATCHER_ENDPACK
 }
 
 // =====================================================================================================================
-static Status CreateTrampoline(
-  void*      pAddress,
-  Allocator* pAllocator,
-  void**     ppTrampoline,                          // [out] Pointer to where trampoline code begins.
-  uint8*     pOverwrittenSize,                      // [out] Total size in bytes of overwritten instructions.
-  size_t*    pTrampolineSize,                       // [out] Size in bytes of trampoline allocation.
-  size_t     prologSize                  = 0,       // [in]  Bytes to prepend before the trampoline for custom code.
-  uint8      offsetLut[MaxOverwriteSize] = nullptr) // [out] LUT of overwritten instruction offsets : trampoline offsets
+// Finds if there's a region we can insert a hook patch, and what instructions will be overwritten.
+static Status FindHookPatchRegion(
+  void*       pAddress,
+  uint8*      pOverwrittenSize,  // [out] Total size in bytes of overwritten instructions.
+  InsnVector* pInsns)            // [out] Instructions disassembled in the region.
 {
-  assert((pAddress != nullptr) && (ppTrampoline != nullptr) && (pOverwrittenSize != nullptr));
-  assert((prologSize % CodeAlignment) == 0);
-  
-  const auto insns  = g_disasm.Disassemble(pAddress, sizeof(Jmp32));
-  Status     status = (insns.size() != 0) ? g_disasm.GetLastError() : Status::FailDisassemble;
+  assert((pAddress != nullptr) && (pOverwrittenSize != nullptr));
+
+  g_disasm.Disassemble(pAddress, sizeof(Jmp32), pInsns);
+  Status status = (pInsns->size() != 0) ? g_disasm.GetLastError() : Status::FailDisassemble;
 
   void*  pTrampoline = nullptr;
   size_t allocSize   = 0;
@@ -1294,8 +1286,8 @@ static Status CreateTrampoline(
   if (status == Status::Ok) {
     // Calculate how many instructions will actually be overwritten by the Jmp32 and their total size.
     bool foundEnd = false;
-    for (uint32 i = 0, count = insns.size(); ((i < count) && (overwrittenSize < sizeof(Jmp32))); ++i) {
-      const auto& insn = insns[i];
+    for (uint32 i = 0, count = pInsns->size(); ((i < count) && (overwrittenSize < sizeof(Jmp32))); ++i) {
+      const auto& insn = (*pInsns)[i];
 
       // Assume int 3, nop, or unknown instructions are padders.
       if (foundEnd && (insn.bytes[0] != 0xCC) && (insn.bytes[0] != 0x90) && (insn.id != X86_INS_INVALID)) {
@@ -1314,6 +1306,10 @@ static Status CreateTrampoline(
       }
     }
 
+    if (pInsns->size() > oldCount) {
+      pInsns->resize(oldCount);
+    }
+
     if (overwrittenSize >= sizeof(Jmp32)) {
       *pOverwrittenSize = overwrittenSize;
     }
@@ -1325,6 +1321,7 @@ static Status CreateTrampoline(
       uint8* pReader = static_cast<uint8*>(pAddress);
 
       // Padder bytes are typically int 3 (0xCC), nop (0x90), or NUL.
+      // ** TODO Check that pReader[-sizeof(Jmp32)] is a valid executable memory address
       for (int32 i = 1; ((pReader[-i] == 0xCC) || (pReader[-i] == 0x90)); ++i) {
         if (i >= static_cast<int32>(sizeof(Jmp32))) {
           *pOverwrittenSize = overwrittenSize;
@@ -1338,9 +1335,31 @@ static Status CreateTrampoline(
     }
   }
 
+  return status;
+}
+
+// =====================================================================================================================
+// Creates a trampoline to call the original code that had been overwritten by a hook. Call after FindHookPatchRegion().
+static Status CreateTrampoline(
+  void*             pAddress,
+  Allocator*        pAllocator,
+  const InsnVector& insns,
+  uint8             overwrittenSize,
+  void**            ppTrampoline,                          // [out] Pointer to where trampoline code (or prolog) begins.
+  size_t*           pTrampolineSize,                       // [out] Size in bytes of trampoline allocation.
+  size_t            prologSize                  = 0,       // [in]  Bytes to prepend for custom code.
+  uint8             offsetLut[MaxOverwriteSize] = nullptr) // [out] LUT of old instruction offsets : trampoline offsets.
+{
+  assert((pAddress != nullptr) && (ppTrampoline != nullptr) && (pAllocator != nullptr));
+  assert((prologSize % CodeAlignment) == 0);
+  
+  void*  pTrampoline = nullptr;
+  size_t allocSize   = 0;
+  Status status      = Status::Ok;
+
   if (status == Status::Ok) {
     // Allocate memory to store the trampoline.
-    allocSize   = Align((prologSize + (MaxInstructionSize * oldCount) + sizeof(Jmp32) + CodeAlignment - 1),
+    allocSize   = Align((prologSize + (MaxInstructionSize * insns.size()) + sizeof(Jmp32) + CodeAlignment - 1),
                         CodeAlignment);
     pTrampoline = pAllocator->Alloc(allocSize, CodeAlignment);
     status = (pTrampoline != nullptr) ? Status::Ok : Status::FailMemAlloc;
@@ -1355,10 +1374,10 @@ static Status CreateTrampoline(
 
     // Our trampoline needs to be able to reissue instructions overwritten by the jump to it.
     uint8* pWriter = (static_cast<uint8*>(pTrampoline) + prologSize);
-    CopyInstructions(&pWriter, insns.data(), &oldCount, &overwrittenSize, offsetLut);
+    CopyInstructions(&pWriter, insns, overwrittenSize, offsetLut);
 
     // Complete the trampoline by writing a jmp instruction to the original function.
-    CatValue<Jmp32>(&pWriter, { 0xE9, PcRelPtr(pWriter, sizeof(Jmp32), PtrInc(pAddress, *pOverwrittenSize)) });
+    CatValue<Jmp32>(&pWriter, { 0xE9, PcRelPtr(pWriter, sizeof(Jmp32), PtrInc(pAddress, overwrittenSize)) });
 
     // Fill in any left over bytes with int 3 padders.
     const size_t remainingSize = allocSize - PtrDelta(pWriter, pTrampoline);
@@ -1393,9 +1412,10 @@ Status PatchContext::Hook(
 
   pAddress = MaybeFixTargetPtr(pAddress);
 
-  void*  pTrampoline     = nullptr;
-  uint8  overwrittenSize = 0;
-  size_t trampolineSize  = 0;
+  void*      pTrampoline     = nullptr;
+  uint8      overwrittenSize = 0;
+  size_t     trampolineSize  = 0;
+  InsnVector insns;
 
   if (status_ == Status::Ok) {
     // Destroy any existing trampoline or functor.
@@ -1404,19 +1424,13 @@ Status PatchContext::Hook(
   }
 
   if (status_ == Status::Ok) {
-    if (pPfnTrampoline != nullptr) {
-      status_ = CreateTrampoline(pAddress, pAllocator_, &pTrampoline, &overwrittenSize, &trampolineSize);
-    }
-    else {
-      // ** TODO We should disasemble even in this case to figure out if we need to do a jmp8-to-jmp32-type patch
-      overwrittenSize = sizeof(Jmp32);
-    }
+    status_ = FindHookPatchRegion(pAddress, &overwrittenSize, &insns);
   }
 
   if (status_ == Status::Ok) {
 #if PATCHER_X86_64
     if (overwrittenSize >= sizeof(JmpAbs64)) {
-      
+      // ** TODO x64
     }
     else
 #endif
@@ -1472,6 +1486,10 @@ PATCHER_ENDPACK
       // Not enough space to write a jump to our hook function.
       status_ = Status::FailInstallHook;
     }
+  }
+
+  if ((status_ == Status::Ok) && (pPfnTrampoline != nullptr)) {
+    status_ = CreateTrampoline(pAddress, pAllocator_, insns, overwrittenSize, &pTrampoline, &trampolineSize);
   }
 
   if (status_ == Status::Ok) {
@@ -1986,10 +2004,11 @@ Status PatchContext::LowLevelHook(
 
   pAddress = MaybeFixTargetPtr(pAddress);
 
-  void*  pTrampoline     = nullptr;
-  uint8  overwrittenSize = 0;
-  size_t trampolineSize  = 0;
-  uint8  offsetLut[MaxOverwriteSize] = { };
+  void*      pTrampoline     = nullptr;
+  uint8      overwrittenSize = 0;
+  size_t     trampolineSize  = 0;
+  uint8      offsetLut[MaxOverwriteSize] = { };
+  InsnVector insns;
 
   const Call conv = pfnHookCb.Signature().convention;
   if ((status_ == Status::Ok) && (conv != Call::Cdecl) && (conv != Call::Default) && (conv != Call::Unknown)) {
@@ -2003,12 +2022,16 @@ Status PatchContext::LowLevelHook(
   }
 
   if (status_ == Status::Ok) {
+    status_ = FindHookPatchRegion(pAddress, &overwrittenSize, &insns);
+  }
+
+  if ((status_ == Status::Ok) && (overwrittenSize >= sizeof(Jmp32))) {
     status_ = CreateTrampoline(
-      pAddress, pAllocator_, &pTrampoline, &overwrittenSize, &trampolineSize, MaxLowLevelHookSize, offsetLut);
+      pAddress, pAllocator_, insns, overwrittenSize, &pTrampoline, &trampolineSize, MaxLowLevelHookSize, offsetLut);
   }
 
   if (status_ == Status::Ok) {
-    if ((pTrampoline != nullptr) && (overwrittenSize >= sizeof(Jmp32))) {
+    if (pTrampoline != nullptr) {
       // Initialize low-level hook code.
       const size_t usedSize = CreateLowLevelHookTrampoline(
         pTrampoline, registers, pAddress, pfnHookCb, moduleRelocDelta_, offsetLut, overwrittenSize, info);

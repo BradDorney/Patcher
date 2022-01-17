@@ -152,6 +152,8 @@ using uint32  = uint32_t;
 using uint64  = uint64_t;
 using uintptr = uintptr_t;
 
+class Allocator;  ///< @internal Code allocator class.
+
 namespace Registers { enum class Register : uint8; }  // Forward declaration of Registers::Register enum class.
 
 /// Info about registers requested by LowLevelHook().
@@ -347,10 +349,10 @@ struct FuncSig {
 
 template <typename R, Call Call, typename T, typename... A>
 struct FuncSig<R, Call, true, T, A...> : public FuncSig<R, Call, false, T, A...> {
-  using First    = Conditional<std::is_void<T>::value, int, T>;                       ///< Placeholder for first param.
-  using Function = Conditional<std::is_void<T>::value, R(...), R(First, A..., ...)>;  ///< Signature w/o convention.
-  using Pfn      = AddConvention<Function, Call>;                                     ///< Function pointer signature.
-  static constexpr bool IsVariadic = true;                                            ///< Is function variadic?
+  using First_   = Conditional<std::is_void<T>::value, int, T>;                        ///< Placeholder for first param.
+  using Function = Conditional<std::is_void<T>::value, R(...), R(First_, A..., ...)>;  ///< Signature w/o convention.
+  using Pfn      = AddConvention<Function, Call>;                                      ///< Function pointer signature.
+  static constexpr bool IsVariadic = true;                                             ///< Is function variadic?
 };
 ///@}
 

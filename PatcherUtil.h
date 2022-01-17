@@ -84,7 +84,7 @@ struct LowLevelHookInfo {
       uint32 noShortReturnAddr   :  1; ///< Assume callback return address can't overlap overwritten area (x86: 5 bytes)
       uint32 noNullReturnDefault :  1; ///< Do not reinterpret callback return address of nullptr to default address.
       uint32 argsAsStructPtr     :  1; ///< Args are passed to the callback as a pointer to a struct that contains them.
-      uint32 propagateFlagsReg   :  1; ///< Callback's changes to flags register persist, rather than restore old flags.
+      uint32 noRestoreFlagsReg   :  1; ///< Callback's changes to flags register persist, rather than restore old flags.
       uint32 debugBreakpoint     :  1; ///< Adds a debug breakpoint to the start of the trampoline code.
       uint32 reserved            : 25; ///< Reserved for future use.
     };

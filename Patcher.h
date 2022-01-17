@@ -168,6 +168,7 @@ public:
     void*const pState = pfnNewFunction.FunctorState();
     return HookCall(pAddress, pfnNewFunction, (pState == nullptr) ? nullptr : Util::PtrInc(pState, pfnOriginalOffset));
   }
+  ///@}
 
   ///@{ Hooks an instruction (almost) anywhere in module memory.  Read and write access to the state of standard
   ///   registers is provided via function args, and control flow can be manipulated via the returned value.
@@ -178,16 +179,17 @@ public:
   /// @param [in] info       (Optional) Settings for callback behavior, performance, etc.  Can be template-deduced.
   ///
   /// Examples:  LowLevelHook(0x402044,  [](Registers::Eax<int>& rw, Esi<bool> r) { ++rw;  return r ? 0 : 0x402046; })
-  ///            LowLevelHook(0x5200AF,  { Registers::Register::Eax, Register::Edx },  [](int64& val) { val = -val; })
-  ///            LowLevelHook(0x542080,  [=](Registers::Esp<int&, 12> stackVar) { stackVar /= someCapturedLocal; })
+  ///            LowLevelHook(0x5200AF,  [=](Registers::Esp<int&, 12> stackVar) { stackVar /= someCapturedLocal; })
+  ///            LowLevelHook(0x542080,  { Registers::Register::Eax, Register::Edx },  [](int64& val) { val = -val; })
   ///
   /// Available registers: [Eax, Ecx, Edx, Ebx, Esi, Edi, Ebp, Esp, Eflags].  Arg types must fit within register size.
   /// To write to registers, declare args with >& or >*, e.g. Eax<int>&, Ecx<int>*, Ebp<char*>&, Edi<int*>*
   /// To read/write stack values, declare args with Esp<T&, N> or Esp<T*, N>, where N is offset in bytes into the stack.
-  /// Hook must use cdecl, and return either void (with template deduction or @ref LowLevelHookInfo::noCustomReturnAddr)
-  /// or an address to jump to, where nullptr = original address (addresses within the overwritten area are allowed).
+  /// Hook must return either void or an address to jump to, where nullptr = original address (addresses within the
+  /// overwritten area are allowed).
   ///
-  /// @warning  This requires 5 bytes at pAddress; if the last 4 bytes overlap any jump targets, this could crash.
+  /// @warning  This requires 5 bytes at pAddress; if the last 4 bytes overlap any jump targets elsewhere in the module,
+  ///           this could crash.
   /// @note     32-bit x86 only.
   PatcherStatus LowLevelHook(
     TargetPtr pAddress, Span<RegisterInfo> registers, const FunctionPtr& pfnHookCb, const LowLevelHookInfo& info = {});
@@ -287,6 +289,7 @@ private:
   bool           hasModuleRef_;     ///< If set, this PatchContext has acquired a reference to @ref hModule_.
   ptrdiff_t      moduleRelocDelta_; ///< Delta between the module's preferred base address and its loaded address.
   uint32         moduleHash_;       ///< Hash identifying the module based on its header attributes.
+  Allocator*     pAllocator_;       ///< Code allocator instance used by this PatchContext.
   PatcherStatus  status_;           ///< Status of this PatchContext.  If this is an error, most methods become a no-op.
 
   static constexpr size_t StorageSize = 8;

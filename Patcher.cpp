@@ -40,6 +40,7 @@
 #include <unordered_set>
 #include <map>
 #include <string>
+#include <deque>
 
 #include <cstddef>
 
@@ -71,7 +72,6 @@ struct OperatorAndOperand {
   OpcodeType  opcode = {DefaultOpcode};
   OperandType operand;
 };
-PATCHER_ENDPACK
 
 using Op1_4  = OperatorAndOperand<uint8,    uint32>;
 using Op2_4  = OperatorAndOperand<uint8[2], uint32>;
@@ -79,6 +79,26 @@ using Jmp8   = OperatorAndOperand<uint8,    int8,  0xEB>;  // Opcodes: 0xEB (unc
 using Jmp32  = OperatorAndOperand<uint8,    int32, 0xE9>;
 using Call32 = OperatorAndOperand<uint8,    int32, 0xE8>;
 
+#if PATCHER_X86_64
+struct JmpAbs64 {
+  JmpAbs64(const void* pAddress)
+    : pushHigh{ 0x68, uintptr(pAddress) >> 32u }, pushLow{ 0x68, uintptr(pAddress) & UINT32_MAX }, retn(0xC3) { }
+
+  OperatorAndOperand<uint8, uint32> pushHigh;
+  OperatorAndOperand<uint8, uint32> pushLow;
+  uint8 retn;
+};
+
+struct CallAbs64 {
+  CallAbs64(const void* pAddress)
+    : call{ { 0xFF, 0x15 }, sizeof(Jmp8) }, skipAddressData{ 0xEB, sizeof(address) }, address(uintptr(pAddress)) { }
+
+  Op2_4   call;             // call [rip + 2]
+  Jmp8    skipAddressData;  // jmp 8
+  uintptr address;
+};
+#endif
+PATCHER_ENDPACK
 
 // Internal utility functions and classes
 
@@ -121,6 +141,10 @@ static void AppendString(char** ppWriter, const std::string& src)
 
 // Gets the length of an array.
 template <typename T, size_t N>  constexpr uint32 ArrayLen(const T (&src)[N]) { return static_cast<uint32>(N); }
+
+// Gets the OS system info, which includes memory allocator parameters.
+static const SYSTEM_INFO& SystemInfo()
+  { static SYSTEM_INFO si = []{ SYSTEM_INFO si;  GetSystemInfo(&si);  return si; }();  return si; }
 
 // Translates a Capstone error code to a PatcherStatus.
 static Status TranslateCsError(cs_err capstoneError) {
@@ -175,57 +199,65 @@ public:
   Status GetLastError() const { return TranslateCsError(cs_errno(hDisasm_)); }
 
 private:
-  csh     hDisasm_;
-  uint32  refCount_;
-
+  csh         hDisasm_;
+  uint32      refCount_;
   std::mutex  lock_;
 };
 
-// We need to allocate memory such that it can be executed, which requires an extra private heap created with the
-// HEAP_CREATE_ENABLE_EXECUTE flag.
-// ** TODO x64 would need to use VirtualAlloc() directly in order to try to place memory within 32-bit addressing
+// Allocates memory such that it can be executed, and so that it is placed within 32-bit signed addressing.
 class Allocator {
 public:
-   Allocator() : hHeap_(NULL), refCount_(0) { }
-  ~Allocator() { if (hHeap_ != NULL) { HeapDestroy(hHeap_);  hHeap_ = NULL; } }
+   Allocator(void* pVaStart = nullptr) : pVaStart_(pVaStart), pNextBlock_(nullptr), refCount_(0) { }
+  ~Allocator() { Deinit(); }
 
-  void Acquire() {
-    std::lock_guard<std::mutex> lock(allocatorLock_);
-    ++refCount_;
-    if (hHeap_ == NULL) {
-      hHeap_ = HeapCreate(HEAP_CREATE_ENABLE_EXECUTE, 0, 0);
-    }
-  }
+  void Acquire() { std::lock_guard<std::mutex> lock(lock_);      ++refCount_;                    }
+  void Release() { std::lock_guard<std::mutex> lock(lock_);  if (--refCount_ == 0) { Deinit(); } }
 
-  void Release() {
-    std::lock_guard<std::mutex> lock(allocatorLock_);
-    --refCount_;
-    if ((refCount_ == 0) && (hHeap_ != NULL)) {
-      HeapDestroy(hHeap_);
-      hHeap_ = nullptr;
-    }
-  }
+  void* Alloc(size_t size, size_t align = alignof(std::max_align_t));
+  void  Free(void* pMemory);
 
-  void* Alloc(size_t size, size_t align = sizeof(void*)) {
-    align = Align(align, sizeof(void*));  // We need at least pointer-size alignment.
-    void*const pBaseAlloc    = (hHeap_     != NULL)    ? HeapAlloc(hHeap_, 0, size + align)     : nullptr;
-    void*const pAlignedAlloc = (pBaseAlloc != nullptr) ? PtrAlign(PtrInc(pBaseAlloc, 1), align) : nullptr;
-    if (pAlignedAlloc != nullptr) {  // Store a pointer to the real allocation just before the aligned output pointer.
-      static_cast<void**>(pAlignedAlloc)[-1] = pBaseAlloc;
-    }
-    return pAlignedAlloc;
-  }
-
-  bool Free(void* pMemory) {
-    return (pMemory == nullptr) ||
-           ((hHeap_ != NULL) && (HeapFree(hHeap_, 0, static_cast<void**>(pMemory)[-1]) == TRUE));
+  static Allocator* GetInstance(const void* pNearAddr = nullptr) {
+    static std::map<void*, Allocator> allocators;  // Map of pVaStart : allocator
+    void*const pVaStart = reinterpret_cast<void*>(reinterpret_cast<uintptr>(pNearAddr) & ~VaRange);
+    return &allocators.emplace(pVaStart, pVaStart).first->second;
   }
 
 private:
-  HANDLE  hHeap_;
-  uint32  refCount_;
+  struct BlockHeader {
+    void*  pNextAddr;  // Pointer to next allocation (unaligned).
+    void*  pEndAddr;   // Pointer to just after the end of this block.
+    uint32 refCount;   // Number of allocations from this block that are currently being referenced.
+  };
 
-  std::mutex  allocatorLock_;
+  void Deinit() {
+    for (auto* pSlab : pSlabs_) {
+      VirtualFree(pSlab, 0, MEM_RELEASE);
+    }
+    pSlabs_.clear();
+    pBlocks_.clear();
+    pNextBlock_ = nullptr;
+  }
+
+  static size_t PageSize() { return SystemInfo().dwPageSize;              }  //  4 KB
+  static size_t SlabSize() { return SystemInfo().dwAllocationGranularity; }  // 64 KB
+
+  // Find an available region of VA space within 32-bit signed addressing.
+  void* FindNextRegion(void* pNearAddr, size_t sizeNeeded);
+
+  // Compare function to sort the pBlocks_ heap by free size.
+  static bool FreeBlockSizeCompare(const BlockHeader* pFirst, const BlockHeader* pSecond)
+    { return PtrDelta(pFirst->pEndAddr, pFirst->pNextAddr) < PtrDelta(pSecond->pEndAddr, pSecond->pNextAddr); }
+
+  static constexpr uintptr VaRange = INT32_MAX;
+
+  void* pVaStart_;    // Start of virtual address space within 32-bit signed addressing for memory allocations.
+  void* pNextBlock_;  // Pointer to next block to commit, or past the end of the current slab.
+
+  uint32     refCount_;
+  std::mutex lock_;
+
+  std::deque<void*>        pSlabs_;   // Reserved memory chunks, of multiples of SlabSize(), from oldest to newest.
+  std::deque<BlockHeader*> pBlocks_;  // Max heap of committed memory pages, sorted by free size remaining.
 };
 
 // Internal constants
@@ -235,7 +267,11 @@ constexpr uint32 CodeAlignment      = 16;
 // Max instruction size on modern x86 is 15 bytes.
 constexpr uint32 MaxInstructionSize = 15;
 // Worst-case scenario is the last byte overwritten being the start of a MaxInstructionSize-sized instruction.
-constexpr uint32 MaxOverwriteSize   = (sizeof(Jmp32) + MaxInstructionSize - 1);
+#if PATCHER_X86_64
+constexpr uint32 MaxOverwriteSize   = (sizeof(JmpAbs64) + MaxInstructionSize - 1);
+#else
+constexpr uint32 MaxOverwriteSize   = (sizeof(Jmp32)    + MaxInstructionSize - 1);
+#endif
 
 // Max size in bytes low-level hook trampoline code is expected to require.
 constexpr uint32 MaxLowLevelHookSize = Align(160, CodeAlignment);
@@ -257,8 +293,7 @@ static Disassembler<CS_ARCH_X86, CS_MODE_32>  g_disasm;
 static Disassembler<CS_ARCH_X86, CS_MODE_64>  g_disasm;
 #endif
 
-static Allocator   g_allocator;
-static std::mutex  g_codeThreadLock;
+static std::mutex  g_freezeThreadsLock;
 
 
 // =====================================================================================================================
@@ -339,10 +374,11 @@ PatchContext::PatchContext(
   hasModuleRef_(loadModule && (pModuleName != nullptr) && (hModule_ != NULL)),
   moduleRelocDelta_(0),
   moduleHash_(CalculateModuleHash(hModule_)),
+  pAllocator_(Allocator::GetInstance(hModule_)),
   status_(Status::FailInvalidModule)
 {
   g_disasm.Acquire();
-  g_allocator.Acquire();
+  pAllocator_->Acquire();
   InitModule();
 }
 
@@ -355,10 +391,11 @@ PatchContext::PatchContext(
   hasModuleRef_(addReference && (hModule_ != NULL)),
   moduleRelocDelta_(0),
   moduleHash_(CalculateModuleHash(hModule_)),
+  pAllocator_(Allocator::GetInstance(hModule_)),
   status_(Status::FailInvalidModule)
 {
   g_disasm.Acquire();
-  g_allocator.Acquire();
+  pAllocator_->Acquire();
   InitModule();
 }
 
@@ -367,8 +404,10 @@ PatchContext::~PatchContext() {
   RevertAll();
   UnlockThreads();
   ReleaseModule();
-  g_allocator.Release();
   g_disasm.Release();
+  if (pAllocator_ != nullptr) {
+    pAllocator_->Release();
+  }
 }
 
 // =====================================================================================================================
@@ -575,7 +614,7 @@ Status PatchContext::Revert(
         AdvanceThreads(entry.pTrackedAlloc, entry.trackedAllocSize);
 
         // If Memcpy failed, this won't get cleaned up until the allocation heap is destroyed.
-        g_allocator.Free(entry.pTrackedAlloc);
+        pAllocator_->Free(entry.pTrackedAlloc);
       }
 
       if (entry.pfnFunctorThunk != nullptr) {
@@ -618,7 +657,7 @@ Status PatchContext::RevertAll() {
         AdvanceThreads(entry.pTrackedAlloc, entry.trackedAllocSize);
 
         // If Memcpy failed, this won't get cleaned up until the trampoline allocation heap is destroyed.
-        g_allocator.Free(entry.pTrackedAlloc);
+        pAllocator_->Free(entry.pTrackedAlloc);
       }
 
       if (entry.pfnFunctorThunk != nullptr) {
@@ -670,7 +709,7 @@ static constexpr uintptr GetProgramCounter(
 
 // =====================================================================================================================
 Status PatchContext::LockThreads() {
-  g_codeThreadLock.lock();
+  g_freezeThreadsLock.lock();
 
   // Create a snapshot of current process threads.
   HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
@@ -734,8 +773,8 @@ Status PatchContext::UnlockThreads() {
   frozenThreads_.clear();
 
   if (needsUnlock) {
-    const bool ignored = g_codeThreadLock.try_lock();
-    g_codeThreadLock.unlock();
+    const bool ignored = g_freezeThreadsLock.try_lock();
+    g_freezeThreadsLock.unlock();
   }
 
   return status_;
@@ -813,6 +852,7 @@ Status PatchContext::AdvanceThreads(
 }
 
 // =====================================================================================================================
+// ** TODO This needs to be able to handle saving and restoring non-POD data (from Assign() or Construct())
 Status PatchContext::Touch(
   TargetPtr  pAddress,
   size_t     size)
@@ -910,7 +950,7 @@ void PatchContext::EndDeProtect(
 
     if (BitFlagTest(oldAttr, ExecutableProtectFlags)) {
       // Flush instruction cache of executable memory.
-      FlushInstructionCache(static_cast<HMODULE>(hModule_), pAddress, size);
+      FlushInstructionCache(GetCurrentProcess(), pAddress, size);
     }
   }
 }
@@ -1013,7 +1053,7 @@ Status PatchContext::ReplaceReferencesToGlobal(
   }
 
   if (status_ != Status::Ok) {
-    for (auto it = (pRefsOut->begin() + startIndex); it != pRefsOut->end(); Revert(*(it++)));
+    for (auto it =  (pRefsOut->begin() + startIndex); it != pRefsOut->end(); Revert(*(it++)));
     pRefsOut->erase((pRefsOut->begin() + startIndex), pRefsOut->end());
   }
 
@@ -1028,7 +1068,9 @@ void FunctionPtr::InitFunctorThunk(
   void (*pfnDeleteFunctor)(void*),
   void*  pfnInvokeFunctor)
 {
-  void* pMemory = (pFunctorObj != nullptr) ? g_allocator.Alloc(MaxFunctorThunkSize, CodeAlignment) : nullptr;
+  auto*const pAllocator = Allocator::GetInstance(pfnInvokeFunctor);
+  pAllocator->Acquire();
+  void* pMemory = (pFunctorObj != nullptr) ? pAllocator->Alloc(MaxFunctorThunkSize, CodeAlignment) : nullptr;
 
   if (pMemory != nullptr) {
     auto* pWriter = static_cast<uint8*>(pMemory);
@@ -1103,7 +1145,8 @@ void FunctionPtr::InitFunctorThunk(
     }
 
     if (pWriter == nullptr) {
-      g_allocator.Free(pMemory);
+      pAllocator->Free(pMemory);
+      pAllocator->Release();
       pMemory = nullptr;
     }
     else {
@@ -1114,8 +1157,9 @@ void FunctionPtr::InitFunctorThunk(
   if (pMemory != nullptr) {
     pfn_  = pMemory;
     // As the thunk is only valid while pObj_ is alive, its deleter will also deallocate the thunk.
-    pObj_ = std::shared_ptr<void>(
-      pFunctorObj, [pfnDeleteFunctor, pMemory](void* pObj) { pfnDeleteFunctor(pObj);  g_allocator.Free(pMemory); });
+    pObj_ = std::shared_ptr<void>(pFunctorObj, [pfnDeleteFunctor, pMemory, pAllocator](void* pObj)
+      { pfnDeleteFunctor(pObj);  pAllocator->Free(pMemory);  pAllocator->Release(); });
+    FlushInstructionCache(GetCurrentProcess(), pMemory, MaxFunctorThunkSize);
   }
   else if (pFunctorObj != nullptr) {
     pfnDeleteFunctor(pFunctorObj);
@@ -1123,6 +1167,8 @@ void FunctionPtr::InitFunctorThunk(
 }
 
 // =====================================================================================================================
+// Functionally copies machine code instructions from one code memory location to another.
+// Note that this function does not flush the instruction cache.
 static void CopyInstructions(
   uint8**         ppWriter,
   const cs_insn*  pInsns,
@@ -1149,7 +1195,7 @@ static void CopyInstructions(
     offsetLut[curOldOffset] = static_cast<uint8>(PtrDelta(*ppWriter, pBegin));
     curOldOffset += insn.size;
 
-    // Instructions which use PC-relative operands need to be changed to their 32-bit forms and fixed up.
+    // Instructions which use program counter-relative operands need to be changed to their 32-bit forms and fixed up.
     // Call
     if (bytes[0] == 0xE8) {
       CatByte(ppWriter, 0xE8);
@@ -1225,12 +1271,13 @@ PATCHER_ENDPACK
 
 // =====================================================================================================================
 static Status CreateTrampoline(
-  void*    pAddress,
-  void**   ppTrampoline,                          // [out] Pointer to where trampoline code begins.
-  uint8*   pOverwrittenSize,                      // [out] Total size in bytes of overwritten instructions.
-  size_t*  pTrampolineSize,                       // [out] Size in bytes of trampoline allocation.
-  size_t   prologSize                  = 0,       // [in]  Bytes to prepend before the trampoline for custom code.
-  uint8    offsetLut[MaxOverwriteSize] = nullptr) // [out] LUT of overwritten instruction offsets to trampoline offsets.
+  void*      pAddress,
+  Allocator* pAllocator,
+  void**     ppTrampoline,                          // [out] Pointer to where trampoline code begins.
+  uint8*     pOverwrittenSize,                      // [out] Total size in bytes of overwritten instructions.
+  size_t*    pTrampolineSize,                       // [out] Size in bytes of trampoline allocation.
+  size_t     prologSize                  = 0,       // [in]  Bytes to prepend before the trampoline for custom code.
+  uint8      offsetLut[MaxOverwriteSize] = nullptr) // [out] LUT of overwritten instruction offsets : trampoline offsets
 {
   assert((pAddress != nullptr) && (ppTrampoline != nullptr) && (pOverwrittenSize != nullptr));
   assert((prologSize % CodeAlignment) == 0);
@@ -1295,7 +1342,7 @@ static Status CreateTrampoline(
     // Allocate memory to store the trampoline.
     allocSize   = Align((prologSize + (MaxInstructionSize * oldCount) + sizeof(Jmp32) + CodeAlignment - 1),
                         CodeAlignment);
-    pTrampoline = g_allocator.Alloc(allocSize, CodeAlignment);
+    pTrampoline = pAllocator->Alloc(allocSize, CodeAlignment);
     status = (pTrampoline != nullptr) ? Status::Ok : Status::FailMemAlloc;
   }
 
@@ -1321,13 +1368,14 @@ static Status CreateTrampoline(
   }
 
   if ((status != Status::Ok) && (pTrampoline != nullptr)) {
-    g_allocator.Free(pTrampoline);
+    pAllocator->Free(pTrampoline);
     pTrampoline = nullptr;
   }
 
   if (status == Status::Ok) {
     *ppTrampoline    = pTrampoline;
     *pTrampolineSize = allocSize;
+    FlushInstructionCache(GetCurrentProcess(), pTrampoline, allocSize);
   }
 
   return status;
@@ -1351,12 +1399,13 @@ Status PatchContext::Hook(
 
   if (status_ == Status::Ok) {
     // Destroy any existing trampoline or functor.
+    // ** TODO Be able to handle stacking multiple hooks; for now use of multiple PatchContexts can mostly do that.
     Revert(pAddress);
   }
 
   if (status_ == Status::Ok) {
     if (pPfnTrampoline != nullptr) {
-      status_ = CreateTrampoline(pAddress, &pTrampoline, &overwrittenSize, &trampolineSize);
+      status_ = CreateTrampoline(pAddress, pAllocator_, &pTrampoline, &overwrittenSize, &trampolineSize);
     }
     else {
       // ** TODO We should disasemble even in this case to figure out if we need to do a jmp8-to-jmp32-type patch
@@ -1365,6 +1414,12 @@ Status PatchContext::Hook(
   }
 
   if (status_ == Status::Ok) {
+#if PATCHER_X86_64
+    if (overwrittenSize >= sizeof(JmpAbs64)) {
+      
+    }
+    else
+#endif
     if (overwrittenSize >= sizeof(Jmp32)) {
       // There is enough space to write a jmp32 at pAddress.
 PATCHER_PACK
@@ -1436,7 +1491,7 @@ PATCHER_ENDPACK
   }
 
   if ((status_ != Status::Ok) && (pTrampoline != nullptr)) {
-    g_allocator.Free(pTrampoline);
+    pAllocator_->Free(pTrampoline);
   }
 
   return status_;
@@ -1457,6 +1512,7 @@ Status PatchContext::HookCall(
 
   if (status_ == Status::Ok) {
     // Destroy any existing trampoline or functor.
+    // ** TODO Be able to handle stacking multiple hooks; for now use of multiple PatchContexts can mostly do that.
     Revert(pAddress);
   }
   void* pfnOriginal = nullptr;
@@ -1579,7 +1635,7 @@ static size_t CreateLowLevelHookTrampoline(
   stackRegisters.reserve(registers.Length() + ArrayLen(VolatileRegisters) + numByRef + 1);
   uint32 returnRegIndex = UINT_MAX;
   uint32 stackRegIndex  = UINT_MAX;
-  uint32 stackRegOffset = 0;
+  uint32 stackRegOffset = 0;  // ** TODO optimize this away in logic
   uint32 firstArgIndex  = 0;
 
   auto AddRegisterToStack = [&stackRegisters, &returnRegIndex, &stackRegIndex, &stackRegOffset](RegisterInfo reg) {
@@ -1593,7 +1649,7 @@ static size_t CreateLowLevelHookTrampoline(
     stackRegisters.push_back(reg);
   };
 
-  // Registers that are considered volatile between function calls must be pushed to the stack unconditionally.
+  // Registers that the ABI considers volatile between function calls must be pushed to the stack unconditionally.
   // Find which ones haven't been explicitly requested, and have them be pushed to the stack before everything else.
   uint32 requestedRegMask = 0;
   if (registers.IsEmpty() == false) {
@@ -1605,7 +1661,7 @@ static size_t CreateLowLevelHookTrampoline(
   auto IsRegisterRequested = [&requestedRegMask](Register reg)
     { return BitFlagTest(requestedRegMask, 1u << static_cast<uint32>(reg)); };
 
-  if ((settings.propagateFlagsReg == false) && (IsRegisterRequested(FlagsRegister) == false)) {
+  if ((settings.noRestoreFlagsReg == false) && (IsRegisterRequested(FlagsRegister) == false)) {
     AddRegisterToStack({ FlagsRegister });
   }
   for (const Register reg : VolatileRegisters) {
@@ -1781,7 +1837,10 @@ static size_t CreateLowLevelHookTrampoline(
     // (Re)store register values from the stack.
     for (auto it = stackRegisters.rbegin(); it != stackRegisters.rend(); ++it) {
       const Register reg = it->type;
-      if (((reg != StackRegister) || ((stackRegIndex == 0) && (stackRegOffset == 0))) && (reg != ByReference)) {
+      if (((reg != StackRegister) || ((stackRegIndex == 0) && (stackRegOffset == 0))) &&
+          ((reg != FlagsRegister) || (settings.noRestoreFlagsReg == false))           &&
+           (reg != ByReference))
+      {
         Pop(reg);  // pop r32
       }
       else {
@@ -1864,7 +1923,8 @@ PATCHER_ENDPACK
           PopNil();
         }
       }
-      else if ((reg == ByReference) || (reg == StackRegister)) {
+      else if ((reg == ByReference) || (reg == StackRegister) || ((reg == FlagsRegister) && settings.noRestoreFlagsReg))
+      {
         // Skip arg references; we only care about the actual values they point to further up the stack.
         // Skip stack register.  If it was user-requested, we have a chance to restore it at the end.
         PopNil();
@@ -1908,6 +1968,7 @@ PATCHER_ENDPACK
   }
 
   const size_t size = PtrDelta(pWriter, pLowLevelHook);
+  FlushInstructionCache(GetCurrentProcess(), pLowLevelHook, size);
   assert(size <= MaxLowLevelHookSize);
   return size;
 }
@@ -1937,12 +1998,13 @@ Status PatchContext::LowLevelHook(
 
   if (status_ == Status::Ok) {
     // Destroy any existing trampoline or functor.
+    // ** TODO Be able to handle stacking multiple hooks; for now use of multiple PatchContexts can mostly do that.
     Revert(pAddress);
   }
 
   if (status_ == Status::Ok) {
     status_ = CreateTrampoline(
-      pAddress, &pTrampoline, &overwrittenSize, &trampolineSize, MaxLowLevelHookSize, offsetLut);
+      pAddress, pAllocator_, &pTrampoline, &overwrittenSize, &trampolineSize, MaxLowLevelHookSize, offsetLut);
   }
 
   if (status_ == Status::Ok) {
@@ -1990,7 +2052,7 @@ PATCHER_ENDPACK
   }
 
   if ((status_ != Status::Ok) && (pTrampoline != nullptr)) {
-    g_allocator.Free(pTrampoline);
+    pAllocator_->Free(pTrampoline);
   }
 
   return status_;
@@ -2113,7 +2175,7 @@ Status PatchContext::EditExports(
 
     const uint32 allocSize =
       (HeaderSize + addressTableSize + namePtrTableSize + nameOrdinalTableSize + totalNameStrlen + totalForwardStrlen);
-    void*const pAllocation = g_allocator.Alloc(allocSize);
+    void*const pAllocation = pAllocator_->Alloc(allocSize);
 
     if (pAllocation != nullptr) {
       auto*const  pHeader              = static_cast<IMAGE_EXPORT_DIRECTORY*>(pAllocation);
@@ -2169,7 +2231,7 @@ Status PatchContext::EditExports(
         entry.trackedAllocSize = allocSize;
       }
       else {
-        g_allocator.Free(pAllocation);
+        pAllocator_->Free(pAllocation);
       }
     }
     else {
@@ -2178,6 +2240,142 @@ Status PatchContext::EditExports(
   }
 
   return status_;
+}
+
+// =====================================================================================================================
+void* Allocator::Alloc(
+  size_t  size,
+  size_t  align)
+{
+  std::lock_guard<std::mutex> lock(lock_);
+
+  void* pMemory = nullptr;
+
+  if (pBlocks_.empty() == false) {
+    // Try to use an existing block, if there's one with enough free space.
+    auto*const pHeader = pBlocks_.front();
+    void*const pBegin  = PtrAlign(PtrInc(pHeader->pNextAddr, sizeof(void*)), align);
+    void*const pEnd    = PtrInc(pBegin, size);
+
+    if (pEnd <= pHeader->pEndAddr) {
+      // Store a pointer to the block header just before the aligned output pointer so we can free it later.
+      static_cast<BlockHeader**>(pBegin)[-1] = pHeader;
+      pMemory            = pBegin;
+      pHeader->pNextAddr = pEnd;
+      ++pHeader->refCount;
+
+      // Reorder the heap, since this block's free space has shrunk.
+      std::pop_heap(pBlocks_.begin(),  pBlocks_.end(), FreeBlockSizeCompare);
+      std::push_heap(pBlocks_.begin(), pBlocks_.end(), FreeBlockSizeCompare);
+    }
+  }
+
+  if (pMemory == nullptr) {
+    // We need to commit a new block, and possibly reserve a new slab.
+    void*        pAlloc    = nullptr;
+    const size_t pagesSize = Align((sizeof(BlockHeader) + sizeof(void*) + align + size), PageSize());
+    const size_t slabsSize = Align(pagesSize, SlabSize());
+
+    // Reserve a new memory slab if needed.
+    if (pSlabs_.empty() || (PtrInc(pNextBlock_, pagesSize) >= PtrInc(pSlabs_.back(), SlabSize()))) {
+      // Try to find a suitable placement area within the VA range.  We may need to make multiple attempts due to race
+      // conditions that can happen in between querying for free memory and actually trying to reserve it.
+      for (void* p = pNextBlock_; (pAlloc == nullptr) && ((p = FindNextRegion(pNextBlock_, slabsSize)) != nullptr);) {
+        pAlloc = VirtualAlloc(p, slabsSize, MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+      }
+
+      if (pAlloc != nullptr) {
+        pSlabs_.push_back(pAlloc);
+      }
+    }
+    else {
+      pAlloc = pNextBlock_;
+    }
+
+    if (pAlloc != nullptr) {
+      // If the allocation is bigger than one slab (>64 KB), then commit as many slabs as required as one single block.
+      // Otherwise, only commit as many pages as required to fit the requested size as one block.
+      const size_t blockSize = (pagesSize > SlabSize()) ? slabsSize : pagesSize;
+
+      pMemory = VirtualAlloc(pAlloc, blockSize, MEM_COMMIT, PAGE_EXECUTE_READWRITE);
+      assert(pMemory != nullptr);
+
+      auto*const pHeader = static_cast<BlockHeader*>(pMemory);
+      pMemory = PtrAlign(PtrInc(pMemory, sizeof(BlockHeader) + sizeof(void*)), align);
+      // Store a pointer to the block header just before the aligned output pointer so we can free it later.
+      static_cast<void**>(pMemory)[-1] = pHeader;
+
+      pNextBlock_        = PtrInc(pHeader, blockSize);
+      pHeader->pNextAddr = PtrInc(pMemory, size);
+      pHeader->pEndAddr  = pNextBlock_;
+      pHeader->refCount  = 1;
+
+      pBlocks_.push_back(pHeader);
+      std::push_heap(pBlocks_.begin(), pBlocks_.end(), FreeBlockSizeCompare);
+    }
+  }
+
+  return pMemory;
+}
+
+// =====================================================================================================================
+void Allocator::Free(
+  void*  pMemory)
+{
+  if (pMemory != nullptr) {
+    std::lock_guard<std::mutex> lock(lock_);
+
+    auto*const pHeader = static_cast<BlockHeader**>(pMemory)[-1];
+    assert(pHeader->refCount != 0);
+
+    if (--pHeader->refCount == 0) {
+      // Rewind the block to its beginning, "freeing" it.  For simplicity, we do not decommit, coalesce, or split.
+      pHeader->pNextAddr = PtrInc(pHeader, sizeof(BlockHeader));
+      std::make_heap(pBlocks_.begin(), pBlocks_.end(), FreeBlockSizeCompare);  // ** TODO This could be optimized
+    }
+  }
+}
+
+// =====================================================================================================================
+void* Allocator::FindNextRegion(
+  void*   pNearAddr,
+  size_t  sizeNeeded)
+{
+  void*        pRegion  = nullptr;
+  const size_t slabSize = SlabSize();
+
+  void*const pMaxAddr    = (std::min)(SystemInfo().lpMaximumApplicationAddress, PtrInc(pVaStart_, VaRange));
+  void*const pMinAddr    =
+    PtrAlign((std::max)({ SystemInfo().lpMinimumApplicationAddress, pVaStart_, (void*)(slabSize) }), slabSize);
+  void*const pOriginAddr = (std::max)(pMinAddr, PtrAlign(pNearAddr, slabSize));
+
+  auto SearchRegions = [&pRegion, sizeNeeded, slabSize](void* pBegin, void* pEnd) {
+    for (void* pTryAddr = pBegin; PtrInc(pTryAddr, sizeNeeded) < pEnd;) {
+      MEMORY_BASIC_INFORMATION memInfo;
+
+      if (VirtualQuery(pTryAddr, &memInfo, sizeof(memInfo)) > offsetof(MEMORY_BASIC_INFORMATION, State)) {
+        if ((memInfo.State == MEM_FREE) && (memInfo.RegionSize >= sizeNeeded)) {
+          pRegion = pTryAddr;
+          break;
+        }
+
+        pTryAddr = PtrAlign(PtrInc(memInfo.BaseAddress, memInfo.RegionSize), slabSize);
+      }
+      else {
+        pTryAddr = PtrInc(pTryAddr, slabSize);
+      }
+    }
+  };
+
+  // Try to find a region after pNearAddr.
+  SearchRegions(pOriginAddr, pMaxAddr);
+
+  if (pRegion == nullptr) {
+    // Try to find a region before pNearAddr.
+    SearchRegions(pMinAddr, pOriginAddr);
+  }
+
+  return pRegion;
 }
 
 } // Patcher

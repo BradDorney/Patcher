@@ -934,7 +934,6 @@ static void CopyInstructions(
 
   for (const auto& reloc : deferredRelocs) {
     *(reloc.first) = PcRelPtr(reloc.first, 4, (pBegin + offsetLut[reloc.second]));
-    break;
   }
 }
 

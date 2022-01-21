@@ -1,6 +1,6 @@
 /*
  ***********************************************************************************************************************
- * Copyright (c) 2021, Brad Dorney
+ * Copyright (c) 2022, Brad Dorney
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without modification, are permitted provided that the
@@ -63,42 +63,121 @@ using namespace Registers;
 
 // Internal typedefs
 
-using Status = PatcherStatus;
+using Status     = PatcherStatus;
+using InsnVector = std::vector<cs_insn>;
 
 PATCHER_PACK
 // Generic structure of a simple x86 instruction with one opcode and one operand.
-template <typename OpcodeType, typename OperandType, RemoveExtents<OpcodeType> DefaultOpcode = 0>
+template <typename OpcodeType, typename OperandType, RemoveExtents<OpcodeType>... DefaultOpcode>
 struct OperatorAndOperand {
-  OpcodeType  opcode = {DefaultOpcode};
+  OpcodeType  opcode = { DefaultOpcode... };
   OperandType operand;
 };
 
 using Op1_4  = OperatorAndOperand<uint8,    uint32>;
 using Op2_4  = OperatorAndOperand<uint8[2], uint32>;
-using Jmp8   = OperatorAndOperand<uint8,    int8,  0xEB>;  // Opcodes: 0xEB (unconditional), 0x7* (conditional)
+using Op1_8  = OperatorAndOperand<uint8,    uint64>;
+using Op2_8  = OperatorAndOperand<uint8[2], uint64>;
+using Jmp8   = OperatorAndOperand<uint8,    int8,  0xEB>; // Opcodes: 0xEB (unconditional), 0x7* & 0xE0-E3 (conditional)
 using Jmp32  = OperatorAndOperand<uint8,    int32, 0xE9>;
 using Call32 = OperatorAndOperand<uint8,    int32, 0xE8>;
 
-#if PATCHER_X86_64
-struct JmpAbs64 {
-  JmpAbs64(const void* pAddress)
-    : pushHigh{ 0x68, uintptr(pAddress) >> 32u }, pushLow{ 0x68, uintptr(pAddress) & UINT32_MAX }, retn(0xC3) { }
+struct Loop32 {
+  constexpr Loop32(uint8 loopOpcode, int32 displacement)  // Opcodes: 0xE0-E3 (jecx, loop*)
+    : loop{ loopOpcode, sizeof(ifFalse) }, ifFalse{ 0xEB, sizeof(ifTrue) }, ifTrue{ 0xE9, displacement } { }
 
-  OperatorAndOperand<uint8, uint32> pushHigh;
-  OperatorAndOperand<uint8, uint32> pushLow;
+  Jmp8  loop;     // (jecx/loop*) 2 (go to Jmp32 if true)
+  Jmp8  ifFalse;  // jmp 2 (skip Jmp32 if false)
+  Jmp32 ifTrue;
+};
+
+struct JmpAbs {
+#if PATCHER_X86_32
+  constexpr JmpAbs(uintptr address) : pushLowDword{ 0x68, address }, retn(0xC3) { }
+#else
+  constexpr JmpAbs(uintptr address)
+    : pushHighDword{ 0x68, address >> 32u }, pushLowDword{ 0x68, address & UINT32_MAX }, retn(0xC3) { }
+
+  Op1_4 pushHighDword;
+#endif
+  Op1_4 pushLowDword;
   uint8 retn;
 };
 
-struct CallAbs64 {
-  CallAbs64(const void* pAddress)
-    : call{ { 0xFF, 0x15 }, sizeof(Jmp8) }, skipAddressData{ 0xEB, sizeof(address) }, address(uintptr(pAddress)) { }
+struct JccAbs {
+  constexpr JccAbs(uint8 jcc8Opcode, uintptr address)  // Opcodes: 0x7* & 0xE0-E3
+    : jcc{ jcc8Opcode, sizeof(ifFalse) }, ifFalse{ 0xEB, sizeof(ifTrue) }, ifTrue(address) { }
+
+  Jmp8   jcc;      // jcc 2 (go to JmpAbs if true)
+  Jmp8   ifFalse;  // jmp 2 (skip JmpAbs if false)
+  JmpAbs ifTrue;
+};
+
+struct CallAbs {
+  constexpr CallAbs(uintptr address)
+#if PATCHER_X86_32
+    : pushRetnPtr{ 0xE8, 0 }, adjustRetnPtr{ 0x83, 0x04, 0x24, sizeof(CallAbs) - sizeof(pushRetnPtr) }, jmp(address) { }
+
+  Call32 pushRetnPtr;       // call 0          (push return pointer (eip + sizeof(Call32)))
+  uint8  adjustRetnPtr[4];  // add  [esp], 10  (adjust return pointer to be after jmp)
+  JmpAbs jmp;
+#else
+    : call{ { 0xFF, 0x15 }, sizeof(Jmp8) }, skipAddressData{ 0xEB, sizeof(address) }, address(address) { }
 
   Op2_4   call;             // call [rip + 2]
-  Jmp8    skipAddressData;  // jmp 8
+  Jmp8    skipAddressData;  // jmp  8
   uintptr address;
-};
 #endif
+};
 PATCHER_ENDPACK
+
+// Internal constants
+
+#if PATCHER_X86_32
+constexpr bool IsX86_32 = true;
+constexpr bool IsX86_64 = false;
+#elif PATCHER_X86_64
+constexpr bool IsX86_32 = false;
+constexpr bool IsX86_64 = true;
+#else
+constexpr bool IsX86_32 = false;
+constexpr bool IsX86_64 = false;
+#endif
+constexpr bool IsX86 = IsX86_32 || IsX86_64;
+
+#if PATCHER_MS_ABI
+constexpr bool IsMsAbi   = true;
+constexpr bool IsUnixAbi = false;
+#elif PATCHER_UNIX_ABI
+constexpr bool IsMsAbi   = false;
+constexpr bool IsUnixAbi = true;
+#else
+constexpr bool IsMsAbi   = false;
+constexpr bool IsUnixAbi = false;
+#endif
+
+// x86 fetches instructions on 16-byte boundaries.  Allocated code should be aligned on these boundaries in memory.
+constexpr uint32 CodeAlignment            = 16;
+// Max instruction size on modern x86 is 15 bytes.
+constexpr uint32 MaxInstructionSize       = 15;
+// Copied instructions sometimes need to be translated to multiple instructions, which requires extra space.
+constexpr uint32 MaxCopiedInstructionSize = max(MaxInstructionSize, sizeof(CallAbs));
+// Worst-case scenario is the last byte overwritten being the start of a MaxInstructionSize-sized instruction.
+constexpr uint32 MaxOverwriteSize         = (IsX86_64 ? sizeof(JmpAbs) : sizeof(Jmp32)) + MaxInstructionSize - 1;
+
+// Max size in bytes low-level hook trampoline code is expected to require.
+constexpr uint32 MaxLowLevelHookSize = Align(160, CodeAlignment);
+// Max size in bytes functor thunk code is expected to require.
+constexpr size_t MaxFunctorThunkSize = Align(IsX86_64 ? 48 : 32, CodeAlignment);
+// Max size in bytes far jump thunk code is expected to require.
+constexpr uint32 FarThunkSize        = Align(max(sizeof(JmpAbs), MaxFunctorThunkSize), CodeAlignment);
+
+constexpr uint32 OpenThreadFlags =
+  (THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_SET_CONTEXT | THREAD_QUERY_INFORMATION | THREAD_SET_INFORMATION);
+
+constexpr uint32 ExecutableProtectFlags =
+  (PAGE_EXECUTE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY);
+constexpr uint32 ReadOnlyProtectFlags   = (PAGE_READONLY | PAGE_EXECUTE_READ | PAGE_EXECUTE);
 
 // Internal utility functions and classes
 
@@ -117,6 +196,10 @@ constexpr bool IsAligned(T value, size_t align) { return ((value & static_cast<T
 
 static bool IsPtrAligned(const void* ptr, size_t align) { return IsAligned(reinterpret_cast<uintptr>(ptr), align); }
 
+// Returns true if a (program counter-relative) displacement is larger than 32-bit signed addressing.
+constexpr bool IsFarDisplacement(ptrdiff_t displacement)
+  { return IsX86_64 && ((displacement > INT32_MAX) || (displacement < INT32_MIN)); }
+
 // Calculates a hash using std::hash.
 template <typename T>  static size_t Hash(const T& src) { return std::hash<T>()(src); }
 
@@ -130,6 +213,8 @@ static void CatBytes(uint8** ppWriter, Span<uint8> src)
 #endif
 static void CatBytes(uint8** ppWriter, const uint8* pSrc, uint32 count)
   { memcpy(*ppWriter, pSrc, count);  *ppWriter += count; }
+
+static void CatByteIfX86_64(uint8** ppWriter, uint8 value) { if (IsX86_64) { CatByte(ppWriter, value); } }
 
 template <typename T>
 static void CatValue(uint8** ppWriter, const T& value) { memcpy(*ppWriter, &value, sizeof(T)); *ppWriter += sizeof(T); }
@@ -154,8 +239,6 @@ static Status TranslateCsError(cs_err capstoneError) {
   default:                                 return Status::FailDisassemble;
   }
 }
-
-using InsnVector = std::vector<cs_insn>;
 
 // Capstone disassembler helper class.
 template <cs_arch CsArchitecture, uint32 CsMode>
@@ -213,7 +296,7 @@ public:
   void Acquire() { std::lock_guard<std::mutex> lock(lock_);      ++refCount_;                    }
   void Release() { std::lock_guard<std::mutex> lock(lock_);  if (--refCount_ == 0) { Deinit(); } }
 
-  void* Alloc(size_t size, size_t align = alignof(std::max_align_t));
+  void* Alloc(size_t size, size_t align = CodeAlignment);
   void  Free(void* pMemory);
 
   static Allocator* GetInstance(const void* pNearAddr = nullptr) {
@@ -260,38 +343,9 @@ private:
   std::deque<BlockHeader*> pBlocks_;  // Max heap of committed memory pages, sorted by free size remaining.
 };
 
-// Internal constants
-
-// x86 fetches instructions on 16-byte boundaries.  Allocated code should be aligned on these boundaries in memory.
-constexpr uint32 CodeAlignment      = 16;
-// Max instruction size on modern x86 is 15 bytes.
-constexpr uint32 MaxInstructionSize = 15;
-// Worst-case scenario is the last byte overwritten being the start of a MaxInstructionSize-sized instruction.
-#if PATCHER_X86_64
-constexpr uint32 MaxOverwriteSize   = (sizeof(JmpAbs64) + MaxInstructionSize - 1);
-#else
-constexpr uint32 MaxOverwriteSize   = (sizeof(Jmp32)    + MaxInstructionSize - 1);
-#endif
-
-// Max size in bytes low-level hook trampoline code is expected to require.
-constexpr uint32 MaxLowLevelHookSize = Align(160, CodeAlignment);
-// Max size in bytes functor thunk code is expected to require.
-constexpr size_t MaxFunctorThunkSize = Align(32, CodeAlignment);
-
-constexpr uint32 OpenThreadFlags =
-  (THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_SET_CONTEXT | THREAD_QUERY_INFORMATION | THREAD_SET_INFORMATION);
-
-constexpr uint32 ExecutableProtectFlags =
-  (PAGE_EXECUTE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY);
-constexpr uint32 ReadOnlyProtectFlags   = (PAGE_READONLY | PAGE_EXECUTE_READ | PAGE_EXECUTE);
-
 // Internal globals
 
-#if PATCHER_X86_32
-static Disassembler<CS_ARCH_X86, CS_MODE_32>  g_disasm;
-#elif PATCHER_X86_64
-static Disassembler<CS_ARCH_X86, CS_MODE_64>  g_disasm;
-#endif
+static Disassembler<CS_ARCH_X86, IsX86_64 ? CS_MODE_64 : CS_MODE_32>  g_disasm;
 
 static std::mutex  g_freezeThreadsLock;
 
@@ -378,7 +432,7 @@ PatchContext::PatchContext(
   status_(Status::FailInvalidModule)
 {
   g_disasm.Acquire();
-  pAllocator_->Acquire();
+  pAllocator_->Acquire();  // ** TODO Very large modules (>2 GB) would need multiple allocators
   InitModule();
 }
 
@@ -395,7 +449,7 @@ PatchContext::PatchContext(
   status_(Status::FailInvalidModule)
 {
   g_disasm.Acquire();
-  pAllocator_->Acquire();
+  pAllocator_->Acquire();  // ** TODO Very large modules (>2 GB) would need multiple allocators
   InitModule();
 }
 
@@ -406,7 +460,7 @@ PatchContext::~PatchContext() {
   ReleaseModule();
   g_disasm.Release();
   if (pAllocator_ != nullptr) {
-    pAllocator_->Release();
+    pAllocator_->Release();  // ** TODO Very large modules (>2 GB) would need multiple allocators
   }
 }
 
@@ -1061,8 +1115,131 @@ Status PatchContext::ReplaceReferencesToGlobal(
 }
 
 // =====================================================================================================================
-// Creates a thunk to call a FunctionPtr that has a state (capturing lambda or non-empty functor).
-// Thunk translates from the function's calling convention to cdecl so it can call FunctionPtr::InvokeFunctor()
+// Writes the code for a functor thunk.  Note that this function does not flush the instruction cache.
+// Thunk translates from the function's calling convention to cdecl so it can call FunctionPtr::InvokeFunctor().
+static bool CreateFunctorThunk(
+  void*              pMemory,
+  const FunctionPtr& pfnNewFunction)
+{
+  assert(pMemory != nullptr);
+
+  auto* pWriter = static_cast<uint8*>(pMemory);
+
+  const uintptr     functorAddr = reinterpret_cast<uintptr>(pfnNewFunction.Functor().get());
+  const RtFuncSig&  sig         = pfnNewFunction.Signature();
+
+  size_t numRegisterSizeParams = 0;  // Excluding pFunctor and pReturnAddress
+  for (uint32 i = 2; i < sig.numParams; (sig.pParamSizes[i++] <= RegisterSize) ? ++numRegisterSizeParams : 0);
+
+  // pfnInvokeFunctor is always cdecl;  Signature().convention refers to the original function the invoker wraps.
+  // We need to translate from the input calling convention to cdecl by pushing any register args used by the input
+  // convention to the stack, then push the functor obj address and do the call, then do any expected stack cleanup.
+  auto WriteCall = [&pWriter, functorAddr, pfnInvokeFunctor = pfnNewFunction.PfnInvokeInternal()] {
+    if (IsX86_32) {
+      CatValue(&pWriter, Op1_4{ 0x68, functorAddr });                       // push   pFunctor
+    }                                                                     
+    else if (IsX86_64) {
+      if (IsMsAbi) {
+        // MS x64 ABI expects 32 bytes of shadow space be allocated on the stack just before the call.  We need to pop
+        // it before we can push our extra args, and then we must re-allocate it afterwards.
+        CatBytes(&pWriter, { 0x48, 0x83, 0xC4, uint8(RegisterSize * 4) });  // add rsp, 32
+      }
+
+      CatValue(&pWriter, Op2_8{ { 0x48, 0xB9 }, functorAddr });             // movabs rcx, pFunctor  ** TODO x64 RCX?
+      CatByte(&pWriter, 0x51);                                              // push   rcx
+
+      if (IsMsAbi) {
+        CatBytes(&pWriter, { 0x48, 0x83, 0xEC, uint8(RegisterSize * 4) });  // sub rsp, 32
+      }
+    }
+
+    // ** TODO x64 RSP (incl. return address) must be 16-byte aligned just prior to call? (Unix might in 32-bit too?)
+    const ptrdiff_t callDelta = PcRelPtr(pWriter, sizeof(Call32), pfnInvokeFunctor);
+    if (IsFarDisplacement(callDelta)) {
+      CatValue(&pWriter, Op2_8{ { 0x48, 0xB9 }, uintptr(pfnInvokeFunctor) });  // movabs rcx, pFunction
+      CatBytes(&pWriter, { 0xFF, 0xD1 });                                      // call   rcx
+    }
+    else {
+      CatValue(&pWriter, Call32{ 0xE8, static_cast<int32>(callDelta) });       // call   pFunction
+    }
+  };
+
+  auto WriteCallAndCalleeCleanup = [&pWriter, &sig, &WriteCall] {
+    const auto stackDelta = static_cast<int32>(sig.totalParamSize);
+    if (sig.returnSize > (RegisterSize * 2)) {
+      pWriter = nullptr;  // ** TODO need to handle oversized return types
+    }
+    else {
+      WriteCall();
+      CatByteIfX86_64(&pWriter, 0x48);
+      CatBytes(&pWriter, { 0x8B, 0x4C, 0x24, 0x04 });                        // mov ecx, [esp + 4]
+
+      if (static_cast<int8>(stackDelta) == stackDelta) {
+        CatByteIfX86_64(&pWriter, 0x48);
+        CatBytes(&pWriter, { 0x83, 0xC4, static_cast<uint8>(stackDelta) });  // add esp, i8
+      }
+      else {
+        CatByteIfX86_64(&pWriter, 0x48);
+        CatBytes(&pWriter, { 0x81, 0xC4, });                                 // add esp, i32
+        CatValue(&pWriter, stackDelta);
+      }
+
+      CatBytes(&pWriter, { 0xFF, 0xE1 });                                    // jmp ecx
+    }
+  };
+
+  switch (sig.convention) {
+  case Call::Cdecl:
+    WriteCall();
+    CatBytes(&pWriter, { 0x83, 0xC4, sizeof(void*),  // add esp, 4  ** TODO x64 Does shadow space get popped correctly?
+                         0xC3 });                    // retn
+    break;
+
+#if PATCHER_X86_32
+  case Call::Stdcall:
+    WriteCallAndCalleeCleanup();
+    break;
+
+  case Call::Thiscall:
+    // MS thiscall puts arg 1 in ECX.  If the arg exists, put it on the stack.
+    CatByte(&pWriter, 0x5A);                                           //  pop  edx
+    (numRegisterSizeParams >= 1) ? CatBytes(&pWriter, { 0x51, 0x52 })  // (push ecx)
+                                 :  CatByte(&pWriter,   0x52);         //  push edx
+    WriteCallAndCalleeCleanup();
+    break;
+
+  case Call::Fastcall:
+    // MS fastcall puts the first 2 register-sized args in ECX and EDX.  If the args exist, put them on the stack.
+    (numRegisterSizeParams >= 2) ? CatBytes(&pWriter, { 0x87, 0x14, 0x24 })  // (xchg edx, [esp]) or
+                                 :  CatByte(&pWriter,   0x5A);               // (pop  edx)
+    (numRegisterSizeParams >= 1) ? CatBytes(&pWriter, { 0x51, 0x52 })        // (push ecx)
+                                 :  CatByte(&pWriter,   0x52);               //  push edx
+    WriteCallAndCalleeCleanup();
+    break;
+#endif
+
+  default:
+    // Unknown or unsupported calling convention.
+    pWriter = nullptr;
+    break;
+  }
+
+  const bool result = (pWriter != nullptr);
+
+  if (result) {
+    const size_t sizeWritten = PtrDelta(pWriter, pMemory);
+    assert(sizeWritten <= MaxFunctorThunkSize);
+    if (sizeWritten < MaxFunctorThunkSize) {
+      // Fill padding bytes with int 3 (breakpoint).
+      memset(pWriter, 0xCC, MaxFunctorThunkSize - sizeWritten);
+    }
+  }
+
+  return result;
+}
+
+// =====================================================================================================================
+// Initializes the underlying function for FunctionPtrs that have a state (capturing lambda or non-empty functor).
 void FunctionPtr::InitFunctorThunk(
   void*  pFunctorObj,
   void (*pfnDeleteFunctor)(void*),
@@ -1073,195 +1250,15 @@ void FunctionPtr::InitFunctorThunk(
   void* pMemory = (pFunctorObj != nullptr) ? pAllocator->Alloc(MaxFunctorThunkSize, CodeAlignment) : nullptr;
 
   if (pMemory != nullptr) {
-    auto* pWriter = static_cast<uint8*>(pMemory);
-
-    const uintptr     functorAddr = reinterpret_cast<uintptr>(pFunctorObj);
-    const RtFuncSig&  sig         = Signature();
-
-    size_t numRegisterSizeParams = 0;  // Excluding pFunctor and pReturnAddress
-    for (uint32 i = 2; i < sig.numParams; (sig.pParamSizes[i++] <= RegisterSize) ? ++numRegisterSizeParams : 0);
-
-    // pfnInvokeFunctor is always cdecl;  Signature().convention refers to the original function the invoker wraps.
-    // We need to translate from the input calling convention to cdecl by pushing any register args used by the input
-    // convention to the stack, then push the functor obj address and do the call, then do any expected stack cleanup.
-    auto WriteCall = [&pWriter, pfnInvokeFunctor, functorAddr] {
-      CatValue(&pWriter,  Op1_4{ 0x68, functorAddr });                                          // push pFunctor
-      CatValue(&pWriter, Call32{ 0xE8, PcRelPtr(pWriter, sizeof(Call32), pfnInvokeFunctor) });  // call pFunction
-    };
-
-    auto WriteCallAndCalleeCleanup = [&pWriter, &sig, &WriteCall] {
-      const auto stackDelta = static_cast<int32>(sig.totalParamSize);
-      if (sig.returnSize > (RegisterSize * 2)) {
-        pWriter = nullptr;  // ** TODO need to handle oversized return types
-      }
-      else {
-        WriteCall();
-        CatBytes(&pWriter, { 0x8B, 0x4C, 0x24, 0x04 });                        // mov ecx, [esp + 4]
-        if (static_cast<int8>(stackDelta) == stackDelta) {
-          CatBytes(&pWriter, { 0x83, 0xC4, static_cast<uint8>(stackDelta) });  // add esp, i8
-        }
-        else {
-          CatBytes(&pWriter, { 0x81, 0xC4, });                                 // add esp, i32
-          CatValue(&pWriter, stackDelta);
-        }
-        CatBytes(&pWriter, { 0xFF, 0xE1 });                                    // jmp ecx
-      }
-    };
-
-    switch (sig.convention) {
-#if PATCHER_X86_32
-    case Call::Cdecl:
-      WriteCall();
-      CatBytes(&pWriter, { 0x83, 0xC4, 0x04,  // add esp, 0x4
-                           0xC3 });           // retn
-      break;
-
-    case Call::Stdcall:
-      WriteCallAndCalleeCleanup();
-      break;
-
-    case Call::Thiscall:
-      // MS thiscall puts arg 1 in ECX.  If the arg exists, put it on the stack.
-      CatByte(&pWriter, 0x5A);                                           //  pop  edx
-      (numRegisterSizeParams >= 1) ? CatBytes(&pWriter, { 0x51, 0x52 })  // (push ecx)
-                                   :  CatByte(&pWriter,   0x52);         //  push edx
-      WriteCallAndCalleeCleanup();
-      break;
-
-    case Call::Fastcall:
-      // MS fastcall puts the first 2 register-sized args in ECX and EDX.  If the args exist, put them on the stack.
-      (numRegisterSizeParams >= 2) ? CatBytes(&pWriter, { 0x87, 0x14, 0x24 })  // (xchg edx, [esp]) or
-                                   :  CatByte(&pWriter,   0x5A);               // (pop  edx)
-      (numRegisterSizeParams >= 1) ? CatBytes(&pWriter, { 0x51, 0x52 })        // (push ecx)
-                                   :  CatByte(&pWriter,   0x52);               //  push edx
-      WriteCallAndCalleeCleanup();
-      break;
-#endif
-
-    default:
-      // Unknown or unsupported calling convention.
-      pWriter = nullptr;
-      break;
-    }
-
-    if (pWriter == nullptr) {
-      pAllocator->Free(pMemory);
-      pAllocator->Release();
-      pMemory = nullptr;
-    }
-    else {
-      assert(PtrDelta(pWriter, pMemory) <= MaxFunctorThunkSize);
-    }
-  }
-
-  if (pMemory != nullptr) {
-    pfn_  = pMemory;
     // As the thunk is only valid while pObj_ is alive, its deleter will also deallocate the thunk.
-    pObj_ = std::shared_ptr<void>(pFunctorObj, [pfnDeleteFunctor, pMemory, pAllocator](void* pObj)
+    pObj_      = std::shared_ptr<void>(pFunctorObj, [pfnDeleteFunctor, pMemory, pAllocator](void* pObj)
       { pfnDeleteFunctor(pObj);  pAllocator->Free(pMemory);  pAllocator->Release(); });
-    FlushInstructionCache(GetCurrentProcess(), pMemory, MaxFunctorThunkSize);
-  }
-  else if (pFunctorObj != nullptr) {
-    pfnDeleteFunctor(pFunctorObj);
-  }
-}
+    pfnInvoke_ = pfnInvokeFunctor;
 
-// =====================================================================================================================
-// Functionally copies machine code instructions from one code memory location to another.
-// Note that this function does not flush the instruction cache.
-static void CopyInstructions(
-  uint8**            ppWriter,
-  const InsnVector&  insns,
-  uint8              overwrittenSize,
-  uint8              offsetLut[MaxOverwriteSize])
-{
-  assert((ppWriter != nullptr) && (insns.empty() == false) && (offsetLut != nullptr));
-
-  uint8*const  pBegin     = *ppWriter;
-  size_t  curOldOffset    = 0;
-  std::vector<std::pair<uint32*, uint8>> internalRelocs;
-
-  for (size_t i = 0; i < insns.size(); ++i) {
-    const auto& insn  = insns[i];
-    const auto& bytes = insn.bytes;
-
-    ptrdiff_t pcRelTarget = 0;
-
-    // Store mapping of the original instruction to the offset of the new instruction we're writing.
-    offsetLut[curOldOffset] = static_cast<uint8>(PtrDelta(*ppWriter, pBegin));
-    curOldOffset += insn.size;
-
-    // Instructions which use program counter-relative operands need to be changed to their 32-bit forms and fixed up.
-    // Call
-    if (bytes[0] == 0xE8) {
-      CatByte(ppWriter, 0xE8);
-      const auto*const pCall = reinterpret_cast<const Call32*>(&bytes[0]);
-      pcRelTarget = pCall->operand;
+    if (CreateFunctorThunk(pMemory, *this)) {
+      pfn_  = pMemory;
+      FlushInstructionCache(GetCurrentProcess(), pMemory, MaxFunctorThunkSize);
     }
-    // Jump
-    else if (bytes[0] == 0xE9) {
-      CatByte(ppWriter, 0xE9);
-      const auto*const pJmp = reinterpret_cast<const Jmp32*>(&bytes[0]);
-      pcRelTarget = pJmp->operand;
-    }
-    else if (bytes[0] == 0xEB) {
-      CatByte(ppWriter, 0xE9);
-      pcRelTarget = static_cast<int8>(bytes[1]);
-    }
-    // Conditional jump
-    else if ((bytes[0] == 0x0F) && (bytes[1] >= 0x80) && (bytes[1] <= 0x8F)) {
-      CatBytes(ppWriter, { 0x0F, bytes[1] });
-      const auto*const pJmp = reinterpret_cast<const Op2_4*>(&bytes[0]);
-      pcRelTarget = pJmp->operand;
-    }
-    else if ((bytes[0] >= 0x70) && (bytes[0] <= 0x7F)) {
-      CatBytes(ppWriter, { 0x0F, static_cast<uint8>(bytes[0] + 0x10) });
-      pcRelTarget = static_cast<int8>(bytes[1]);
-    }
-    // Loop, jump if ECX == 0
-    else if ((bytes[0] >= 0xE0) && (bytes[0] <= 0xE3)) {
-      // LOOP* and JECX have no 32-bit operand versions, so we have to use multiple jump instructions to emulate it.
-      CatByte(ppWriter, bytes[0]);
-
-PATCHER_PACK
-      struct {
-        uint8  operand     = sizeof(skipTarget);       // (byte)
-        Jmp8   skipTarget  = { 0xEB, sizeof(Jmp32) };  // jmp short (sizeof(Jmp32))
-        uint8  jmp32Opcode = 0xE9;                     // jmp near (dword)
-      } static constexpr CodeChunk;
-PATCHER_ENDPACK
-      static_assert((sizeof(uint8) + sizeof(CodeChunk) + sizeof(uint32)) <= MaxInstructionSize,
-        "Set of instructions for LOOP/JECX near emulation is too large.");
-
-      CatValue(ppWriter, CodeChunk);
-      pcRelTarget = bytes[1];
-    }
-
-    if (pcRelTarget == 0) {
-      // Just copy instructions without PC rel operands verbatim.
-      CatBytes(ppWriter, &bytes[0], insn.size);
-    }
-    else {
-      // Instructions with PC rel operands must be fixed up.  The new opcode has already been written.
-      const auto target = static_cast<uintptr>(pcRelTarget + insn.address + insn.size);
-      const auto offset = static_cast<ptrdiff_t>(target - insns[0].address);
-
-      if ((offset < 0) || (static_cast<size_t>(offset) >= overwrittenSize)) {
-        // Target is to outside of the overwritten area.
-        CatValue<uint32>(ppWriter, target - (reinterpret_cast<uint32>(*ppWriter) + sizeof(uint32)));
-      }
-      else {
-        // Target is to inside of the overwritten area, so it needs to point to inside of our copied instructions.
-        // Target could be a later instruction we haven't copied yet, so we have to fix this up as a post-process.
-        internalRelocs.emplace_back(reinterpret_cast<uint32*>(*ppWriter), static_cast<uint8>(offset));
-        CatValue<uint32>(ppWriter, 0x00000000);
-      }
-    }
-  }
-
-  for (const auto& reloc : internalRelocs) {
-    *(reloc.first) = PcRelPtr(reloc.first, 4, (pBegin + offsetLut[reloc.second]));
-    break;
   }
 }
 
@@ -1270,27 +1267,34 @@ PATCHER_ENDPACK
 static Status FindHookPatchRegion(
   void*       pAddress,
   uint8*      pOverwrittenSize,  // [out] Total size in bytes of overwritten instructions.
-  InsnVector* pInsns)            // [out] Instructions disassembled in the region.
+  InsnVector* pInsns,            // [out] Disassembled instructions in the region.
+  size_t      maxPatchSize = IsX86_64 ? sizeof(JmpAbs) : sizeof(Jmp32))
 {
   assert((pAddress != nullptr) && (pOverwrittenSize != nullptr));
 
-  g_disasm.Disassemble(pAddress, sizeof(Jmp32), pInsns);
+  g_disasm.Disassemble(pAddress, maxPatchSize, pInsns);
   Status status = (pInsns->size() != 0) ? g_disasm.GetLastError() : Status::FailDisassemble;
 
   void*  pTrampoline = nullptr;
   size_t allocSize   = 0;
 
-  uint32 oldCount        = 0;
+  uint32 oldCount      = 0;
+  uint32 oldCountJmp8  = 0;
+  uint32 oldCountJmp32 = 0;
+
   uint8  overwrittenSize = 0;
+  uint8  minSizeJmp8     = 0;
+  uint8  minSizeJmp32    = 0;
 
   if (status == Status::Ok) {
     // Calculate how many instructions will actually be overwritten by the Jmp32 and their total size.
     bool foundEnd = false;
-    for (uint32 i = 0, count = pInsns->size(); ((i < count) && (overwrittenSize < sizeof(Jmp32))); ++i) {
+    for (uint32 i = 0, count = pInsns->size(); ((i < count) && (overwrittenSize < maxPatchSize)); ++i) {
       const auto& insn = (*pInsns)[i];
 
-      // Assume int 3, nop, or unknown instructions are padders.
-      if (foundEnd && (insn.bytes[0] != 0xCC) && (insn.bytes[0] != 0x90) && (insn.id != X86_INS_INVALID)) {
+      // Assume int 3 or nop instructions are padders.
+      // ** TODO Check for 2 or more NUL
+      if (foundEnd && (insn.bytes[0] != 0xCC) && (insn.bytes[0] != 0x90)) {
         break;
       }
 
@@ -1304,14 +1308,24 @@ static Status FindHookPatchRegion(
           foundEnd = true;
         }
       }
+
+      if ((minSizeJmp8  == 0) && (overwrittenSize >= sizeof(Jmp8))) {
+        minSizeJmp8  = overwrittenSize;
+        oldCountJmp8 = oldCount;
+      }
+      if ((minSizeJmp32 == 0) && (overwrittenSize >= sizeof(Jmp32))) {
+        minSizeJmp32  = overwrittenSize;
+        oldCountJmp32 = oldCount;
+      }
     }
 
-    if (pInsns->size() > oldCount) {
+    if ((maxPatchSize > sizeof(Jmp32)) && (overwrittenSize >= maxPatchSize)) {
+      *pOverwrittenSize = overwrittenSize;
       pInsns->resize(oldCount);
     }
-
-    if (overwrittenSize >= sizeof(Jmp32)) {
-      *pOverwrittenSize = overwrittenSize;
+    else if (overwrittenSize >= sizeof(Jmp32)) {
+      *pOverwrittenSize = minSizeJmp32;
+      pInsns->resize(oldCountJmp32);
     }
     else if (overwrittenSize >= sizeof(Jmp8)) {
       status = Status::FailDisassemble;
@@ -1321,10 +1335,12 @@ static Status FindHookPatchRegion(
       uint8* pReader = static_cast<uint8*>(pAddress);
 
       // Padder bytes are typically int 3 (0xCC), nop (0x90), or NUL.
+      // ** TODO Check for 2 or more NUL
       // ** TODO Check that pReader[-sizeof(Jmp32)] is a valid executable memory address
       for (int32 i = 1; ((pReader[-i] == 0xCC) || (pReader[-i] == 0x90)); ++i) {
         if (i >= static_cast<int32>(sizeof(Jmp32))) {
-          *pOverwrittenSize = overwrittenSize;
+          *pOverwrittenSize = minSizeJmp8;
+          pInsns->resize(oldCountJmp8);
           status = Status::Ok;
           break;
         }
@@ -1336,6 +1352,119 @@ static Status FindHookPatchRegion(
   }
 
   return status;
+}
+
+// =====================================================================================================================
+// Functionally copies machine code instructions from one code memory location to another.
+// Note that this function does not flush the instruction cache.
+static void CopyInstructions(
+  uint8**            ppWriter,
+  const InsnVector&  insns,
+  uint8              overwrittenSize,
+  uint8              offsetLut[MaxOverwriteSize])
+{
+  assert((ppWriter != nullptr) && (insns.empty() == false) && (offsetLut != nullptr));
+
+  uint8*const  pBegin  = *ppWriter;
+  size_t  curOldOffset = 0;
+  std::vector<std::pair<int32*, int32>> internalPcRel32Relocs;
+
+  ptrdiff_t   pcRelTarget = 0;
+  uintptr     target      = 0;
+  ptrdiff_t   offset      = 0;
+  bool        isInternal  = false;
+  bool        isNear      = true;
+
+  auto SetTarget = [&, overwrittenSize](const cs_insn& insn, ptrdiff_t pcRel32) {
+    pcRelTarget = pcRel32;
+    target      = static_cast<uintptr>(pcRelTarget + insn.address + insn.size);
+    offset      = static_cast<ptrdiff_t>(target    - insns[0].address);
+    isInternal  = (offset >= 0) && (static_cast<size_t>(offset) < overwrittenSize);
+#if PATCHER_X86_64
+    const auto targetOffset = static_cast<ptrdiff_t>(target - insn.address);
+    isNear      = isInternal || ((targetOffset <= INT32_MAX) && (targetOffset >= INT32_MIN));
+#endif
+  };
+  
+  auto WritePcRel32Operand = [ppWriter, &isInternal, &target, &offset, &internalPcRel32Relocs] {
+    if (isInternal) {
+      internalPcRel32Relocs.emplace_back(reinterpret_cast<int32*>(*ppWriter), offset);
+    }
+    CatValue(ppWriter, isInternal ? 0 : PcRelPtr<int32>(*ppWriter, sizeof(int32), reinterpret_cast<void*>(target)));
+  };
+
+  for (size_t i = 0; i < insns.size(); ++i) {
+    const auto& insn  = insns[i];
+    const auto& bytes = insn.bytes;
+
+    // Store mapping of the original instruction to the offset of the new instruction we're writing.
+    offsetLut[curOldOffset] = static_cast<uint8>(PtrDelta(*ppWriter, pBegin));
+    curOldOffset += insn.size;
+
+    // Instructions which use program counter-relative operands must be changed to 32-bit or absolute form and fixed up.
+    // Call pcrel32
+    if (bytes[0] == 0xE8) {
+      SetTarget(insn, reinterpret_cast<const Call32*>(&bytes[0])->operand);
+
+      if (isNear) {
+        CatByte(ppWriter, 0xE8);
+        WritePcRel32Operand();
+      }
+      else {
+        CatValue(ppWriter, CallAbs(target));
+      }
+    }
+    // Jump pcrel8/pcrel32
+    else if ((bytes[0] == 0xEB) || (bytes[0] == 0xE9)) {
+      SetTarget(insn, (bytes[0] == 0xE9) ? reinterpret_cast<const Jmp32*>(&bytes[0])->operand : int8(bytes[1]));
+
+      if (isNear) {
+        CatByte(ppWriter, 0xE9);
+        WritePcRel32Operand();
+      }
+      else {
+        CatValue(ppWriter, JmpAbs(target));
+      }
+    }
+    // Conditional jump pcrel8/pcrel32
+    else if ((bytes[0] >= 0x70) && (bytes[0] <= 0x7F) ||
+             ((bytes[0] == 0x0F) && (bytes[1] >= 0x80) && (bytes[1] <= 0x8F)))
+    {
+      SetTarget(insn, (bytes[0] == 0x0F) ? int32(reinterpret_cast<const Op2_4*>(&bytes[0])->operand) : int8(bytes[1]));
+
+      if (isNear) {
+        CatBytes(ppWriter, { 0x0F, (bytes[0] == 0x0F) ? bytes[1] : static_cast<uint8>(bytes[0] + 0x10) });
+        WritePcRel32Operand();
+      }
+      else {
+        CatValue(ppWriter, JccAbs((bytes[0] == 0x0F) ? (bytes[1] - 0x10) : bytes[0], target));
+      }
+    }
+    // Loop, jump if ECX == 0 pcrel8
+    else if ((bytes[0] >= 0xE0) && (bytes[0] <= 0xE3)) {
+      SetTarget(insn, static_cast<int8>(bytes[1]));
+
+      if (isNear) {
+        if (isInternal) {
+          internalPcRel32Relocs.emplace_back(&reinterpret_cast<Loop32*>(*ppWriter)->ifTrue.operand, offset);
+        }
+        CatValue(ppWriter, Loop32(bytes[0], PcRelPtr(*ppWriter, sizeof(Loop32), reinterpret_cast<void*>(target))));
+      }
+      else {
+        CatValue(ppWriter, JccAbs(bytes[0], target));
+      }
+    }
+    else {
+      // Just copy instructions without PC rel operands verbatim.
+      CatBytes(ppWriter, &bytes[0], insn.size);
+    }
+  }
+
+  // Target operands to inside of the overwritten area, which need to point to inside of our copied instructions.
+  // Target could be a later instruction we hadn't copied yet at the time, so we have to fix this up as a post-process.
+  for (const auto& reloc : internalPcRel32Relocs) {
+    *(reloc.first) = PcRelPtr(reloc.first, 4, (pBegin + offsetLut[reloc.second]));
+  }
 }
 
 // =====================================================================================================================
@@ -1355,15 +1484,12 @@ static Status CreateTrampoline(
   
   void*  pTrampoline = nullptr;
   size_t allocSize   = 0;
-  Status status      = Status::Ok;
 
-  if (status == Status::Ok) {
-    // Allocate memory to store the trampoline.
-    allocSize   = Align((prologSize + (MaxInstructionSize * insns.size()) + sizeof(Jmp32) + CodeAlignment - 1),
-                        CodeAlignment);
-    pTrampoline = pAllocator->Alloc(allocSize, CodeAlignment);
-    status = (pTrampoline != nullptr) ? Status::Ok : Status::FailMemAlloc;
-  }
+  // Allocate memory to store the trampoline.
+  allocSize     = Align((prologSize + (MaxCopiedInstructionSize * insns.size()) + sizeof(Jmp32) + CodeAlignment - 1),
+                      CodeAlignment);
+  pTrampoline   = pAllocator->Alloc(allocSize, CodeAlignment);
+  Status status = (pTrampoline != nullptr) ? Status::Ok : Status::FailMemAlloc;
 
   if (status == Status::Ok) {
     uint8 localOffsetLut[MaxOverwriteSize];
@@ -1377,7 +1503,11 @@ static Status CreateTrampoline(
     CopyInstructions(&pWriter, insns, overwrittenSize, offsetLut);
 
     // Complete the trampoline by writing a jmp instruction to the original function.
-    CatValue<Jmp32>(&pWriter, { 0xE9, PcRelPtr(pWriter, sizeof(Jmp32), PtrInc(pAddress, overwrittenSize)) });
+    const ptrdiff_t jmpDelta = PcRelPtr(pWriter, sizeof(Jmp32), PtrInc(pAddress, overwrittenSize));
+    const bool      isFar    = IsX86_64 && ((jmpDelta > INT32_MAX) || (jmpDelta < INT32_MIN));
+
+    isFar ? CatValue(&pWriter, JmpAbs(PtrInc<uintptr>(pAddress, overwrittenSize)))
+          : CatValue(&pWriter, Jmp32{ 0xE9, static_cast<int32>(jmpDelta) });
 
     // Fill in any left over bytes with int 3 padders.
     const size_t remainingSize = allocSize - PtrDelta(pWriter, pTrampoline);
@@ -1401,6 +1531,34 @@ static Status CreateTrampoline(
 }
 
 // =====================================================================================================================
+// Writes code for a far (absolute) jump thunk.
+static Status CreateFarThunk(
+  void*               pFarThunk,
+  const FunctionPtr&  pfnNewFunction)
+{
+  Status status = Status::Ok;
+
+  if (pfnNewFunction.Functor() == nullptr) {
+    *static_cast<JmpAbs*>(pFarThunk) = JmpAbs(reinterpret_cast<uintptr>(pfnNewFunction.Pfn()));
+
+    if (sizeof(JmpAbs) < FarThunkSize) {
+      // Fill padding bytes with int 3 (breakpoint).
+      memset(PtrInc(pFarThunk, FarThunkSize), 0xCC, FarThunkSize - sizeof(JmpAbs));
+    }
+  }
+  // If this thunk is for a state-bound functor, then we can inline the functor thunk instructions.
+  else if (CreateFunctorThunk(pFarThunk, pfnNewFunction) == false) {
+    status = Status::FailInvalidCallback;
+  }
+
+  if (status == Status::Ok) {
+    FlushInstructionCache(GetCurrentProcess(), pFarThunk, FarThunkSize);
+  }
+
+  return status;
+}
+
+// =====================================================================================================================
 Status PatchContext::Hook(
   TargetPtr           pAddress,
   const FunctionPtr&  pfnNewFunction,
@@ -1412,10 +1570,12 @@ Status PatchContext::Hook(
 
   pAddress = MaybeFixTargetPtr(pAddress);
 
-  void*      pTrampoline     = nullptr;
-  uint8      overwrittenSize = 0;
-  size_t     trampolineSize  = 0;
-  InsnVector insns;
+  const void* pHookFunction   = pfnNewFunction;
+  void*       pTrampoline     = nullptr;
+  void*       pFarThunk       = nullptr;
+  uint8       overwrittenSize = 0;
+  size_t      trampolineSize  = 0;
+  InsnVector  insns;
 
   if (status_ == Status::Ok) {
     // Destroy any existing trampoline or functor.
@@ -1427,14 +1587,55 @@ Status PatchContext::Hook(
     status_ = FindHookPatchRegion(pAddress, &overwrittenSize, &insns);
   }
 
+  const auto jmpDelta      = PcRelPtr<ptrdiff_t>(pAddress, sizeof(Jmp32), pfnNewFunction);
+  const bool isFar         = IsFarDisplacement(jmpDelta);
+  const bool needsFarThunk = isFar && (overwrittenSize < sizeof(JmpAbs));
+
   if (status_ == Status::Ok) {
-#if PATCHER_X86_64
-    if (overwrittenSize >= sizeof(JmpAbs64)) {
-      // ** TODO x64
+    // Generate the trampoline to the original code if requested, and the far jump thunk if needed.
+    if (pPfnTrampoline != nullptr) {
+      status_ = CreateTrampoline(
+        pAddress, pAllocator_, insns, overwrittenSize, &pTrampoline, &trampolineSize, needsFarThunk ? FarThunkSize : 0);
+
+      if (needsFarThunk && (status_ == Status::Ok)) {
+        pFarThunk   = pTrampoline;
+        pTrampoline = PtrInc(pFarThunk, FarThunkSize);
+      }
     }
-    else
-#endif
-    if (overwrittenSize >= sizeof(Jmp32)) {
+    else if (needsFarThunk) {
+      pFarThunk      = pAllocator_->Alloc(FarThunkSize, CodeAlignment);
+      trampolineSize = FarThunkSize;
+
+      if (pFarThunk == nullptr) {
+        status_ = Status::FailMemAlloc;
+      }
+    }
+  }
+
+  if (needsFarThunk && (status_ == Status::Ok)) {
+    // Write the far jump thunk code.
+    CreateFarThunk(pFarThunk, pfnNewFunction);
+  }
+
+  if (status_ == Status::Ok) {
+    // ** TODO This could use refactoring
+    if (isFar && (overwrittenSize >= sizeof(JmpAbs))) {
+      // There is enough space to write a JmpAbs at pAddress.
+PATCHER_PACK
+      struct {
+        JmpAbs jmpToHookFunction;
+        uint8  pad[MaxOverwriteSize - sizeof(JmpAbs)];
+      } jmpAbs{{ reinterpret_cast<uintptr>(pHookFunction) }};
+PATCHER_ENDPACK
+
+      if (overwrittenSize > sizeof(JmpAbs)) {
+        // Write no-ops if an instruction is partially overwritten if we are generating a trampoline.
+        memset(&jmpAbs.pad[0], 0x90, sizeof(jmpAbs.pad));
+      }
+
+      Memcpy(pAddress, &jmpAbs, overwrittenSize);
+    }
+    else if (overwrittenSize >= sizeof(Jmp32)) {
       // There is enough space to write a jmp32 at pAddress.
 PATCHER_PACK
       struct {
@@ -1443,7 +1644,7 @@ PATCHER_PACK
       } jmp32;
 PATCHER_ENDPACK
 
-      jmp32.jmpToHookFunction = { 0xE9, PcRelPtr(pAddress, sizeof(Jmp32), pfnNewFunction) };
+      jmp32.jmpToHookFunction = { 0xE9, PcRelPtr(pAddress, sizeof(Jmp32), pHookFunction) };
 
       if (overwrittenSize > sizeof(Jmp32)) {
         // Write no-ops if an instruction is partially overwritten if we are generating a trampoline.
@@ -1463,7 +1664,7 @@ PATCHER_PACK
       } indirectJmp32;
 PATCHER_ENDPACK
 
-      indirectJmp32.jmpToHookFunction = { 0xE9, static_cast<int32>(PtrDelta(pfnNewFunction, pAddress)) };
+      indirectJmp32.jmpToHookFunction = { 0xE9, static_cast<int32>(PtrDelta(pHookFunction, pAddress)) };
       indirectJmp32.jmpToPreviousInsn =
         { 0xEB, PcRelPtr<int8>(&indirectJmp32.jmpToPreviousInsn, sizeof(Jmp8), &indirectJmp32.jmpToHookFunction) };
 
@@ -1488,28 +1689,22 @@ PATCHER_ENDPACK
     }
   }
 
-  if ((status_ == Status::Ok) && (pPfnTrampoline != nullptr)) {
-    status_ = CreateTrampoline(pAddress, pAllocator_, insns, overwrittenSize, &pTrampoline, &trampolineSize);
-  }
-
   if (status_ == Status::Ok) {
     PatchInfo& entry = *historyAt_[pAddress];
 
     // Add trampoline/functor info to the history tracker entry for this patch so we can clean it up later.
-    entry.pTrackedAlloc     = pTrampoline;
-    entry.trackedAllocSize  = trampolineSize;
-    entry.pFunctorObj       = pfnNewFunction.Functor();
-    if (pfnNewFunction.Functor() != nullptr) {
-      entry.pfnFunctorThunk = pfnNewFunction;
-    }
+    entry.pTrackedAlloc    = (pFarThunk != nullptr) ? pFarThunk : pTrampoline;
+    entry.trackedAllocSize = trampolineSize;
+    entry.pFunctorObj      = pfnNewFunction.Functor();
+    entry.pfnFunctorThunk  =
+      ((needsFarThunk == false) && (pfnNewFunction.Functor() != nullptr)) ? pfnNewFunction : nullptr;
 
     if (pPfnTrampoline != nullptr) {
       *static_cast<void**>(pPfnTrampoline) = pTrampoline;
     }
   }
-
-  if ((status_ != Status::Ok) && (pTrampoline != nullptr)) {
-    pAllocator_->Free(pTrampoline);
+  else if ((pTrampoline != nullptr) || (pFarThunk != nullptr)) {
+    pAllocator_->Free((pFarThunk != nullptr) ? pFarThunk : pTrampoline);
   }
 
   return status_;
@@ -1526,69 +1721,99 @@ Status PatchContext::HookCall(
             (pfnNewFunction == nullptr)    ? Status::FailInvalidCallback : Status::Ok;
 
   pAddress = MaybeFixTargetPtr(pAddress);
-  auto*const pInsn = static_cast<uint8*>(pAddress);
 
   if (status_ == Status::Ok) {
     // Destroy any existing trampoline or functor.
     // ** TODO Be able to handle stacking multiple hooks; for now use of multiple PatchContexts can mostly do that.
     Revert(pAddress);
   }
-  void* pfnOriginal = nullptr;
 
-  if (pInsn[0] == 0xE8) {
-    // Call pcrel32
-    pfnOriginal = PtrInc(pAddress, sizeof(Call32) + reinterpret_cast<ptrdiff_t&>(pInsn[1]));
-    Write(pAddress,  Call32{ 0xE8, PcRelPtr(pAddress, sizeof(Call32), pfnNewFunction) });
-  }
-  else if (pInsn[0] == 0xFF) {
-    size_t insnSize = 0;
+  auto*const  pInsn         = static_cast<uint8*>(pAddress);
+  const void* pHookFunction = pfnNewFunction;
+  void*       pfnOriginal   = nullptr;
+  void*       pFarThunk     = nullptr;
 
-    switch (pInsn[1]) {
-    // Call m32
-    case 0x15:                     pfnOriginal = *reinterpret_cast<void**&>(pInsn[2]);  insnSize = 6;  break;
-    // Call r32 (+ r32) (* {2,4,8})
-    case 0x10:  case 0x11:  case 0x12:  case 0x13:  case 0x16:  case 0x17:              insnSize = 2;  break;
-    case 0x14:                                                                          insnSize = 3;  break;
-    // Call r32 (+ r32) (* {2,4,8}) + i8
-    case 0x50:  case 0x51:  case 0x52:  case 0x53:  case 0x55:  case 0x56:  case 0x57:  insnSize = 3;  break;
-    case 0x54:                                                                          insnSize = 4;  break;
-    // Call r32 (+ r32) (* {2,4,8}) + i32
-    case 0x90:  case 0x91:  case 0x92:  case 0x93:  case 0x95:  case 0x96:  case 0x97:  insnSize = 6;  break;
-    case 0x94:                                                                          insnSize = 7;  break;
-    default:                                                                                           break;
+  const auto callDelta = PcRelPtr<ptrdiff_t>(pAddress, sizeof(Call32), pfnNewFunction);
+  const bool isFar     = IsFarDisplacement(callDelta);
+
+  // Create a far jump thunk if needed.
+  if (isFar && (status_ == Status::Ok)) {
+    pFarThunk = pAllocator_->Alloc(FarThunkSize, CodeAlignment);
+
+    if (pFarThunk == nullptr) {
+      status_ = Status::FailMemAlloc;
     }
+  }
 
-    if (insnSize >= sizeof(Call32)) {
+  if (isFar && (status_ == Status::Ok)) {
+    CreateFarThunk(pFarThunk, pfnNewFunction);
+    pHookFunction = pFarThunk;
+  }
+
+  if (status_ == Status::Ok) {
+    if (pInsn[0] == 0xE8) {
+      // Call pcrel32
+      pfnOriginal = PtrInc(pAddress, sizeof(Call32) + reinterpret_cast<ptrdiff_t&>(pInsn[1]));
+      Write(pAddress,  Call32{ 0xE8, PcRelPtr(pAddress, sizeof(Call32), pHookFunction) });
+    }
+    else if ((pInsn[0] == 0xFF) && (((pInsn[1] >= 0x10) && (pInsn[1] <= 0x17)) ||
+                                    ((pInsn[1] >= 0x50) && (pInsn[1] <= 0x57)) ||
+                                    ((pInsn[1] >= 0x90) && (pInsn[1] <= 0x97))))
+    {
+      // Call r32/r64/m32
+      const auto insns = g_disasm.Disassemble(pAddress, 1);
+      status_ = (insns.size() != 0) ? g_disasm.GetLastError() : Status::FailDisassemble;
+
+      if (status_ == Status::Ok) {
+        const size_t insnSize = insns.empty() ? 0 : insns[0].size;
+
+        // If call m32, get its destination address.
+        if (IsX86_32 && (insnSize == 6) && (pInsn[1] == 0x15)) {
+          pfnOriginal = *reinterpret_cast<void**&>(pInsn[2]);
+        }
+        else if (IsX86_64 && (insnSize == 7) && (pInsn[1] == 0x14) && (pInsn[2] == 0x25)) {
+          pfnOriginal = reinterpret_cast<void*>(*reinterpret_cast<uint32*&>(pInsn[3]));
+        }
+
+        if (insnSize >= sizeof(Call32)) {
 PATCHER_PACK
-      struct {
-        Call32  call;
-        uint8   pad[MaxInstructionSize - sizeof(Call32)];
-      } code;
+          struct {
+            Call32  call;
+            uint8   pad[MaxInstructionSize - sizeof(Call32)];
+          } code;
 PATCHER_ENDPACK
 
-      code.call = { 0xE8, PcRelPtr(pAddress, sizeof(Call32), pfnNewFunction) };
-      memset(&code.pad[0], 0x90, sizeof(code.pad));
-      Memcpy(pAddress, &code, insnSize);
+          code.call = { 0xE8, PcRelPtr(pAddress, sizeof(Call32), pHookFunction) };
+          memset(&code.pad[0], 0x90, sizeof(code.pad));
+          Memcpy(pAddress, &code, insnSize);
+        }
+        else {
+          // ** TODO Support this case using trampolines.
+          status_ = Status::FailInstallHook;
+        }
+      }
     }
     else {
-      // ** TODO Support this case using trampolines.
+      // Invalid instruction for hooking.
       status_ = Status::FailInstallHook;
     }
   }
-  else {
-    status_ = Status::FailInstallHook;
-  }
 
   if ((status_ == Status::Ok) && (pPfnOriginal != nullptr)) {
-    // ** TODO Possibly implement this for call r32 variants, for now returns nullptr in those cases
+    // ** TODO Possibly implement this for call r32/r64 variants, for now returns nullptr in those cases
     *static_cast<void**>(pPfnOriginal) = pfnOriginal;
   }
 
-  if ((status_ == Status::Ok) && (pfnNewFunction.Functor() != nullptr)) {
-    // Add trampoline info to the history tracker entry for this patch so we can clean it up later.
+  if (status_ == Status::Ok) {
+    // Add functor and far thunk info to the history tracker entry for this patch so we can clean it up later.
     auto& entry = *historyAt_[pAddress];
-    entry.pFunctorObj     = pfnNewFunction.Functor();
-    entry.pfnFunctorThunk = pfnNewFunction;
+    entry.pTrackedAlloc    = pFarThunk;
+    entry.trackedAllocSize = isFar ? FarThunkSize : 0;
+    entry.pFunctorObj      = pfnNewFunction.Functor();
+    entry.pfnFunctorThunk  = ((isFar == false) && (pfnNewFunction.Functor() != nullptr)) ? pfnNewFunction : nullptr;
+  }
+  else if (pFarThunk != nullptr) {
+    pAllocator_->Free(pFarThunk);
   }
 
   return status_;
@@ -1626,8 +1851,10 @@ static size_t CreateLowLevelHookTrampoline(
     {0x41, 0x5C}, {0x41, 0x5D}, {0x41, 0x5E}, {0x41, 0x5F}, {0x5C}, {0x9D}
   };
   static constexpr Register VolatileRegisters[] = {
-    Register::R8,  Register::R9,  Register::R10, Register::R11, Register::Rdi, Register::Rsi, Register::Rcx,
-    Register::Rdx, Register::Rax
+# if PATCHER_UNIX_ABI
+    Register::Rdi, Register::Rsi,
+# endif
+    Register::R8,  Register::R9,  Register::R10, Register::R11, Register::Rcx, Register::Rdx, Register::Rax
   };
   static constexpr Register ReturnRegister      = Register::Rax;
   static constexpr Register StackRegister       = Register::Rsp;
@@ -1642,7 +1869,7 @@ static size_t CreateLowLevelHookTrampoline(
     settings.noNullReturnDefault = 0;
   }
 
-  size_t numByRef = 0;
+  uint32 numByRef = 0;
   for (const auto& reg : registers) {
     if (reg.byReference) {
       ++numByRef;
@@ -1751,17 +1978,18 @@ static size_t CreateLowLevelHookTrampoline(
         CatByte(&pWriter, (spareRegister < Register::R8) ? 0x48 : 0x4C);
 #endif
         if (offsetIs8Bit) {
-          CatBytes(&pWriter, { 0x8D, LeaOperands[regIdx], 0x24, static_cast<uint8>(offset) });  // lea  r32, [esp + i8]
+          CatBytes(&pWriter, { 0x8D, LeaOperands[regIdx], 0x24, static_cast<uint8>(offset) });  // lea  reg, [esp + i8]
         }
         else {
-          CatBytes(&pWriter, { 0x8D, static_cast<uint8>(LeaOperands[regIdx] + 0x40), 0x24 });   // lea  r32, [esp + i32]
+          CatBytes(&pWriter, { 0x8D, static_cast<uint8>(LeaOperands[regIdx] + 0x40), 0x24 });   // lea  reg, [esp + i32]
           CatValue(&pWriter, static_cast<int32>(offset));
         }
-        Push(spareRegister);                                                                    // push r32
+        Push(spareRegister);                                                                    // push reg
       }
       else {
         // No spare registers.  Push stack pointer then adjust it on the stack in-place.  May be slower.
         Push(StackRegister);                                                     // push esp
+        CatByteIfX86_64(&pWriter, 0x48);
         if (offsetIs8Bit) {
           CatBytes(&pWriter, { 0x83, 0x04, 0x24, static_cast<uint8>(offset) });  // add  dword ptr [esp], i8
         }
@@ -1782,7 +2010,7 @@ static size_t CreateLowLevelHookTrampoline(
       PushAdjustedStackReg(index, (RegisterSize * index) + it->offset);
     }
     else if (reg != ByReference) {
-      Push(reg);  // push r32
+      Push(reg);
     }
     else {
       // Register by reference.
@@ -1814,11 +2042,16 @@ static size_t CreateLowLevelHookTrampoline(
 
 #if PATCHER_X86_64
   // The x64 calling convention puts the first 4 arguments in registers in MS ABI, first 6 in Unix ABI.
-  // ** TODO Moving from register to register would be more optimal, but then we'd have to deal with potential
+  // ** TODO x64 Moving from register to register would be more optimal, but then we'd have to deal with potential
   //         dependencies (if any arg registers e.g. RCX are requested), and reorder the movs or fall back to
   //         xchg/push+pop as needed.
+#if PATCHER_MS_ABI
   static constexpr Register ArgRegisters[] = { Register::Rcx, Register::Rdx, Register::R8, Register::R9 };
-  const size_t numArgRegisters = (std::min)(stackRegisters.size(), ArrayLen(ArgRegisters));
+#elif PATCHER_UNIX_ABI
+  static constexpr Register ArgRegisters[] =
+    { Register::Rdi, Register::Rsi, Register::Rdx, Register::Rcx, Register::R8, Register::R9 };
+#endif
+  const size_t numArgRegisters = (std::min)(registers.Length(), ArrayLen(ArgRegisters));
   for (uint32 i = 0; i < numArgRegisters; ++i) {
     Pop(ArgRegisters[i]);
     stackRegisters.pop_back();
@@ -1830,23 +2063,48 @@ static size_t CreateLowLevelHookTrampoline(
 
   // Write the call instruction to our hook callback function.
   // If return value == nullptr, or custom return destinations aren't allowed, we can take a simpler path.
-  if (pfnHookCb.Functor() == nullptr) {
-    CatValue(&pWriter, Call32{ 0xE8, PcRelPtr(pWriter, sizeof(Call32), pfnHookCb) });        // call pcrel32
+  if (pfnHookCb.Functor() != nullptr) {
+    // We need to push the first 2 args to FunctionPtr::InvokeFunctor().
+#if PATCHER_X86_32
+    CatBytes(&pWriter, { 0x6A, 0x00 });                                               // push   0 (pPrevReturnAddr)
+    CatValue(&pWriter, Op1_4{ 0x68, uintptr(pfnHookCb.Functor().get()) });            // push   pFunctor
+#elif PATCHER_X86_64
+    CatBytes(&pWriter, { 0x48, 0x31, 0xC0 });                                         // xor    rax, rax
+    Push(Register::Rax);                                                              // push   rax
+    CatValue(&pWriter, Op2_8{ { 0x48, 0xB8 }, uintptr(pfnHookCb.Functor().get()) });  // movabs rax, pFunctor
+    Push(Register::Rax);                                                              // push   rax
+#endif
   }
-  else {
-    // ** TODO this needs to be fixed for x64
-    CatBytes(&pWriter, { 0x6A, 0x00 });                                                      // push 0 (pPrevReturnAddr)
-    CatValue(&pWriter, Op1_4{ 0x68, reinterpret_cast<uintptr>(pfnHookCb.Functor().get()) }); // push pFunctor
-    CatValue(&pWriter, Call32{ 0xE8, PcRelPtr(pWriter, sizeof(Call32), pfnHookCb) });        // call pcrel32
-    PopNil(2);                                                                               // add  esp, 8
+
+  // ** TODO x64 RSP (including return address) must be 16-byte aligned just prior to call? (Unix might in 32-bit too?)
+  if (IsX86_64 && IsMsAbi) {
+    // MS x64 ABI expects 32 bytes of shadow space be allocated on the stack just before the call.
+    CatBytes(&pWriter, { 0x48, 0x83, 0xEC, uint8(RegisterSize * 4) });                // sub rsp, 32
+  }
+
+  {
+    const auto callDelta = PcRelPtr<ptrdiff_t>(pWriter, sizeof(Call32), pfnHookCb);
+    if (IsFarDisplacement(callDelta)) {
+      CatValue(&pWriter, Op2_8{ { 0x48, 0xB8 }, uintptr(pfnHookCb.Pfn()) });          // movabs rax, pfn
+      CatBytes(&pWriter, { 0xFF, 0xD0 });                                             // call   rax
+    }
+    else {
+      CatValue(&pWriter, Call32{ 0xE8, static_cast<int32>(callDelta) });              // call   pcrel32
+    }
+  }
+
+  if (IsX86_64 && IsMsAbi) {
+    PopNil(4);                                                                        // add    rsp, 32
+  }
+
+  if (pfnHookCb.Functor() != nullptr) {
+    PopNil(2);                                                                        // add    esp, 8
   }
 
   if ((settings.noCustomReturnAddr || settings.noNullReturnDefault) == false) {
-#if PATCHER_X86_64
-    CatByte(&pWriter, 0x48 );
-#endif
+    CatByteIfX86_64(&pWriter, 0x48 );
     CatBytes(&pWriter, { 0x85, 0xC0,     // test eax, eax
-                         0x75, 0x00 });  // jnz  short i8
+                         0x75, 0x00 });  // jnz  short i8  ** TODO x64 need i32?
     pSkipCase1Offset = (pWriter - 1);  // This will be filled later when we know the size.
   }
 
@@ -1859,7 +2117,7 @@ static size_t CreateLowLevelHookTrampoline(
           ((reg != FlagsRegister) || (settings.noRestoreFlagsReg == false))           &&
            (reg != ByReference))
       {
-        Pop(reg);  // pop r32
+        Pop(reg);
       }
       else {
         // Skip this arg.  (If this is the stack register, it will be popped later.)
@@ -1869,12 +2127,9 @@ static size_t CreateLowLevelHookTrampoline(
 
     if (IsRegisterRequested(StackRegister) && (stackRegIndex != 0) && (stackRegOffset == 0)) {
       // (Re)store ESP.
-      const uint8 offset = static_cast<uint8>(-static_cast<int32>(RegisterSize) * (stackRegIndex + 1));
-#if PATCHER_X86_32
-      CatBytes(&pWriter, { 0x8B, 0x64, 0x24, offset });        // mov esp, dword ptr [esp + i8]
-#elif PATCHER_X86_64
-      CatBytes(&pWriter, { 0x48, 0x8B, 0x64, 0x24, offset });  // mov rsp, qword ptr [rsp + i8]
-#endif
+      const uint8 offset = static_cast<uint8>(-static_cast<int32>(RegisterSize * (stackRegIndex + 1)));
+      CatByteIfX86_64(&pWriter, 0x48);
+      CatBytes(&pWriter, { 0x8B, 0x64, 0x24, offset });  // mov esp, dword ptr [esp + i8]  ** TODO x64 need i32?
     }
 
     // If there's a user-specified default return address, relocate and use that;  otherwise, return to original code.
@@ -1885,7 +2140,10 @@ static size_t CreateLowLevelHookTrampoline(
     }
 
     // Jump to the default return address.
-    CatValue(&pWriter, Jmp32{ 0xE9, PcRelPtr(pWriter, sizeof(Jmp32), pDefaultReturnAddr) });  // jmp pcrel32
+    const auto jmpDelta = PcRelPtr<ptrdiff_t>(pWriter, sizeof(Jmp32), pDefaultReturnAddr);
+
+    IsFarDisplacement(jmpDelta) ? CatValue(&pWriter, JmpAbs(uintptr(pDefaultReturnAddr)))           // jmp abs
+                                : CatValue(&pWriter, Jmp32{ 0xE9, static_cast<int32>(jmpDelta) });  // jmp pcrel32
   }
 
   if (settings.noCustomReturnAddr == false) {
@@ -1896,13 +2154,20 @@ static size_t CreateLowLevelHookTrampoline(
 
     // Case 2: Return to custom destination
     if ((settings.noBaseRelocReturn == false) && (moduleRelocDelta != 0)) {
-      CatValue(&pWriter, Op1_4{ 0x05, static_cast<uint32>(moduleRelocDelta) });  // add eax, u32
+      if (IsX86_32) {
+        CatValue(&pWriter, Op1_4{ 0x05, static_cast<uint32>(moduleRelocDelta) });            // add    eax, u32
+      }
+      else if (IsX86_64) {
+        CatValue(&pWriter, Op2_8{ { 0x48, 0xB9 }, static_cast<uint64>(moduleRelocDelta) });  // movabs rcx, u64
+        CatBytes(&pWriter, { 0x48, 0x01, 0xC8 });                                            // add    rax, rcx
+      }
     }
 
     // If the destination is within the overwritten area, relocate it into the trampoline instead to execute the
     // intended code path.
 PATCHER_PACK
     struct RelocateIntoTrampolineCodeChunk {
+#if PATCHER_X86_32
       // Test if the destination is within the overwritten area.
       Op1_4  testAfterOverwrite  = { 0x3D, };                     // cmp eax, u32
       Jmp8   skipBranch1         = { 0x73, sizeof(branch1) };     // jae short i8
@@ -1917,6 +2182,25 @@ PATCHER_PACK
           Op1_4  addTrampolineToOld  = { 0x05, };                 // add eax, u32
         } branch1A{};
       } branch1{};
+#elif PATCHER_X86_64
+      Op2_8  testAfterOverwrite     = { { 0x48, 0xB9 },  };          // movabs rcx, u64
+      uint8  doCompare[3]           = { 0x48, 0x39, 0xC8 };          // cmp    rax, rcx
+      Jmp8   skipBranch1            = { 0x73, sizeof(branch1) };     // jae    short i8
+
+      struct {
+        Op2_8  testBeforeOverwrite    = { { 0x48, 0xB9 },  };        // movabs rcx, u64
+        uint8  doCompare[3]           = { 0x48, 0x39, 0xC8 };        // cmp    rax, rcx
+        Jmp8   skipBranch1A           = { 0x72, sizeof(branch1A) };  // jb     short i8
+
+        struct { // Relocate destination into the trampoline to the original function.
+          uint8  subtractOldAddress[3]  = { 0x48, 0x29, 0xC8 };      // sub    rax, rcx
+          Op2_8  offsetTableLookup      = { { 0x48, 0xB9 },  };      // movabs rcx, u64
+          uint8  doLookup[3]            = { 0x8A, 0x04, 0x08 };      // mov    al, [rax + rcx]
+          Op2_8  addTrampolineToOld     = { { 0x48, 0xB9 },  };      // movabs rcx, u64
+          uint8  doAdd[3]               = { 0x48, 0x01, 0xC8 };      // add    rax, rcx
+        } branch1A{};
+      } branch1{};
+#endif
     } static constexpr RelocateIntoTrampolineCodeChunkImage;
 PATCHER_ENDPACK
 
@@ -1924,11 +2208,13 @@ PATCHER_ENDPACK
 
     if (settings.noShortReturnAddr == false) {
       CatValue(&pWriter, RelocateIntoTrampolineCodeChunkImage);
-      pRelocateCode->testAfterOverwrite.operand                  = PtrInc<uint32>(pAddress, overwrittenSize);
-      pRelocateCode->branch1.testBeforeOverwrite.operand         = reinterpret_cast<uint32>(pAddress);
-      pRelocateCode->branch1.branch1A.subtractOldAddress.operand = reinterpret_cast<uint32>(pAddress);
+      pRelocateCode->testAfterOverwrite.operand                  = PtrInc<uintptr>(pAddress, overwrittenSize);
+      pRelocateCode->branch1.testBeforeOverwrite.operand         = reinterpret_cast<uintptr>(pAddress);
+#if PATCHER_X86_32
+      pRelocateCode->branch1.branch1A.subtractOldAddress.operand = reinterpret_cast<uintptr>(pAddress);
+#endif
       // We will defer initializing the offset LUT lookup operand until we know where the LUT will be placed.
-      pRelocateCode->branch1.branch1A.addTrampolineToOld.operand = reinterpret_cast<uint32>(pTrampolineToOld);
+      pRelocateCode->branch1.branch1A.addTrampolineToOld.operand = reinterpret_cast<uintptr>(pTrampolineToOld);
     }
 
     // (Re)store register values from the stack.
@@ -1948,38 +2234,52 @@ PATCHER_ENDPACK
         PopNil();
       }
       else {
-        Pop(reg);  // pop r32
+        Pop(reg);
       }
     }
 
     if ((stackRegIndex != UINT_MAX) && (stackRegOffset == 0) && stackRegisters[stackRegIndex].byReference) {
       const uint8 addend          = ((returnRegIndex == 0) || (stackRegIndex == 0)) ? 1 : 0;  // ** TODO test this = 1
-      const uint8 stackValOffset  = static_cast<uint8>(-static_cast<int32>(RegisterSize) * (stackRegIndex  + addend));
-      const uint8 returnValOffset = static_cast<uint8>(-static_cast<int32>(RegisterSize) * (returnRegIndex + addend));
-      Push(ReturnRegister);                                   // push eax (return address)
-      CatBytes(&pWriter, { 0x89, 0xE0,                        // mov  eax, esp (set EAX to address of return address)
-                           0x8B, 0x64, 0x24, stackValOffset,  // mov  esp, dword ptr [esp + i8] (set ESP to user value)
-                           0xFF, 0x30,                        // push dword ptr [eax] (push return address used by retn)
-                           0x8B, 0x40, returnValOffset,       // mov  eax, [eax + i8] (set EAX to user value)
-                           0xC3 });                           // retn
+      const uint8 stackValOffset  = static_cast<uint8>(-static_cast<int32>(RegisterSize * (stackRegIndex  + addend)));
+      const uint8 returnValOffset = static_cast<uint8>(-static_cast<int32>(RegisterSize * (returnRegIndex + addend)));
+      // Push return address to the stack, set EAX to stack address, restore ESP, push return address again to be
+      // consumed by retn, restore EAX, and return.
+      Push(ReturnRegister);                                           // push eax
+      if (IsX86_32) {
+        CatBytes(&pWriter, { 0x89, 0xE0,                              // mov  eax, esp
+                             0x8B, 0x64, 0x24, stackValOffset,        // mov  esp, dword ptr [esp + i8]
+                             0xFF, 0x30,                              // push dword ptr [eax]
+                             0x8B, 0x40, returnValOffset,             // mov  eax, [eax + i8]
+                             0xC3 });                                 // retn
+      }
+      else if (IsX86_64) {
+        CatBytes(&pWriter, { 0x48, 0x89, 0xE0,                        // mov  rax, rsp
+                             0x48, 0x8B, 0x64, 0x24, stackValOffset,  // mov  rsp, qword ptr [rsp + i8]  ** TODO i32?
+                             0xFF, 0x30,                              // push qword ptr [rax]
+                             0x48, 0x8B, 0x40, returnValOffset,       // mov  rax, qword ptr [rax + i8]  ** TODO i32?
+                             0xC3 });                                 // retn
+
+      }
     }
     else if (returnRegIndex != 0) {
       // Push the return address to the stack, mov the stack variable we skipped earlier to EAX, and return.
-      const uint8 offset = static_cast<uint8>(-static_cast<int32>(RegisterSize) * returnRegIndex);
-      Push(ReturnRegister);                                   // push eax
-      CatBytes(&pWriter, { 0x8B, 0x44, 0x24, offset,          // mov  eax, dword ptr [esp + i8]
-                           0xC3 });                           // retn
+      const uint8 offset = static_cast<uint8>(-static_cast<int32>(RegisterSize * returnRegIndex));
+      Push(ReturnRegister);                           // push eax
+      CatByteIfX86_64(&pWriter, 0x48);
+      CatBytes(&pWriter, { 0x8B, 0x44, 0x24, offset,  // mov  eax, dword ptr [esp + i8]  ** TODO x64 need i32?
+                           0xC3 });                   // retn
     }
     else {
       // EAX is the last to pop.  Put the address on the stack just before EAX's value, pop EAX, then jmp to the former.
-      CatBytes(&pWriter, { 0x89, 0x44, 0x24, 0xFC });         // mov dword ptr [esp - 4], eax
-      Pop(ReturnRegister);                                    // pop eax
-      CatBytes(&pWriter, { 0xFF, 0x64, 0x24, 0xF8 });         // jmp dword ptr [esp - 8]
+      CatByteIfX86_64(&pWriter, 0x48);
+      CatBytes(&pWriter, { 0x89, 0x44, 0x24, uint8(-int8(RegisterSize))     });  // mov dword ptr [esp - 4], eax
+      Pop(ReturnRegister);                                                       // pop eax
+      CatBytes(&pWriter, { 0xFF, 0x64, 0x24, uint8(-int8(RegisterSize * 2)) });  // jmp dword ptr [esp - 8]
     }
 
     if (settings.noShortReturnAddr == false) {
       // Initialize the offset LUT lookup instruction we had deferred, now that we know where we're copying the LUT to.
-      pRelocateCode->branch1.branch1A.offsetTableLookup.operand = reinterpret_cast<uint32>(pWriter);
+      pRelocateCode->branch1.branch1A.offsetTableLookup.operand = reinterpret_cast<uintptr>(pWriter);
       // Copy the offset lookup table.
       CatBytes(&pWriter, &offsetLut[0], sizeof(offsetLut));
     }
@@ -2022,12 +2322,17 @@ Status PatchContext::LowLevelHook(
   }
 
   if (status_ == Status::Ok) {
-    status_ = FindHookPatchRegion(pAddress, &overwrittenSize, &insns);
+    status_ = FindHookPatchRegion(pAddress, &overwrittenSize, &insns, sizeof(Jmp32));
   }
 
-  if ((status_ == Status::Ok) && (overwrittenSize >= sizeof(Jmp32))) {
-    status_ = CreateTrampoline(
-      pAddress, pAllocator_, insns, overwrittenSize, &pTrampoline, &trampolineSize, MaxLowLevelHookSize, offsetLut);
+  if (status_ == Status::Ok) {
+    if (overwrittenSize >= sizeof(Jmp32)) {
+      status_ = CreateTrampoline(
+        pAddress, pAllocator_, insns, overwrittenSize, &pTrampoline, &trampolineSize, MaxLowLevelHookSize, offsetLut);
+    }
+    else {
+      status_ = Status::FailInstallHook;
+    }
   }
 
   if (status_ == Status::Ok) {
@@ -2066,15 +2371,12 @@ PATCHER_ENDPACK
     PatchInfo& entry = *historyAt_[pAddress];
 
     // Add trampoline (and functor) info to the history tracker entry for this patch so we can clean it up later.
-    entry.pTrackedAlloc     = pTrampoline;
-    entry.trackedAllocSize  = trampolineSize;
-    entry.pFunctorObj       = pfnHookCb.Functor();
-    if (pfnHookCb.Functor() != nullptr) {
-      entry.pfnFunctorThunk = pfnHookCb;
-    }
+    entry.pTrackedAlloc    = pTrampoline;
+    entry.trackedAllocSize = trampolineSize;
+    entry.pFunctorObj      = pfnHookCb.Functor();
+    entry.pfnFunctorThunk  = (pfnHookCb.Functor() != nullptr) ? pfnHookCb : nullptr;
   }
-
-  if ((status_ != Status::Ok) && (pTrampoline != nullptr)) {
+  else if (pTrampoline != nullptr) {
     pAllocator_->Free(pTrampoline);
   }
 
@@ -2082,6 +2384,7 @@ PATCHER_ENDPACK
 }
 
 // =====================================================================================================================
+// ** TODO x64
 Status PatchContext::EditExports(
   Span<ExportInfo>  exportInfos)
 {

@@ -1,6 +1,6 @@
 /*
  ***********************************************************************************************************************
- * Copyright (c) 2021, Brad Dorney
+ * Copyright (c) 2022, Brad Dorney
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without modification, are permitted provided that the
@@ -726,19 +726,19 @@ public:
   template <typename StlFunction> using GetTargetFunc = void*(StlFunction* pStlFunction);  ///< Returns stdfunc.target()
 
   /// Conversion constructor for void pointers.  Used when referencing e.g. JIT-compiled code.
-  constexpr FunctionPtr(const void* pFunction) : pfn_(pFunction), sig_(), pObj_(), pState_() { }
+  constexpr FunctionPtr(const void* pFunction) : pfn_(pFunction), sig_(), pObj_(), pState_(), pfnInvoke_() { }
 
   /// Conversion constructor for function pointers.
   template <typename T, typename = EnableIf<std::is_function<T>::value>>
   constexpr FunctionPtr(T* pfn)  // C-style cast due to constexpr quirks.
-    : pfn_((void*)(pfn)), sig_(FuncTraits<T>{}), pObj_(), pState_() { }
+    : pfn_((void*)(pfn)), sig_(FuncTraits<T>{}), pObj_(), pState_(), pfnInvoke_() { }
 
   /// Conversion constructor for pointers-to-member-functions.
   /// @ref pThis can be optionally provided to help look up the function address, but is not bound to this FunctionPtr.
   /// @note Consider using the PATCHER_MFN_PTR() macro, which is more robust than PmfCast() backing this constructor.
   template <typename T, typename Pfn, typename = EnableIf<std::is_function<Pfn>::value>>
   FunctionPtr(Pfn T::*pmf, const T* pThis = nullptr)
-    : pfn_((void*)(Util::PmfCast(pmf, pThis))), sig_(FuncTraits<decltype(pmf)>{}), pObj_(), pState_() { }
+    : pfn_((void*)(Util::PmfCast(pmf, pThis))), sig_(FuncTraits<decltype(pmf)>{}), pObj_(), pState_(), pfnInvoke_() { }
 
   /// Conversion constructor for callable objects.  This works with lambdas, (non-overloaded) functors, etc.
   /// @note To hook T::operator() itself, consider constructing a FunctionPtr from &T::operator().
@@ -752,17 +752,18 @@ public:
   template <typename R, typename... A, typename Fn = std::function<R(A...)>, Call C = Call::Cdecl>
   FunctionPtr(
     std::function<R(A...)> functor, Util::AsCall<C> = {}, GetTargetFunc<decltype(functor)>* pfnGetTarget = nullptr)
-    : pfn_(), sig_(FuncSig<R, C, false, const Fn*, void*, A...>{}), pObj_(), pState_()
+    : pfn_(), sig_(FuncSig<R, C, false, const Fn*, void*, A...>{}), pObj_(), pState_(), pfnInvoke_()
   {
     InitFunctorThunk(new Fn(std::move(functor)), [](void* p) { delete (Fn*)p; }, (void*)(&InvokeFunctor<Fn, R, A...>));
     pState_ = ((pfnGetTarget != nullptr) && (pObj_ != nullptr)) ? pfnGetTarget(static_cast<Fn*>(pObj_.get())) : nullptr;
   }
 
-  constexpr operator       const void*() const { return pfn_;    }  ///< Implicit pointer conversion, yielding Pfn().
-  constexpr const void*            Pfn() const { return pfn_;    }  ///< Gets a pointer to the underlying function.
-  constexpr const RtFuncSig& Signature() const { return sig_;    }  ///< Gets function call signature information.
-  std::shared_ptr<void>        Functor() const { return pObj_;   }  ///< Gets the functor obj to call with, if present.
-  constexpr void*         FunctorState() const { return pState_; }  ///< Gets the functor obj internal state data.
+  constexpr operator       const void*() const { return pfn_;       }  ///< Implicit pointer conversion, yielding Pfn().
+  constexpr const void*            Pfn() const { return pfn_;       }  ///< Gets a pointer to the underlying function.
+  constexpr const RtFuncSig& Signature() const { return sig_;       }  ///< Gets function call signature information.
+  std::shared_ptr<void>        Functor() const { return pObj_;      }  ///< Gets the functor obj to call with, if any.
+  constexpr void*         FunctorState() const { return pState_;    }  ///< Gets the functor obj internal state data.
+  constexpr void*    PfnInvokeInternal() const { return pfnInvoke_; }  ///< Gets the internal functor obj invoker.
 
 private:
   template <typename T>  using StlFunctionForFunctor = std::function<typename FuncTraitsNoThis<T>::Function>;
@@ -789,10 +790,11 @@ private:
 #endif
     T* pFunctor, void* pPrevReturnAddr, Args... args) { return (*pFunctor)(args...); }
 
-  const void*           pfn_;     ///< Unqualified pointer to the underlying function.
-  RtFuncSig             sig_;     ///< Function call signature information about pfn_, if it is known at compile time.
-  std::shared_ptr<void> pObj_;    ///< If created from a state-bound functor, std::function object needed to call pfn_.
-  void*                 pState_;  ///< If created from a state-bound functor, pointer to the state managed by pObj_.
+  const void*           pfn_;       ///< Unqualified pointer to the underlying function.
+  RtFuncSig             sig_;       ///< Function call signature information about pfn_, if it is known at compile time.
+  std::shared_ptr<void> pObj_;      ///< If created from a state-bound functor, std::function object needed to call pfn_.
+  void*                 pState_;    ///< If created from a state-bound functor, pointer to the state managed by pObj_.
+  void*                 pfnInvoke_; ///< If created from a state-bound functor, pointer to the InvokeFunctor() instance.
 };
 
 /// Template subclass of FunctionPtr that can be implicitly converted to a plain function pointer and used as a callable

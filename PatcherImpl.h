@@ -138,6 +138,15 @@
   $(PATCHER_REGPARM(1),  Regparm1)  $(PATCHER_REGPARM(2), Regparm2)    $(PATCHER_REGPARM(3), Regparm)   \
   $(PATCHER_SSEREGPARM,  SseRegparm))
 
+// Default stack alignment assumed at the beginning of function calls.
+#if defined(PATCHER_DEFAULT_STACK_ALIGNMENT) == false
+# if PATCHER_X86_64 || PATCHER_UNIX_ABI
+#  define PATCHER_DEFAULT_STACK_ALIGNMENT  16
+# else
+#  define PATCHER_DEFAULT_STACK_ALIGNMENT  RegisterSize
+# endif
+#endif
+
 namespace Patcher {
 
 // Typedefs
@@ -752,9 +761,9 @@ public:
   template <typename R, typename... A, typename Fn = std::function<R(A...)>, Call C = Call::Cdecl>
   FunctionPtr(
     std::function<R(A...)> functor, Util::AsCall<C> = {}, GetTargetFunc<decltype(functor)>* pfnGetTarget = nullptr)
-    : pfn_(), sig_(FuncSig<R, C, false, const Fn*, void*, A...>{}), pObj_(), pState_(), pfnInvoke_()
+    : pfn_(), sig_(FuncSig<R, C, false, A...>{}), pObj_(), pState_(), pfnInvoke_((void*)(&InvokeFunctor<Fn, R, A...>))
   {
-    InitFunctorThunk(new Fn(std::move(functor)), [](void* p) { delete (Fn*)p; }, (void*)(&InvokeFunctor<Fn, R, A...>));
+    InitFunctorThunk(new Fn(std::move(functor)), [](void* p) { delete (Fn*)p; });
     pState_ = ((pfnGetTarget != nullptr) && (pObj_ != nullptr)) ? pfnGetTarget(static_cast<Fn*>(pObj_.get())) : nullptr;
   }
 
@@ -778,7 +787,7 @@ private:
     : FunctionPtr(Fn(std::forward<T>(functor)), call, [](Fn* pObj) -> void* { return pObj->target<T>(); }) { }
 
   /// Initializes the thunk for calling InvokeFunctor() with @ref pObj_ (state-bound functor or capturing lambda).
-  void InitFunctorThunk(void* pFunctorObj, void(*pfnDeleteFunctor)(void*), void* pfnInvokeFunctor);
+  void InitFunctorThunk(void* pFunctorObj, void(*pfnDeleteFunctor)(void*));
 
   /// Target of the thunk created by InitFunctorThunk().
   template <typename T, typename Return, typename... Args>
@@ -787,6 +796,8 @@ private:
     int, int, int, int,            // Ignore 4 register arg slots, so our args are on the stack.
 #elif PATCHER_X86_64 && PATCHER_GXX
     int, int, int, int, int, int,  // Ignore 6 register arg slots, so our args are on the stack.
+#elif PATCHER_X86_32 && PATCHER_GXX
+    int, int,                      // Add 2 dummy arg slots to pad stack to 16-byte alignment.
 #endif
     T* pFunctor, void* pPrevReturnAddr, Args... args) { return (*pFunctor)(args...); }
 

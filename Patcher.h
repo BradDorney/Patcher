@@ -225,7 +225,7 @@ public:
       { return ReplaceReferencesToGlobal(pOldGlobal, sizeof(T), pNewGlobal, pRefsOut); }
   ///@}
 
-  /// Adds or modifies export table entries in the module.
+  /// Adds or modifies export table entries in the module.  The modified export table will be seen by future modules.
   ///
   /// There are 3 modes of exporting:
   ///  - Export by name:     Exports by (possibly decorated) symbol name.
@@ -238,6 +238,8 @@ public:
   ///
   /// Examples:  EditExports({ { 0x401260, "AddUndecoratedExport" },  { 0x402000, "_AddDecoratedCFastcallExport@8"  } })
   ///            EditExports({ { 0x404000, 1 /* By ordinal */     },  { nullptr, "?DeleteDecoratedCppExport@@YAXXZ" } })
+  /// 
+  /// @note     32-bit x86 only.
   PatcherStatus EditExports(Span<ExportInfo> exportInfos);
   
   PatcherStatus Memcpy(TargetPtr pAddress, const void* pSrc, size_t size);            ///< Safe memcpy to module memory.

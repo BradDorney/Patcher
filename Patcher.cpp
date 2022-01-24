@@ -57,16 +57,23 @@ using namespace Impl;
 using namespace Util;
 using namespace Registers;
 
-// Internal macros to toggle struct packing (struct packing and minimum alignment set to 1).
-#define PATCHER_PACK     PATCHER_PRAGMA(pack(push, 1))
-#define PATCHER_ENDPACK  PATCHER_PRAGMA(pack(pop))
+// Internal macros
+
+#define PATCHER_PACK_STRUCT      PATCHER_PRAGMA(pack(push, 1))
+#define PATCHER_END_PACK_STRUCT  PATCHER_PRAGMA(pack(pop))
+
+#if PATCHER_X86_64
+# define IF_X86_64(...)  __VA_ARGS__
+#else
+# define IF_X86_64(...)
+#endif
 
 // Internal typedefs
 
 using Status     = PatcherStatus;
 using InsnVector = std::vector<cs_insn>;
 
-PATCHER_PACK
+PATCHER_PACK_STRUCT
 // Generic structure of a simple x86 instruction with one opcode and one operand.
 template <size_t OpcodeSize, typename OperandType, uint8... DefaultOpcode>
 struct Op {
@@ -130,7 +137,7 @@ struct CallAbs {
   uintptr address;
 #endif
 };
-PATCHER_ENDPACK
+PATCHER_END_PACK_STRUCT
 
 // Internal constants
 
@@ -169,9 +176,9 @@ constexpr uint32 MaxOverwriteSize         = (IsX86_64 ? sizeof(JmpAbs) : sizeof(
 // Max size in bytes low-level hook trampoline code is expected to require.
 constexpr uint32 MaxLowLevelHookSize  = Align(160, CodeAlignment);
 // Max size in bytes functor thunk code is expected to require.
-constexpr size_t MaxFunctorThunkSize  = Align(IsX86_64 ? 48 : 32, CodeAlignment);
+constexpr uint32 MaxFunctorThunkSize  = Align(IsX86_64 ? 48 : 32, CodeAlignment);
 // Number of extra args to call FunctionPtr::InvokeFunctor().
-constexpr size_t InvokeFunctorNumArgs = (IsX86_32 && IsUnixAbi) ? 4 : 2;
+constexpr uint32 InvokeFunctorNumArgs = (IsX86_32 && IsUnixAbi) ? 4 : 2;
 // Max size in bytes far jump thunk code is expected to require.
 constexpr uint32 FarThunkSize         = Align(max(sizeof(JmpAbs), MaxFunctorThunkSize), CodeAlignment);
 
@@ -354,8 +361,8 @@ private:
     pNextBlock_ = nullptr;
   }
 
-  static size_t PageSize() { return SystemInfo().dwPageSize;              }  //  4 KB
-  static size_t SlabSize() { return SystemInfo().dwAllocationGranularity; }  // 64 KB
+  static size_t PageSize() { return SystemInfo().dwPageSize;              }  // Typically  4 KB
+  static size_t SlabSize() { return SystemInfo().dwAllocationGranularity; }  // Typically 64 KB
 
   // Find an available region of VA space within 32-bit signed addressing.
   void* FindNextRegion(void* pNearAddr, size_t sizeNeeded);
@@ -1641,12 +1648,12 @@ Status PatchContext::Hook(
     // ** TODO This could use refactoring
     if (isFar && (overwrittenSize >= sizeof(JmpAbs))) {
       // There is enough space to write a JmpAbs at pAddress.
-      PATCHER_PACK
+      PATCHER_PACK_STRUCT
       struct {
         JmpAbs jmpToHookFunction;
         uint8  pad[MaxOverwriteSize - sizeof(JmpAbs)];
       } jmpAbs{{ reinterpret_cast<uintptr>(pHookFunction) }};
-      PATCHER_ENDPACK
+      PATCHER_END_PACK_STRUCT
 
       if (overwrittenSize > sizeof(JmpAbs)) {
         // Write no-ops if an instruction is partially overwritten if we are generating a trampoline.
@@ -1657,12 +1664,12 @@ Status PatchContext::Hook(
     }
     else if (overwrittenSize >= sizeof(Jmp32)) {
       // There is enough space to write a jmp32 at pAddress.
-      PATCHER_PACK
+      PATCHER_PACK_STRUCT
       struct {
         Jmp32 jmpToHookFunction;
         uint8 pad[MaxOverwriteSize - sizeof(Jmp32)];
       } jmp32;
-      PATCHER_ENDPACK
+      PATCHER_END_PACK_STRUCT
 
       jmp32.jmpToHookFunction = { 0xE9, PcRelPtr(pAddress, sizeof(Jmp32), pHookFunction) };
 
@@ -1676,13 +1683,13 @@ Status PatchContext::Hook(
     else if (overwrittenSize >= sizeof(Jmp8)) {
       // There isn't enough space for a jmp32 at pAddress, but there is in the padding bytes preceding it, and there
       // is enough room for a jmp8 referencing the jmp32.
-      PATCHER_PACK
+      PATCHER_PACK_STRUCT
       struct {
         Jmp32 jmpToHookFunction;
         Jmp8  jmpToPreviousInsn;
         uint8 pad[MaxOverwriteSize - (sizeof(Jmp32) + sizeof(Jmp8))];
       } indirectJmp32;
-      PATCHER_ENDPACK
+      PATCHER_END_PACK_STRUCT
 
       indirectJmp32.jmpToHookFunction = { 0xE9, static_cast<int32>(PtrDelta(pHookFunction, pAddress)) };
       indirectJmp32.jmpToPreviousInsn =
@@ -1795,12 +1802,12 @@ Status PatchContext::HookCall(
         }
 
         if (insnSize >= sizeof(Call32)) {
-          PATCHER_PACK
+          PATCHER_PACK_STRUCT
           struct {
             Call32  call;
             uint8   pad[MaxInstructionSize - sizeof(Call32)];
           } code;
-          PATCHER_ENDPACK
+          PATCHER_END_PACK_STRUCT
 
           code.call = { 0xE8, PcRelPtr(pAddress, sizeof(Call32), pHookFunction) };
           memset(&code.pad[0], 0x90, sizeof(code.pad));
@@ -1934,7 +1941,9 @@ static size_t CreateLowLevelHookTrampoline(
     // If we are aligning the stack pointer, then the original stack register address is the first thing we must push.
     AddRegisterToStack({ StackRegister });
   }
-  if (settings.noRestoreFlagsReg == false) {
+  if (settings.noRestoreFlagsReg == false &&
+      ((IsRegisterRequested(FlagsRegister) == false) || (settings.noAlignStackPtr == false)))
+  {
     AddRegisterToStack({ FlagsRegister });
   }
   for (const Register reg : VolatileRegisters) {
@@ -2003,7 +2012,7 @@ static size_t CreateLowLevelHookTrampoline(
 
       if (spareRegister != Register::Count) {
         const uint32 regIdx = uint32(spareRegister);
-#if PATCHER_X86_32                              // Eax:  Ecx:  Edx:  Ebx:  Esi:  Edi:
+#if PATCHER_X86_32                            // Eax:  Ecx:  Edx:  Ebx:  Esi:  Edi:
         static constexpr uint8 SetOperands[] = { 0x44, 0x4C, 0x54, 0x5C, 0x74, 0x7C, };
         static constexpr uint8 AddOperands[] = { 0x40, 0x49, 0x52, 0x5B, 0x76, 0x7F, };
 #elif PATCHER_X86_64
@@ -2041,8 +2050,8 @@ static size_t CreateLowLevelHookTrampoline(
 
         if (addend != 0) {
           if (settings.noRestoreFlagsReg == false) { Push(FlagsRegister); }              // pushf  ** TODO This is slow
-          CatByteIfX86_64(&pWriter, 0x48);                                               // add dword ptr [esp + 4], i32
-          CatValue<Op<4, uint32>>(&pWriter, { { 0x81, 0x44, 0x24, uint8(RegisterSize) }, addend });
+          CatValue<Op<IsX86_64 ? 5 : 4, uint32>>(                                        // add dword ptr [esp + 4], i32
+            &pWriter, { { IF_X86_64(0x48,) 0x81, 0x44, 0x24, uint8(RegisterSize) }, addend });
           if (settings.noRestoreFlagsReg == false) { Pop(FlagsRegister); }               // popf
         }
       }
@@ -2050,70 +2059,37 @@ static size_t CreateLowLevelHookTrampoline(
   };
 
   if (settings.noAlignStackPtr == false) {
-    // Ensure the stack address upon executing the upcoming call instruction is aligned.
+    // Ensure the stack address upon reaching the upcoming call instruction is aligned to ABI requirements.
     const size_t totalStackSize =
-      (stackRegisters.size()
+      RegisterSize * (stackRegisters.size()
        - ((IsX86_64 && IsUnixAbi) ? (std::min)(registers.Length(), 6u) : 0)  // -6 for args passed via registers
-       + ((pfnHookCb.Functor() != nullptr) ? InvokeFunctorNumArgs : 0)       // +2/+4 for InvokeFunctor() args
-       + 1) * RegisterSize;                                                  // +1 for return address  ** TODO Include?
+       + ((pfnHookCb.Functor() != nullptr) ? InvokeFunctorNumArgs : 0));     // +2/+4 for InvokeFunctor() args
     assert(totalStackSize <= INT8_MAX);  // ** TODO x64 Is this a safe assumption? Probably not
 
-    static constexpr uint8 StackAlignSpace = uint8(-int8(StackAlignment));
-    static constexpr uint8 OldStackOffset  = uint8(      (RegisterSize * 3) + StackAlignment);
-    static constexpr uint8 FlagsOffset     = uint8(-int8((RegisterSize * 3) + StackAlignment));
-    static constexpr uint8 EcxOffset       = uint8(-int8((RegisterSize * 2) + StackAlignment));
-    static constexpr uint8 EaxOffset       = uint8(-int8((RegisterSize * 1) + StackAlignment));
+    static constexpr uint8 StackAlignMask = uint8(-int8(StackAlignment));
+    static constexpr uint8 ReserveOffset  = uint8(-int8(StackAlignment * 2));
+    static constexpr uint8 OldStackOffset = uint8(      (RegisterSize * 1) + (StackAlignment * 2));
+    static constexpr uint8 FlagsOffset    = uint8(-int8((RegisterSize * 2) + (StackAlignment * 2)));
+    static constexpr uint8 EaxOffset      = uint8(-int8((RegisterSize * 1) + (StackAlignment * 2)));
+    const            uint8 alignDelta     =
+      uint8(-int8((totalStackSize & (StackAlignment - 1)) - StackAlignment)) & (StackAlignment - 1);
+    const            bool  saveFlags      = (settings.noRestoreFlagsReg == false);
 
-    PATCHER_PACK
-    static constexpr struct AlignStackPointerCodeChunk {
-#if PATCHER_X86_32
-      uint8       reserveStackSpace[4] = { 0x8D, 0x64, 0x24, StackAlignSpace };  // lea  esp, [esp - 16]
-      uint8       saveEax              =   0x50;                                 // push eax
-      uint8       saveEcx              =   0x51;                                 // push ecx
-      uint8       saveFlags            =   0x9C;                                 // pushf
-      uint8       setEcxToOldEsp[4]    = { 0x8D, 0x4C, 0x24, OldStackOffset };   // lea  ecx, [esp + 28]
-      Op<2, int8> calcCallTimeStackPtr = { { 0x8D, 0x41, }, };                   // lea  eax, [ecx - i8]
-      uint8       testIfAligned[3]     = { 0x83, 0xE0, (StackAlignment - 1) };   // and  eax, 15
-      Jmp8        skipCalcAlignDelta   = { 0x74, sizeof(calcAlignDelta) };       // jz   3
-      uint8         calcAlignDelta[3]  =   { 0x83, 0xE8, StackAlignment };       //   sub  eax, 16
-      uint8       restoreFlags         =   0x9D;                                 // popf
-      uint8       alignStackPtr[3]     = { 0x8D, 0x24, 0x01 };                   // lea  esp, [ecx + eax]
-      uint8       restoreEax[3]        = { 0x8B, 0x41, EaxOffset };              // mov  eax, dword ptr [ecx - 20]
-      uint8       pushOldEsp           =   0x51;                                 // push ecx
-      uint8       pushFlags[3]         = { 0xFF, 0x71, FlagsOffset };            // push dword ptr [ecx - 28]
-      uint8       restoreEcx[3]        = { 0x8B, 0x49, EcxOffset };              // mov  ecx, dword ptr [ecx - 24]
-#elif PATCHER_X86_64
-      uint8       reserveStackSpace[5] = { 0x48, 0x8D, 0x64, 0x24, StackAlignSpace };  // lea  rsp, [rsp - 16]
-      uint8       saveRax              =   0x50;                                       // push rax
-      uint8       saveRcx              =   0x51;                                       // push rcx
-      uint8       saveFlags            =   0x9C;                                       // pushf
-      uint8       setRcxToOldRsp[5]    = { 0x48, 0x8D, 0x4C, 0x24, OldStackOffset };   // lea  rcx, [rsp + 40]
-      Op<3, int8> calcCallTimeStackPtr = { { 0x48, 0x8D, 0x41, }, };                   // lea  rax, [rcx - i8]
-      uint8       testIfAligned[4]     = { 0x48, 0x83, 0xE0, (StackAlignment - 1) };   // and  rax, 15
-      Jmp8        skipCalcAlignDelta   = { 0x74, sizeof(calcAlignDelta) };             // jz   4
-      uint8         calcAlignDelta[4]  =   { 0x48, 0x83, 0xE8, StackAlignment };       //   sub  rax, 16
-      uint8       restoreFlags         =   0x9D;                                       // popf
-      uint8       alignStackPtr[4]     = { 0x48, 0x8D, 0x24, 0x01 };                   // lea  rsp, [rcx + rax]
-      uint8       restoreRax[4]        = { 0x48, 0x8B, 0x41, EaxOffset };              // mov  rax, qword ptr [rcx - 24]
-      uint8       pushOldRsp           =   0x51;                                       // push rcx
-      uint8       pushFlags[3]         = { 0xFF, 0x71, FlagsOffset };                  // push qword ptr      [rcx - 40]
-      uint8       restoreRcx[4]        = { 0x48, 0x8B, 0x49, EcxOffset };              // mov  rcx, qword ptr [rcx - 32]
-#endif
-    } AlignStackPointerCodeChunkImage;
-    PATCHER_ENDPACK
-
-    auto*const pAlignCode = reinterpret_cast<AlignStackPointerCodeChunk*>(pWriter);
-    CatValue(&pWriter, AlignStackPointerCodeChunkImage);
-    pAlignCode->calcCallTimeStackPtr.operand = -int8(totalStackSize);
-
-    if (settings.noRestoreFlagsReg) {
-      // Nop out flags register save/restore/push instructions.
-      pAlignCode->saveFlags    = 0x51; // push ecx
-      pAlignCode->restoreFlags = 0x90; // nop
-      pAlignCode->pushFlags[0] = 0x0F; // nop 3
-      pAlignCode->pushFlags[1] = 0x1F;
-      pAlignCode->pushFlags[2] = 0x00;
-    }
+    Writer writer(pWriter);  // ** TODO
+    writer
+      .Bytes({ 0x8D, 0x64, 0x24, ReserveOffset,                         // lea  esp, [esp - 32]  (Reserve stack space)
+               0x50,                                                    // push eax              (Save EAX)
+               IF_X86_64(0x48,) 0x8D, 0x44, 0x24, OldStackOffset })     // lea  eax, [esp + 36]  (Set EAX to old ESP)
+      .ByteIf(saveFlags, 0x9C)                                          // pushf                 (Save Eflags)
+      .Bytes({ IF_X86_64(0x48,) 0x83, 0xE0, StackAlignMask })           // and  eax, -16         (Calculate aligned ESP)
+      .BytesIf(alignDelta, { IF_X86_64(0x48,) 0x83, 0xE8, alignDelta }) // sub  eax, alignDelta
+      .ByteIf(saveFlags, 0x9D)                                          // popf                  (Restore Eflags)
+      .Bytes({ IF_X86_64(0x48,) 0x8D, 0x64, 0x24, OldStackOffset,       // lea  esp, [esp + 36]  (Restore ESP)
+               IF_X86_64(0x48,) 0x94,                                   // xchg eax, esp         (Align ESP)
+               0x50 })                                                  // push eax                       (Save old ESP)
+      .BytesIf(saveFlags, { 0xFF, 0x70, FlagsOffset })                  // push dword ptr [eax - 36]      (Save Eflags)
+      .Bytes({ IF_X86_64(0x48,) 0x8B, 0x40, EaxOffset });               // mov  eax, dword ptr [eax - 32] (Restore EAX)
+    pWriter = writer.GetNext();  // ** TODO
   }
 
   // Push required registers to the stack in RTL order, per the cdecl calling convention.
@@ -2138,11 +2114,7 @@ static size_t CreateLowLevelHookTrampoline(
   }
 
   auto PopNil = [&pWriter, pLowLevelHook](int8 count = 1) {
-#if PATCHER_X86_32
-    constexpr uint8 SkipPop[] = { 0x83, 0xC4, 0x00 };        // add esp, 0
-#elif PATCHER_X86_64
-    constexpr uint8 SkipPop[] = { 0x48, 0x83, 0xC4, 0x00 };  // add rsp, 0
-#endif
+    constexpr uint8 SkipPop[] = { IF_X86_64(0x48,) 0x83, 0xC4, 0x00 };  // add esp, 0
     assert(count <= (INT8_MAX / RegisterSize));
     const int8 skipSize = (count * RegisterSize);
     if ((PtrDelta(pWriter, pLowLevelHook) >= sizeof(SkipPop))                              &&
@@ -2163,12 +2135,12 @@ static size_t CreateLowLevelHookTrampoline(
   // ** TODO x64 Moving from register to register would be more optimal, but then we'd have to deal with potential
   //         dependencies (if any arg registers e.g. RCX are requested), and reorder the movs or fall back to
   //         xchg/push+pop as needed.
-#if PATCHER_MS_ABI
+# if PATCHER_MS_ABI
   static constexpr Register ArgRegisters[] = { Register::Rcx, Register::Rdx, Register::R8, Register::R9 };
-#elif PATCHER_UNIX_ABI
+# elif PATCHER_UNIX_ABI
   static constexpr Register ArgRegisters[] =
     { Register::Rdi, Register::Rsi, Register::Rdx, Register::Rcx, Register::R8, Register::R9 };
-#endif
+# endif
   const size_t numArgRegisters = (std::min)(registers.Length(), ArrayLen(ArgRegisters));
   for (uint32 i = 0; i < numArgRegisters; ++i) {
     Pop(ArgRegisters[i]);
@@ -2197,16 +2169,16 @@ static size_t CreateLowLevelHookTrampoline(
 #endif
   }
 
-  // ** TODO x64 RSP (including return address) must be 16-byte aligned just prior to call? (Unix might in 32-bit too?)
   if (IsX86_64 && IsMsAbi) {
     // MS x64 ABI expects 32 bytes of shadow space be allocated on the stack just before the call.
     CatBytes(&pWriter, { 0x48, 0x83, 0xEC, uint8(RegisterSize * 4) });                // sub rsp, 32
   }
 
   {
-    const auto callDelta = PcRelPtr<ptrdiff_t>(pWriter, sizeof(Call32), pfnHookCb);
+    const void* pHookFunction = (pfnHookCb.Functor() != nullptr) ? pfnHookCb.PfnInvokeInternal() : pfnHookCb.Pfn();
+    const auto  callDelta     = PcRelPtr<ptrdiff_t>(pWriter, sizeof(Call32), pHookFunction);
     if (IsFarDisplacement(callDelta)) {
-      CatValue(&pWriter, Op2_8{ { 0x48, 0xB8 }, uintptr(pfnHookCb.Pfn()) });          // movabs rax, pfn
+      CatValue(&pWriter, Op2_8{ { 0x48, 0xB8 }, uintptr(pHookFunction) });            // movabs rax, pfn
       CatBytes(&pWriter, { 0xFF, 0xD0 });                                             // call   rax
     }
     else {
@@ -2214,6 +2186,7 @@ static size_t CreateLowLevelHookTrampoline(
     }
   }
 
+  // Pop the shadow space, and InvokeFunctor() args if we passed them.
   if (IsX86_64 && IsMsAbi) {
     PopNil(4);                                                                        // add    rsp, 32
   }
@@ -2222,9 +2195,8 @@ static size_t CreateLowLevelHookTrampoline(
   }
 
   if ((settings.noCustomReturnAddr || settings.noNullReturnDefault) == false) {
-    CatByteIfX86_64(&pWriter, 0x48);
-    CatBytes(&pWriter, { 0x85, 0xC0,     // test eax, eax
-                         0x75, 0x00 });  // jnz  short i8  ** TODO x64 need i32?
+    CatBytes(&pWriter, { IF_X86_64(0x48,) 0x85, 0xC0,  // test eax, eax
+                         0x75, 0x00 });                // jnz  short i8  ** TODO x64 need i32?
     pSkipCase1Offset = (pWriter - 1);  // This will be filled later when we know the size.
   }
 
@@ -2248,8 +2220,7 @@ static size_t CreateLowLevelHookTrampoline(
     if (IsRegisterRequested(StackRegister) && (stackRegIndex != 0) && (stackRegOffset == 0)) {
       // (Re)store ESP.
       const uint8 offset = uint8(-int32(RegisterSize * (stackRegIndex + 1)));
-      CatByteIfX86_64(&pWriter, 0x48);
-      CatBytes(&pWriter, { 0x8B, 0x64, 0x24, offset });  // mov esp, dword ptr [esp + i8]  ** TODO x64 need i32?
+      CatBytes(&pWriter, { IF_X86_64(0x48,) 0x8B, 0x64, 0x24, offset });  // mov esp, dword ptr [esp + i8]  ** TODO x64 need i32?
     }
 
     // If there's a user-specified default return address, relocate and use that;  otherwise, return to original code.
@@ -2285,7 +2256,7 @@ static size_t CreateLowLevelHookTrampoline(
 
     // If the destination is within the overwritten area, relocate it into the trampoline instead to execute the
     // intended code path.
-    PATCHER_PACK
+    PATCHER_PACK_STRUCT
     struct RelocateIntoTrampolineCodeChunk {
 #if PATCHER_X86_32
       // Test if the destination is within the overwritten area.
@@ -2322,7 +2293,7 @@ static size_t CreateLowLevelHookTrampoline(
       } branch1{};
 #endif
     } static constexpr RelocateIntoTrampolineCodeChunkImage;
-    PATCHER_ENDPACK
+    PATCHER_END_PACK_STRUCT
 
     auto*const pRelocateCode = reinterpret_cast<RelocateIntoTrampolineCodeChunk*>(pWriter);
 
@@ -2361,44 +2332,32 @@ static size_t CreateLowLevelHookTrampoline(
         (stackRegOffset == 0)       &&
         (stackRegisters[stackRegIndex].byReference || (settings.noAlignStackPtr == false)))
     {
-      // ** TODO Off-by-one (or two) error? (Align stack mode-specific?)
-      const uint8 addend          =  // ** TODO Test returnRegIndex and stackRegIndex conditions
+      const uint8 subend          =  // ** TODO Test returnRegIndex and stackRegIndex conditions
         ((settings.noAlignStackPtr == false) || (returnRegIndex == 0) || (stackRegIndex == 0)) ? 1 : 0;
-      const uint8 stackValOffset  = uint8(-int32(RegisterSize * (stackRegIndex  - addend)));
-      const uint8 returnValOffset = uint8(-int32(RegisterSize * (returnRegIndex - addend)));
+      const uint8 stackValOffset  = uint8(-int32(RegisterSize * (stackRegIndex  - subend)));
+      const uint8 returnValOffset = uint8(-int32(RegisterSize * (returnRegIndex - subend)));
       // Push return address to the stack, set EAX to stack address, restore ESP, push return address again to be
       // consumed by retn, restore EAX, and return.
-      Push(ReturnRegister);                                           // push eax
-      if (IsX86_32) {
-        CatBytes(&pWriter, { 0x89, 0xE0,                              // mov  eax, esp
-                             0x8B, 0x64, 0x24, stackValOffset,        // mov  esp, dword ptr [esp + i8]
-                             0xFF, 0x30,                              // push dword ptr [eax]
-                             0x8B, 0x40, returnValOffset,             // mov  eax, [eax + i8]
-                             0xC3 });                                 // retn
-      }
-      else if (IsX86_64) {
-        CatBytes(&pWriter, { 0x48, 0x89, 0xE0,                        // mov  rax, rsp
-                             0x48, 0x8B, 0x64, 0x24, stackValOffset,  // mov  rsp, qword ptr [rsp + i8]  ** TODO i32?
-                             0xFF, 0x30,                              // push qword ptr [rax]
-                             0x48, 0x8B, 0x40, returnValOffset,       // mov  rax, qword ptr [rax + i8]  ** TODO i32?
-                             0xC3 });                                 // retn
-
-      }
+      Push(ReturnRegister);                                                    // push eax
+      CatBytes(&pWriter, { IF_X86_64(0x48,) 0x89, 0xE0,                        // mov  eax, esp
+                           IF_X86_64(0x48,) 0x8B, 0x64, 0x24, stackValOffset,  // mov  esp, qword ptr [esp + i8]  ** TODO i32?
+                           0xFF, 0x30,                                         // push dword ptr [eax]
+                           IF_X86_64(0x48,) 0x8B, 0x40, returnValOffset,       // mov  eax, dword ptr [eax + i8]  ** TODO i32?
+                           0xC3 });                                            // retn
     }
     else if (returnRegIndex != 0) {
       // Push the return address to the stack, mov the stack variable we skipped earlier to EAX, and return.
       const uint8 offset = uint8(-int32(RegisterSize * returnRegIndex));
-      Push(ReturnRegister);                                // push eax
-      CatByteIfX86_64(&pWriter, 0x48);
-      CatBytes(&pWriter,      { 0x8B, 0x44, 0x24, offset,  // mov  eax, dword ptr [esp + i8]  ** TODO x64 need i32?
-                                0xC3 });                   // retn
+      Push(ReturnRegister);                                            // push eax
+      CatBytes(&pWriter, { IF_X86_64(0x48,) 0x8B, 0x44, 0x24, offset,  // mov  eax, dword ptr [esp + i8]  ** TODO x64 need i32?
+                           0xC3 });                                    // retn
     }
     else {
       // EAX is the last to pop.  Put the address on the stack just before EAX's value, pop EAX, then jmp to the former.
-      CatByteIfX86_64(&pWriter, 0x48);
-      CatBytes(&pWriter,      { 0x89, 0x44, 0x24, uint8(-int8(RegisterSize))     });  // mov dword ptr [esp - 4], eax
-      Pop(ReturnRegister);                                                            // pop eax
-      CatBytes(&pWriter,      { 0xFF, 0x64, 0x24, uint8(-int8(RegisterSize * 2)) });  // jmp dword ptr [esp - 8]
+      CatBytes(&pWriter, { IF_X86_64(0x48,) 0x89, 0x44, 0x24, uint8(-int8(RegisterSize)) });
+                                                                                 // mov dword ptr [esp - 4], eax
+      Pop(ReturnRegister);                                                       // pop eax
+      CatBytes(&pWriter, { 0xFF, 0x64, 0x24, uint8(-int8(RegisterSize * 2)) });  // jmp dword ptr [esp - 8]
     }
 
     if (settings.noShortReturnAddr == false) {
@@ -2451,8 +2410,19 @@ Status PatchContext::LowLevelHook(
 
   if (status_ == Status::Ok) {
     if (overwrittenSize >= sizeof(Jmp32)) {
-      status_ = CreateTrampoline(
-        pAddress, pAllocator_, insns, overwrittenSize, &pTrampoline, &trampolineSize, MaxLowLevelHookSize, offsetLut);
+      if ((info.noCustomReturnAddr == false) || (info.pDefaultReturnAddr == nullptr) ||
+          ((info.pDefaultReturnAddr >= static_cast<uintptr>(pAddress)) &&
+           (info.pDefaultReturnAddr <  PtrInc(pAddress, overwrittenSize))))
+      {
+        status_ = CreateTrampoline(
+          pAddress, pAllocator_, insns, overwrittenSize, &pTrampoline, &trampolineSize, MaxLowLevelHookSize, offsetLut);
+      }
+      else {
+        // There's no conditions in which the callback could return into the overwritten code, so skip copying it.
+        pTrampoline    = pAllocator_->Alloc(MaxLowLevelHookSize, CodeAlignment);
+        trampolineSize = MaxLowLevelHookSize;
+        status_ = (pTrampoline != nullptr) ? Status::Ok : Status::FailMemAlloc;
+      }
     }
     else {
       status_ = Status::FailInstallHook;
@@ -2470,12 +2440,12 @@ Status PatchContext::LowLevelHook(
         memset(PtrInc(pTrampoline, usedSize), 0xCC, (MaxLowLevelHookSize - usedSize));
       }
 
-      PATCHER_PACK
+      PATCHER_PACK_STRUCT
       struct {
         Jmp32 instruction;
         uint8 pad[MaxOverwriteSize - sizeof(Jmp32)];
       } jmp;
-      PATCHER_ENDPACK
+      PATCHER_END_PACK_STRUCT
 
       // Overwrite the original function with a jmp to the low-level hook trampoline.
       jmp.instruction = { 0xE9, PcRelPtr(pAddress, sizeof(Jmp32), pTrampoline) };
@@ -2508,7 +2478,6 @@ Status PatchContext::LowLevelHook(
 }
 
 // =====================================================================================================================
-// ** TODO x64
 Status PatchContext::EditExports(
   Span<ExportInfo>  exportInfos)
 {
@@ -2517,6 +2486,11 @@ Status PatchContext::EditExports(
   if ((status_ == Status::Ok) && (pExportDataDir == nullptr)) {
     // Not a valid PE image.
     status_ = Status::FailInvalidModule;
+  }
+
+  if ((status_ == Status::Ok) && IsX86_64) {
+    // ** TODO x64 Would need to generate far jump thunks for new/replacement functions injected
+    status_ = Status::FailUnsupported;
   }
 
   if (status_ == Status::Ok) {

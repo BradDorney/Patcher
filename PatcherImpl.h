@@ -595,7 +595,7 @@ auto PmfCast(
 #elif PATCHER_MS_ABI
   // MS ABI uses compiler-generated "vcall" thunks for calling through pointers-to-virtual-member-functions.
   // We have to parse the assembly of the thunk in order to get the offset into the vftable.
-  // ** TODO need to check what ICC does in MS mode
+  // ** TODO Need to check what ICC does in MS mode
   static constexpr struct {
     Impl::ConstArray<uint8, 20>  bytes;
     uint8  operandBase;  // x86:  +0x0 for 0, +0x40 for byte operand, +0x80 for dword operand

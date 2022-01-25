@@ -79,8 +79,8 @@ auto PmfCast(Pfn T::* pmf, const T* pThis = nullptr) -> typename Impl::FuncTrait
 struct LowLevelHookInfo {
   union {
     struct {
-      uint32 noBaseRelocReturn   :  1; ///< Do not auto-adjust callback return address for module base relocation.
       uint32 noCustomReturnAddr  :  1; ///< Callback return address not allowed (i.e. callback function returns void).
+      uint32 noBaseRelocReturn   :  1; ///< Do not auto-adjust callback return address for module base relocation.
       uint32 noShortReturnAddr   :  1; ///< Assume callback return address can't overlap overwritten area (x86: 5 bytes)
       uint32 noNullReturnDefault :  1; ///< Do not reinterpret callback return address of nullptr to default address.
       uint32 argsAsStructPtr     :  1; ///< Args are passed to the callback as a pointer to a struct that contains them.

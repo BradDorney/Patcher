@@ -311,20 +311,43 @@ PatchContext::~PatchContext() {
 // =====================================================================================================================
 void PatchContext::Init() {
   g_allocator.Acquire();
-
   const auto*const pDosHeader = static_cast<const IMAGE_DOS_HEADER*>(hModule_);
-  if ((pDosHeader != nullptr) && (pDosHeader->e_magic == IMAGE_DOS_SIGNATURE)) {
+
+  if ((pDosHeader != nullptr)                      &&
+      (pDosHeader->e_magic == IMAGE_DOS_SIGNATURE) &&
+      (static_cast<IMAGE_NT_HEADERS*>(PtrInc(hModule_, pDosHeader->e_lfanew))->Signature == IMAGE_NT_SIGNATURE))
+  {
     // Calculate the module's base relocation delta.
-    const auto& peHeader = *static_cast<const IMAGE_NT_HEADERS*>(PtrInc(hModule_, pDosHeader->e_lfanew));
-    if (peHeader.Signature == IMAGE_NT_SIGNATURE) {
-      if (peHeader.OptionalHeader.Magic == IMAGE_NT_OPTIONAL_HDR32_MAGIC) {
-        moduleRelocDelta_ = PtrDelta(hModule_, reinterpret_cast<const void*>(peHeader.OptionalHeader.ImageBase));
-        status_ = Status::Ok;
-      }
-      else if (peHeader.OptionalHeader.Magic == IMAGE_NT_OPTIONAL_HDR64_MAGIC) {
-        const auto& optionalHeader64 = reinterpret_cast<const IMAGE_OPTIONAL_HEADER64&>(peHeader.OptionalHeader);
-        moduleRelocDelta_ = PtrDelta(hModule_, reinterpret_cast<const void*>(optionalHeader64.ImageBase));
-        status_ = Status::Ok;
+    // The ImageBase field of the optional header gets overwritten, so we need to read the original file directly.
+    wchar_t path[MAX_PATH] = L"";  // ** TODO This won't work with large paths
+
+    if (GetModuleFileNameW(static_cast<HMODULE>(hModule_), &path[0], MAX_PATH) != 0) {
+      path[MAX_PATH - 1] = L'\0';
+      static constexpr uint32 ShareFlags = FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
+      HANDLE hFile =
+        CreateFileW(&path[0], GENERIC_READ, ShareFlags, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_READONLY, NULL);
+
+      if ((hFile != NULL) && (hFile != INVALID_HANDLE_VALUE)) {
+        uint8 buf[max(sizeof(IMAGE_NT_HEADERS), sizeof(IMAGE_NT_HEADERS64))];
+        DWORD numRead = 0;
+
+        if ((SetFilePointer(hFile, pDosHeader->e_lfanew, nullptr, FILE_BEGIN) != INVALID_SET_FILE_POINTER) &&
+            ReadFile(hFile, &buf[0], sizeof(buf), &numRead, nullptr)                                       &&
+            (numRead >= sizeof(buf)))
+        {
+          const auto& peHeader = *reinterpret_cast<IMAGE_NT_HEADERS*>(buf);
+          if (peHeader.OptionalHeader.Magic == IMAGE_NT_OPTIONAL_HDR32_MAGIC) {
+            moduleRelocDelta_ = PtrDelta(hModule_, reinterpret_cast<const void*>(peHeader.OptionalHeader.ImageBase));
+            status_ = Status::Ok;
+          }
+          else if (peHeader.OptionalHeader.Magic == IMAGE_NT_OPTIONAL_HDR64_MAGIC) {
+            const auto& optionalHeader64 = reinterpret_cast<const IMAGE_OPTIONAL_HEADER64&>(peHeader.OptionalHeader);
+            moduleRelocDelta_ = PtrDelta(hModule_, reinterpret_cast<const void*>(optionalHeader64.ImageBase));
+            status_ = Status::Ok;
+          }
+        }
+
+        CloseHandle(hFile);
       }
     }
   }

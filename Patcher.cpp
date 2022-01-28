@@ -141,29 +141,6 @@ PATCHER_END_PACK_STRUCT
 
 // Internal constants
 
-#if PATCHER_X86_32
-constexpr bool IsX86_32 = true;
-constexpr bool IsX86_64 = false;
-#elif PATCHER_X86_64
-constexpr bool IsX86_32 = false;
-constexpr bool IsX86_64 = true;
-#else
-constexpr bool IsX86_32 = false;
-constexpr bool IsX86_64 = false;
-#endif
-constexpr bool IsX86 = IsX86_32 || IsX86_64;
-
-#if PATCHER_MS_ABI
-constexpr bool IsMsAbi   = true;
-constexpr bool IsUnixAbi = false;
-#elif PATCHER_UNIX_ABI
-constexpr bool IsMsAbi   = false;
-constexpr bool IsUnixAbi = true;
-#else
-constexpr bool IsMsAbi   = false;
-constexpr bool IsUnixAbi = false;
-#endif
-
 // x86 fetches instructions on 16-byte boundaries.  Allocated code should be aligned on these boundaries in memory.
 constexpr uint32 CodeAlignment            = 16;
 // Max instruction size on modern x86 is 15 bytes.
@@ -178,9 +155,9 @@ constexpr uint32 MaxLowLevelHookSize  = Align(160, CodeAlignment);
 // Max size in bytes functor thunk code is expected to require.
 constexpr uint32 MaxFunctorThunkSize  = Align(IsX86_64 ? 48 : 32, CodeAlignment);
 // Number of extra args to call FunctionPtr::InvokeFunctor().
-constexpr uint32 InvokeFunctorNumArgs = (IsX86_32 && IsUnixAbi) ? 4 : 2;
+constexpr uint32 InvokeFunctorNumArgs = 2;
 // Max size in bytes far jump thunk code is expected to require.
-constexpr uint32 FarThunkSize         = Align(max(sizeof(JmpAbs), MaxFunctorThunkSize), CodeAlignment);
+constexpr uint32 FarThunkSize         = Align(uint32(max(sizeof(JmpAbs), MaxFunctorThunkSize)), CodeAlignment);
 
 constexpr uint32 OpenThreadFlags =
   (THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_SET_CONTEXT | THREAD_QUERY_INFORMATION | THREAD_SET_INFORMATION);
@@ -268,7 +245,7 @@ static Status TranslateCsError(cs_err capstoneError) {
   }
 }
 
-// Capstone disassembler helper class.
+// Capstone disassembler helper class.  Disassembly reveals useful pathways.
 template <cs_arch CsArchitecture, uint32 CsMode>
 class Disassembler {
 public:
@@ -512,7 +489,6 @@ void PatchContext::InitModule() {
     wchar_t path[MAX_PATH] = L"";  // ** TODO This won't work with large paths
 
     if (GetModuleFileNameW(static_cast<HMODULE>(hModule_), &path[0], MAX_PATH) != 0) {
-      // ** TODO Refactor using std::ifstream?
       path[MAX_PATH - 1] = L'\0';
       static constexpr uint32 ShareFlags = FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
       HANDLE hFile =
@@ -1121,7 +1097,7 @@ Status PatchContext::ReplaceReferencesToGlobal(
 
         if (pRelocArray[i].type == IMAGE_REL_BASED_HIGHLOW) {
           ptrSize  = 4;
-          pAddress = reinterpret_cast<const void*>(uintptr(*static_cast<uint32*>(
+          pAddress = reinterpret_cast<const void*>(static_cast<uintptr>(*static_cast<uint32*>(
             ((pHistoryData != nullptr) && (pHistoryData->Size() == ptrSize)) ? pHistoryData->Data() : ppAddress)));
         }
         else if (pRelocArray[i].type == IMAGE_REL_BASED_DIR64) {
@@ -1171,46 +1147,63 @@ static bool CreateFunctorThunk(
   void*              pMemory,
   const FunctionPtr& pfnNewFunction)
 {
-  static constexpr uint8 PopSize = RegisterSize * (InvokeFunctorNumArgs - 1 + ((IsMsAbi && IsX86_64) ? 4 : 0));
+  static constexpr uint8 PopSize = RegisterSize * (InvokeFunctorNumArgs - 1);
+#if PATCHER_X86_64  // ** TODO
+# if PATCHER_MS_ABI
+  static constexpr Register ArgRegisters[] = { Register::Rcx, Register::Rdx, Register::R8, Register::R9 };
+# elif PATCHER_UNIX_ABI
+  static constexpr Register ArgRegisters[] =
+    { Register::Rdi, Register::Rsi, Register::Rdx, Register::Rcx, Register::R8, Register::R9 };
+# endif
+#endif
 
   Writer writer(pMemory);
   bool result = (pMemory != nullptr);
 
-  const uintptr     functorAddr = reinterpret_cast<uintptr>(pfnNewFunction.Functor().get());
-  const RtFuncSig&  sig         = pfnNewFunction.Signature();
+  const uintptr            functorAddr = reinterpret_cast<uintptr>(pfnNewFunction.Functor().get());
+  const RtFuncSig&         sig         = pfnNewFunction.Signature();
+  const InvokeFunctorTable invokers    = pfnNewFunction.InvokePfnTable();
 
-  size_t numRegisterSizeParams = 0;  // Excluding pFunctor and pReturnAddress
+  // ** TODO This should take into account the positions of the parameters, e.g. if (sizeof(param0) > RegisterSize) then
+  //         params 1 and 2 would be the ones in registers
+  size_t numRegisterSizeParams = 0;  // Number of parameters that can fit in a register (for the original function)
   for (uint32 i = 0; i < sig.numParams; (sig.pParamSizes[i++] <= RegisterSize) ? ++numRegisterSizeParams : 0);
+
+  auto GetNumPadders = [&numRegisterSizeParams] {
+    const size_t numExtraArgs = min(numRegisterSizeParams, InvokeFunctorNumSkipped);
+    return InvokeFunctorMaxPad - ((InvokeFunctorNumArgs + numExtraArgs - 1) & InvokeFunctorMaxPad);
+  };
 
   // pfnInvokeFunctor is always cdecl;  Signature().convention refers to the original function the invoker wraps.
   // We need to translate from the input calling convention to cdecl by pushing any register args used by the input
   // convention to the stack, then push the functor obj address and do the call, then do any expected stack cleanup.
-  auto WriteCall = [&writer, functorAddr, pfnInvokeFunctor = pfnNewFunction.PfnInvokeInternal()] {
+  auto WriteCall = [&writer, &invokers, functorAddr](size_t numPadders = 0, bool calleeCleanup = false) {
+    const void*const pfnInvokeFunctor =
+      (calleeCleanup ? invokers.pfnInvokeWithPadAndCleanup : invokers.pfnInvokeWithPad)[numPadders];
+
     if (IsX86_32) {
-      writer.Op(Op1_4{ 0x68, uint32(functorAddr) })                         // push   pFunctor
-        .BytesIf(IsUnixAbi, { 0x83, 0xEC, uint8(RegisterSize * 2) });       // sub    esp, 8 (align ESP to 16 bytes)
+      writer.Op(Op1_4{ 0x68, uint32(functorAddr) })                                    // push   pFunctor
+        .BytesIf(numPadders, { 0x83, 0xEC, uint8(RegisterSize * numPadders) });        // sub    esp, i8  (Align ESP)
     }
     else if (IsX86_64) {
-      // MS x64 ABI expects 32 bytes of shadow space be allocated on the stack just before the call.  We need to pop
-      // the one that already exists before we can push our extra args, and then we must re-allocate it afterwards.
-      writer.BytesIf(IsMsAbi, { 0x59,                                       // pop    rcx  ** TODO x64 Clobber RCX?
-                                0x48, 0x83, 0xC4, uint8(RegisterSize * 4),  // add    rsp, 32
-                                0x51 })                                     // push   rcx
-        .Op(Op2_8{ { 0x48, 0xB9 }, functorAddr })                           // movabs rcx, pFunctor
-        .Byte(0x51)                                                         // push   rcx
-        .BytesIf(IsMsAbi, { 0x48, 0x83, 0xEC, uint8(RegisterSize * 4) });   // sub    rsp, 32
+      numPadders += (IsMsAbi ? 4 : 0);  // MS x64 ABI expects 32 bytes of shadow space be allocated on the stack.
+      writer
+        .Op(Op2_8{ { 0x49, 0xBB }, functorAddr })                                      // movabs r11, pFunctor
+        .Bytes({ 0x41, 0x53 })                                                         // push   r11
+        .BytesIf(numPadders, { 0x48, 0x83, 0xEC, uint8(RegisterSize * numPadders) });  // sub    rsp, i8  (Align RSP)
     }
 
+    // ** TODO If calleeCleanup=true then we should push the old return address and jmp instead of call
     const ptrdiff_t callDelta = writer.GetPcRelPtr(sizeof(Call32), pfnInvokeFunctor);
-    IsFarDisplacement(callDelta) ? writer.Op(Op2_8{ { 0x48, 0xB9 }, uintptr(pfnInvokeFunctor) })  // movabs rcx, pfn
-                                         .Bytes({ 0xFF, 0xD1 })                                   // call   rcx
+    IsFarDisplacement(callDelta) ? writer.Op(Op2_8{ { 0x49, 0xBB }, uintptr(pfnInvokeFunctor) })  // movabs r11, pfn
+                                         .Bytes({ 0x41, 0xFF, 0xD3 })                             // call   r11
                                  : writer.Op(Call32{ 0xE8, static_cast<int32>(callDelta) });      // call   pfn
   };
 
-  auto WriteCallAndCalleeCleanup = [&result, &writer, &sig, &WriteCall] {
+  auto WriteCallAndCalleeCleanup = [&result, &writer, &sig, &WriteCall] {  // ** TODO Remove this?
     const size_t stackDelta = sig.totalParamSize + RegisterSize + PopSize;
     if (sig.returnSize > (RegisterSize * 2)) {
-      result = false;  // ** TODO need to handle oversized return types
+      result = false;  // ** TODO Need to handle oversized return types
     }
     else {
       WriteCall();
@@ -1222,21 +1215,22 @@ static bool CreateFunctorThunk(
   };
 
   switch (sig.convention) {
-  case Call::Cdecl:
-    WriteCall();
-    // ** TODO x64 + MS ABI  Does 32-byte shadow space get popped correctly?
-    writer.Bytes({ 0x83, 0xC4, PopSize,  // add esp, i8
-                   0xC3 });              // retn
-    break;
-
 #if PATCHER_X86_32
+  case Call::Cdecl: {
+    const size_t numAlignmentPadders = GetNumPadders();
+    const uint8  totalPopSize        = uint8(PopSize + (numAlignmentPadders * RegisterSize));
+    WriteCall(numAlignmentPadders);
+    writer.Bytes({ 0x83, 0xC4, totalPopSize,  // add esp, i8
+                   0xC3 });                   // retn
+    break;
+  }
+
   case Call::Stdcall:
     WriteCallAndCalleeCleanup();
     break;
 
   case Call::Thiscall:
     // MS thiscall puts arg 1 in ECX.  If the arg exists, put it on the stack.
-    // ** TODO Unix ABI How to handle alignment padding?
     writer.Byte(0x5A)                              //  pop  edx
       .ByteIf((numRegisterSizeParams >= 1), 0x51)  // (push ecx)
       .Byte(0x52);                                 //  push edx
@@ -1245,13 +1239,52 @@ static bool CreateFunctorThunk(
 
   case Call::Fastcall:
     // MS fastcall puts the first 2 register-sized args in ECX and EDX.  If the args exist, put them on the stack.
-    // ** TODO Unix ABI How to handle alignment padding?
-    ((numRegisterSizeParams >= 2) ? writer.Bytes({ 0x87, 0x14, 0x24 })  // (xchg edx, [esp]) or
+    ((numRegisterSizeParams >= 2) ? writer.Bytes({ 0x87, 0x14, 0x24 })  // (xchg edx, [esp]) or  ** TODO This is slow
                                   : writer.Byte(0x5A))                  // (pop  edx)
       .ByteIf((numRegisterSizeParams >= 1), 0x51)                       // (push ecx)
       .Byte(0x52);                                                      //  push edx
     WriteCallAndCalleeCleanup();
     break;
+
+#elif PATCHER_X86_64
+  case Call::Cdecl: {
+    // ** TODO x64 Clean this up
+    if (IsMsAbi) {
+      // We need to pop the shadow space that already exists and the old return address before we can push our args.
+      writer.Bytes({ 0x41, 0x5B,                                    //  pop  r11      (Pop old return address)
+                     0x48, 0x83, 0xC4, uint8(RegisterSize * 4) })   //  add  rsp, 32  (Pop old shadow space)
+            .ByteIf((numRegisterSizeParams  >= 1),   0x51)          // (push rcx)     (Push args passed via registers)
+            .ByteIf((numRegisterSizeParams  >= 2),   0x52)          // (push rdx)
+            .BytesIf((numRegisterSizeParams >= 3), { 0x41, 0x50} )  // (push r8)
+            .BytesIf((numRegisterSizeParams >= 4), { 0x41, 0x51 })  // (push r9)
+            .Bytes({ 0x41, 0x53 });                                 //  push r11      (Push old return address)
+    }
+    else if (IsUnixAbi) {
+      writer.Bytes({ 0x41, 0x5B })                                  //  pop  r11      (Pop old return address)
+            .ByteIf((numRegisterSizeParams  >= 1),   0x57)          // (push rsi)     (Push args passed via registers)
+            .ByteIf((numRegisterSizeParams  >= 2),   0x56)          // (push rdi)
+            .ByteIf((numRegisterSizeParams  >= 3),   0x52)          // (push rdx)
+            .ByteIf((numRegisterSizeParams  >= 4),   0x51)          // (push rcx)
+            .BytesIf((numRegisterSizeParams >= 5), { 0x41, 0x50 })  // (push r8)
+            .BytesIf((numRegisterSizeParams >= 6), { 0x41, 0x51 })  // (push r9)
+            .Bytes({ 0x41, 0x53 });                                 //  push r11      (Push old return address)
+    }
+
+    const size_t numAlignmentPadders     = GetNumPadders();
+    const uint8  popFunctorPtrAndPadSize = uint8(PopSize + (numAlignmentPadders * RegisterSize));
+    const uint8  popRegisterArgSize      = uint8(min(numRegisterSizeParams, InvokeFunctorNumSkipped) * RegisterSize);
+
+    WriteCall(numAlignmentPadders);
+    writer.Byte(0xCC);
+    writer.Bytes({ 0x48, 0x83, 0xC4, popFunctorPtrAndPadSize });                       // add rsp, i8
+    (popRegisterArgSize != 0) ?
+      writer.Bytes({ 0x48, 0x8B, 0x4C, 0x24, uint8(IsMsAbi ? (RegisterSize * 4) : 0),  // mov rcx, qword ptr [rsp + i8]
+                     //0x59,  // ** TODO  pop rcx  (Set RCX to old return address)
+                     0x48, 0x83, 0xC4, uint8(popRegisterArgSize + RegisterSize /* Unless pop rcx! */),  // add rsp, i8
+                     0xFF, 0xE1 }) :                                                   // jmp rcx
+      writer.Byte(0xC3);                                                               // retn
+    break;
+  }
 #endif
 
   default:
@@ -1278,7 +1311,7 @@ void FunctionPtr::InitFunctorThunk(
   void*  pFunctorObj,
   void (*pfnDeleteFunctor)(void*))
 {
-  auto*const pAllocator = Allocator::GetInstance(pfnInvoke_);
+  auto*const pAllocator = Allocator::GetInstance(InvokePfnTable().pfnInvokeWithPad[0]);
   pAllocator->Acquire();
   void* pMemory = (pFunctorObj != nullptr) ? pAllocator->Alloc(MaxFunctorThunkSize, CodeAlignment) : nullptr;
 
@@ -1322,7 +1355,7 @@ static Status FindHookPatchRegion(
   if (status == Status::Ok) {
     // Calculate how many instructions will actually be overwritten by the Jmp32 and their total size.
     bool foundEnd = false;
-    for (uint32 i = 0, count = pInsns->size(); ((i < count) && (overwrittenSize < maxPatchSize)); ++i) {
+    for (size_t i = 0, count = pInsns->size(); ((i < count) && (overwrittenSize < maxPatchSize)); ++i) {
       const auto& insn = (*pInsns)[i];
 
       // Assume int 3 or nop instructions are padders.
@@ -1421,7 +1454,7 @@ static void CopyInstructions(
   
   auto WritePcRel32Operand = [pWriter, &isInternal, &target, &offset, &internalPcRel32Relocs] {
     if (isInternal) {
-      internalPcRel32Relocs.emplace_back(pWriter->GetNext<int32*>(), offset);
+      internalPcRel32Relocs.emplace_back(pWriter->GetNext<int32*>(), int32(offset));
     }
     pWriter->Value(isInternal ? 0 : pWriter->GetPcRelPtr<int32>(sizeof(int32), reinterpret_cast<void*>(target)));
   };
@@ -1479,7 +1512,7 @@ static void CopyInstructions(
 
       if (isNear) {
         if (isInternal) {
-          internalPcRel32Relocs.emplace_back(&pWriter->GetNext<Loop32*>()->ifTrue.operand, offset);
+          internalPcRel32Relocs.emplace_back(&pWriter->GetNext<Loop32*>()->ifTrue.operand, int32(offset));
         }
         pWriter->Value(Loop32(bytes[0], pWriter->GetPcRelPtr<int32>(sizeof(Loop32), reinterpret_cast<void*>(target))));
       }
@@ -1519,8 +1552,8 @@ static Status CreateTrampoline(
   size_t allocSize   = 0;
 
   // Allocate memory to store the trampoline.
-  allocSize     = Align((prologSize + (MaxCopiedInstructionSize * insns.size()) + sizeof(Jmp32) + CodeAlignment - 1),
-                      CodeAlignment);
+  allocSize     = Align((prologSize + (MaxCopiedInstructionSize * insns.size()) + sizeof(JmpAbs) + CodeAlignment - 1),
+                        CodeAlignment);
   pTrampoline   = pAllocator->Alloc(allocSize, CodeAlignment);
   Status status = (pTrampoline != nullptr) ? Status::Ok : Status::FailMemAlloc;
 
@@ -1679,7 +1712,7 @@ Status PatchContext::Hook(
 
     if ((status_ == Status::Ok) && (writer.GetPosition() < overwrittenSize)) {
       // Write no-ops if an instruction is partially overwritten.
-      writer.Memset(0xCC, overwrittenSize - writer.GetPosition());
+      writer.Memset(0x90, overwrittenSize - writer.GetPosition());
     }
 
     if ((Memcpy(pPatchAddr, &buffer[0], overwrittenSize) == Status::Ok) && (pPatchAddr != pAddress)) {
@@ -1772,7 +1805,7 @@ Status PatchContext::HookCall(
           pfnOriginal = *reinterpret_cast<void**&>(pInsn[2]);
         }
         else if (IsX86_64 && (insnSize == 7) && (pInsn[1] == 0x14) && (pInsn[2] == 0x25)) {
-          pfnOriginal = reinterpret_cast<void*>(uintptr(*reinterpret_cast<uint32*&>(pInsn[3])));
+          pfnOriginal = reinterpret_cast<void*>(static_cast<uintptr>(*reinterpret_cast<uint32*&>(pInsn[3])));
         }
 
         if (insnSize >= sizeof(Call32)) {
@@ -1836,19 +1869,20 @@ static size_t CreateLowLevelHookTrampoline(
   static constexpr Insn     PushInsns[] = { {0x50}, {0x51}, {0x52}, {0x53}, {0x56}, {0x57}, {0x55}, {0x54}, {0x9C} };
   static constexpr Insn     PopInsns[]  = { {0x58}, {0x59}, {0x5A}, {0x5B}, {0x5E}, {0x5F}, {0x5D}, {0x5C}, {0x9D} };
   static constexpr Register VolatileRegisters[] = { Register::Ecx, Register::Edx, Register::Eax };
+  static constexpr Register ArgRegisters[1]     = { Register::Count };
   static constexpr Register ReturnRegister      = Register::Eax;
   static constexpr Register StackRegister       = Register::Esp;
   static constexpr Register FlagsRegister       = Register::Eflags;
 #elif PATCHER_X86_64
   static constexpr Insn     PushInsns[] = {
-  // Rax:    Rcx:    Rdx:    Rbx:    Rsi:    Rdi:    Rbp:    R8:           R9:           R10:          R11:
-    {0x50}, {0x51}, {0x52}, {0x53}, {0x56}, {0x57}, {0x55}, {0x41, 0x50}, {0x41, 0x51}, {0x41, 0x52}, {0x41, 0x53},
-  // R12:          R13:          R14:          R15:          Rsp:    Rflags:
-    {0x41, 0x54}, {0x41, 0x55}, {0x41, 0x56}, {0x41, 0x57}, {0x54}, {0x9C}
+  // Rax:    Rcx:    Rdx:    Rbx:    Rsi:    Rdi:    R8:           R9:           R10:          R11:
+    {0x50}, {0x51}, {0x52}, {0x53}, {0x56}, {0x57}, {0x41, 0x50}, {0x41, 0x51}, {0x41, 0x52}, {0x41, 0x53},
+  // R12:          R13:          R14:          R15:          Rbp:    Rsp:    Rflags:
+    {0x41, 0x54}, {0x41, 0x55}, {0x41, 0x56}, {0x41, 0x57}, {0x55}, {0x54}, {0x9C}
   };
   static constexpr Insn     PopInsns[]  = {
-    {0x58}, {0x59}, {0x5A}, {0x5B}, {0x5E}, {0x5F}, {0x5D}, {0x41, 0x58}, {0x41, 0x59}, {0x41, 0x5A}, {0x41, 0x5B},
-    {0x41, 0x5C}, {0x41, 0x5D}, {0x41, 0x5E}, {0x41, 0x5F}, {0x5C}, {0x9D}
+    {0x58}, {0x59}, {0x5A}, {0x5B}, {0x5E}, {0x5F}, {0x41, 0x58}, {0x41, 0x59}, {0x41, 0x5A}, {0x41, 0x5B},
+    {0x41, 0x5C}, {0x41, 0x5D}, {0x41, 0x5E}, {0x41, 0x5F}, {0x5D}, {0x5C}, {0x9D}
   };
   static constexpr Register VolatileRegisters[] = {
 # if PATCHER_UNIX_ABI
@@ -1856,6 +1890,12 @@ static size_t CreateLowLevelHookTrampoline(
 # endif
     Register::R8,  Register::R9,  Register::R10, Register::R11, Register::Rcx, Register::Rdx, Register::Rax
   };
+# if PATCHER_MS_ABI
+  static constexpr Register ArgRegisters[]      = { Register::Rcx, Register::Rdx, Register::R8, Register::R9 };
+# elif PATCHER_UNIX_ABI
+  static constexpr Register ArgRegisters[]      =
+    { Register::Rdi, Register::Rsi, Register::Rdx, Register::Rcx, Register::R8, Register::R9 };
+# endif
   static constexpr Register ReturnRegister      = Register::Rax;
   static constexpr Register StackRegister       = Register::Rsp;
   static constexpr Register FlagsRegister       = Register::Rflags;
@@ -1891,10 +1931,10 @@ static size_t CreateLowLevelHookTrampoline(
 
   auto AddRegisterToStack = [&stackRegisters, &returnRegIndex, &stackRegIndex, &stackRegOffset](RegisterInfo reg) {
     if ((reg.type == ReturnRegister) && ((returnRegIndex == UINT_MAX) || reg.byReference)) {
-      returnRegIndex = stackRegisters.size();
+      returnRegIndex = uint32(stackRegisters.size());
     }
     else if ((reg.type == StackRegister) && ((stackRegIndex == UINT_MAX) || ((reg.offset == 0) && reg.byReference))) {
-      stackRegIndex  = stackRegisters.size();
+      stackRegIndex  = uint32(stackRegisters.size());
       stackRegOffset = reg.offset;
     }
     stackRegisters.push_back(reg);
@@ -1937,7 +1977,7 @@ static size_t CreateLowLevelHookTrampoline(
     }
 
     // Push the function args the user-provided callback will actually see now.
-    firstArgIndex = stackRegisters.size();
+    firstArgIndex = uint32(stackRegisters.size());
     for (size_t i = registers.Length(); i > 0; --i) {
       const size_t index = i - 1;
       AddRegisterToStack(registers[index].byReference ? RegisterInfo{ ByReference } : registers[index]);
@@ -1961,18 +2001,8 @@ static size_t CreateLowLevelHookTrampoline(
   const bool isFunctor     = (pfnHookCb.Functor() != nullptr);
   const bool saveFlags     = (settings.noRestoreFlagsReg == false);
 
-#if PATCHER_X86_64
   // The x64 calling convention passes the first 4 arguments via registers in MS ABI, or the first 6 in Unix ABI.
-# if PATCHER_MS_ABI
-  static constexpr Register ArgRegisters[] = { Register::Rcx, Register::Rdx, Register::R8, Register::R9 };
-# elif PATCHER_UNIX_ABI
-  static constexpr Register ArgRegisters[] =
-    { Register::Rdi, Register::Rsi, Register::Rdx, Register::Rcx, Register::R8, Register::R9 };
-# endif
-  const uint32 numViaRegisters = isFunctor ? 0 : min(registers.Length(), ArrayLen(ArgRegisters));
-#else
-  static constexpr uint32 numPassedViaRegisters = 0;
-#endif
+  const size_t numPassedViaRegisters = (IsX86_32 || isFunctor) ? 0 : min(registers.Length(), ArrayLen(ArgRegisters));
 
   if (settings.debugBreakpoint) {
     writer.Byte(0xCC);  // int 3
@@ -2022,7 +2052,7 @@ static size_t CreateLowLevelHookTrampoline(
     else {
       // Offset to origin ESP, i.e. the first thing pushed to the stack in aligned-stack mode.  Since we can't
       // statically calculate the stack alignment offset in that mode, we need to reference the copy of the old value.
-      const uint32 originOffset = (RegisterSize * (index - 1));
+      const uint32 originOffset = uint32(RegisterSize * (index - 1));
       const bool   offsetIs8Bit = int8(originOffset) == int32(originOffset);
       const bool   addendIs8Bit = int8(addend)       == int32(addend);
 
@@ -2076,10 +2106,10 @@ static size_t CreateLowLevelHookTrampoline(
                    : Push(StackRegister);                                          // push esp
 
         if (addend != 0) {
-          if (saveFlags) { Push(FlagsRegister); }                                  // pushf  ** TODO This is slow
-          writer.Op<IsX86_64 ? 5 : 4, uint32>(                                     // add dword ptr [esp + 4], i32
-            { { IF_X86_64(0x48,) 0x81, 0x44, 0x24, uint8(RegisterSize) }, addend });
-          if (saveFlags) { Pop(FlagsRegister); }                                   // popf
+          writer.ByteIf(saveFlags, 0x9C)                                           // pushf  ** TODO This is slow
+                .Op<IsX86_64 ? 5 : 4, uint32>(                                     // add dword ptr [esp + 4], i32
+                  { { IF_X86_64(0x48,) 0x81, 0x44, 0x24, uint8(RegisterSize) }, addend })
+                .ByteIf(saveFlags, 0x9D);                                          // popf
         }
       }
     }
@@ -2093,7 +2123,7 @@ static size_t CreateLowLevelHookTrampoline(
     const Register reg   = it->type;
     const size_t   index = (it - stackRegisters.begin());
     if (reg == StackRegister) {
-      settings.noAlignStackPtr ? PushAdjustedStackReg(index, it->offset + (RegisterSize * index))
+      settings.noAlignStackPtr ? PushAdjustedStackReg(index, it->offset + uint32(RegisterSize * index))
                                : PushAdjustedStackReg(index, it->offset, true);
     }
     else if (reg != ByReference) {
@@ -2102,7 +2132,7 @@ static size_t CreateLowLevelHookTrampoline(
     else {
       // Register by reference.
       assert(index >= firstArgIndex);
-      PushAdjustedStackReg(index, RegisterSize * ((index - firstArgIndex) + (numReferencesPushed++)));
+      PushAdjustedStackReg(index, uint32(RegisterSize * ((index - firstArgIndex) + (numReferencesPushed++))));
     }
   }
 
@@ -2123,15 +2153,10 @@ static size_t CreateLowLevelHookTrampoline(
     }
   };
 
-#if PATCHER_X86_64
   // ** TODO x64 Moving from register to register would be more optimal, but then we'd have to deal with potential
   //         dependencies (if any arg registers e.g. RCX are requested), and reorder the movs or fall back to
   //         xchg/push+pop as needed.
-  for (uint32 i = 0; i < numPassedViaRegisters; ++i) {
-    Pop(ArgRegisters[i]);
-    stackRegisters.pop_back();
-  }
-#endif
+  for (size_t i = 0; i < numPassedViaRegisters; Pop(ArgRegisters[i++]), stackRegisters.pop_back());
 
   uint8*     pSkipCase1Offset = nullptr;
   void*const pTrampolineToOld = PtrInc(pLowLevelHook, MaxLowLevelHookSize);
@@ -2156,7 +2181,7 @@ static size_t CreateLowLevelHookTrampoline(
   writer.BytesIf((IsX86_64 && IsMsAbi), { 0x48, 0x83, 0xEC, uint8(RegisterSize * 4) });        // sub    rsp, 32
 
   {
-    const void* pHookFunction = (pfnHookCb.Functor() != nullptr) ? pfnHookCb.PfnInvokeInternal() : pfnHookCb.Pfn();
+    const void* pHookFunction = isFunctor ? pfnHookCb.InvokePfnTable().pfnInvokeWithPad[0] : pfnHookCb.Pfn();
     const auto  callDelta     = writer.GetPcRelPtr<ptrdiff_t>(sizeof(Call32), pHookFunction);
     IsFarDisplacement(callDelta) ? writer.Op(Op2_8{ { 0x48, 0xB8 }, uintptr(pHookFunction) })  // movabs rax, pfn
                                          .Bytes({ 0xFF, 0xD0 })                                // call   rax
@@ -2467,8 +2492,8 @@ Status PatchContext::EditExports(
 
   if (status_ == Status::Ok) {
     std::vector<void*>            exports;
-    std::unordered_set<uint32>    forwardExportOrdinals;
-    std::map<std::string, uint32> namesToOrdinals;  // Name table must be sorted, so use map rather than unordered_map.
+    std::unordered_set<uint16>    forwardExportOrdinals;
+    std::map<std::string, uint16> namesToOrdinals;  // Name table must be sorted, so use map rather than unordered_map.
 
     IMAGE_EXPORT_DIRECTORY* pOldExportTable = nullptr;
     char moduleName[MAX_PATH] = "";  // ** TODO This won't work with large paths
@@ -2499,14 +2524,14 @@ Status PatchContext::EditExports(
       for (uint32 i = 0; i < pOldExportTable->NumberOfFunctions; ++i) {
         void*const pExportAddress = PtrInc(hModule_, pFunctions[i]);
         if ((pExportAddress >= pOldExportTable) && (pExportAddress < PtrInc(pOldExportTable, pExportDataDir->Size))) {
-          forwardExportOrdinals.insert(exports.size());
+          forwardExportOrdinals.insert(static_cast<uint16>(exports.size()));
         }
         exports.emplace_back(pExportAddress);
       }
     }
 
     // Overlay our exports we want to inject.
-    for (uint32 i = 0, nextIndex = exports.size(); ((status_ == Status::Ok) && (i < exportInfos.Length())); ++i) {
+    for (uint16 i = 0, nextIndex = uint16(exports.size()); (status_ == Status::Ok) && (i < exportInfos.Length()); ++i) {
       while ((exports.size() > nextIndex) && (exports[nextIndex] != nullptr)) {
         // Fix up next export ordinal, in the case of having added an export by ordinal.
         ++nextIndex;
@@ -2554,22 +2579,22 @@ Status PatchContext::EditExports(
     }
 
     // Calculate the amount of space we need to allocate.
-    static constexpr uint32 HeaderSize = sizeof(IMAGE_EXPORT_DIRECTORY);
-    const uint32 addressTableSize      = sizeof(void*)  * exports.size();
-    const uint32 namePtrTableSize      = sizeof(void*)  * namesToOrdinals.size();
-    const uint32 nameOrdinalTableSize  = sizeof(uint16) * namesToOrdinals.size();
+    static constexpr size_t HeaderSize = sizeof(IMAGE_EXPORT_DIRECTORY);
+    const size_t addressTableSize      = sizeof(void*)  * exports.size();
+    const size_t namePtrTableSize      = sizeof(void*)  * namesToOrdinals.size();
+    const size_t nameOrdinalTableSize  = sizeof(uint16) * namesToOrdinals.size();
 
-    uint32 totalNameStrlen = (strlen(moduleName) + 1);
+    size_t totalNameStrlen = (strlen(moduleName) + 1);
     for (const auto& name : namesToOrdinals) {
       totalNameStrlen += (name.first.length() + 1);
     }
 
-    uint32 totalForwardStrlen = 0;
+    size_t totalForwardStrlen = 0;
     for (const auto& ordinal : forwardExportOrdinals) {
       totalForwardStrlen += (strlen(static_cast<const char*>(exports[ordinal])) + 1);
     }
 
-    const uint32 allocSize =
+    const size_t allocSize =
       (HeaderSize + addressTableSize + namePtrTableSize + nameOrdinalTableSize + totalNameStrlen + totalForwardStrlen);
     void*const pAllocation = pAllocator_->Alloc(allocSize);
 
@@ -2588,8 +2613,8 @@ Status PatchContext::EditExports(
       pHeader->MinorVersion          = (pOldExportTable != nullptr) ? pOldExportTable->MinorVersion    : 0;
       pHeader->Name                  = static_cast<DWORD>(PtrDelta(pStringBuffer,     hModule_));  // By RVA
       pHeader->Base                  = (pOldExportTable != nullptr) ? pOldExportTable->Base            : 1;
-      pHeader->NumberOfFunctions     = exports.size();
-      pHeader->NumberOfNames         = namesToOrdinals.size();
+      pHeader->NumberOfFunctions     = static_cast<DWORD>(exports.size());
+      pHeader->NumberOfNames         = static_cast<DWORD>(namesToOrdinals.size());
       pHeader->AddressOfFunctions    = static_cast<DWORD>(PtrDelta(pAddressTable,     hModule_));  // By RVA
       pHeader->AddressOfNames        = static_cast<DWORD>(PtrDelta(pNameTable,        hModule_));  // By RVA
       pHeader->AddressOfNameOrdinals = static_cast<DWORD>(PtrDelta(pNameOrdinalTable, hModule_));  // By RVA
@@ -2618,7 +2643,7 @@ Status PatchContext::EditExports(
       Revert(pExportDataDir);
 
       // Modify the module's header to point to our new export table.
-      Write(pExportDataDir, IMAGE_DATA_DIRECTORY{ static_cast<DWORD>(PtrDelta(pAllocation, hModule_)), allocSize });
+      Write(pExportDataDir, IMAGE_DATA_DIRECTORY{ DWORD(PtrDelta(pAllocation, hModule_)), DWORD(allocSize) });
 
       if (status_ == Status::Ok) {
         // Add export table allocation info to the history tracker entry for this patch so we can clean it up later.

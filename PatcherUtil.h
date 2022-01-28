@@ -132,8 +132,6 @@ template <typename T>                     using Rdx    = Impl::RegisterArg<Regis
 template <typename T>                     using Rbx    = Impl::RegisterArg<Register::Rbx,    T>;
 template <typename T>                     using Rsi    = Impl::RegisterArg<Register::Rsi,    T>;
 template <typename T>                     using Rdi    = Impl::RegisterArg<Register::Rdi,    T>;
-template <typename T>                     using Rbp    = Impl::RegisterArg<Register::Rbp,    T>;
-template <typename T, uint32 Offset = 0>  using Rsp    = Impl::RegisterArg<Register::Rsp,    T, Offset>;
 template <typename T>                     using R8     = Impl::RegisterArg<Register::R8,     T>;
 template <typename T>                     using R9     = Impl::RegisterArg<Register::R9,     T>;
 template <typename T>                     using R10    = Impl::RegisterArg<Register::R10,    T>;
@@ -142,6 +140,8 @@ template <typename T>                     using R12    = Impl::RegisterArg<Regis
 template <typename T>                     using R13    = Impl::RegisterArg<Register::R13,    T>;
 template <typename T>                     using R14    = Impl::RegisterArg<Register::R14,    T>;
 template <typename T>                     using R15    = Impl::RegisterArg<Register::R15,    T>;
+template <typename T>                     using Rbp    = Impl::RegisterArg<Register::Rbp,    T>;
+template <typename T, uint32 Offset = 0>  using Rsp    = Impl::RegisterArg<Register::Rsp,    T, Offset>;
 template <typename T>                     using Rflags = Impl::RegisterArg<Register::Rflags, T>;
 ///@}
 #endif

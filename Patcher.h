@@ -268,7 +268,7 @@ public:
 
   PatcherStatus ReleaseModule();  ///< If this PatchContext has loaded a module, releases its active handle to it.
 
-  uint32 NumPatches() const { return history_.size(); }  ///< Returns the number of active patches.
+  size_t NumPatches() const { return history_.size(); }  ///< Returns the number of active patches.
 
   /// Returns true if the given address had previously been touched or patched.
   bool HasPatched(TargetPtr pAddress) const { return historyAt_.count(MaybeFixTargetPtr(pAddress)) != 0; }

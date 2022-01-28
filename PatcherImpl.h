@@ -149,6 +149,31 @@
 
 namespace Patcher {
 
+// Constants
+
+#if PATCHER_X86_32
+constexpr bool IsX86_32 = true;
+constexpr bool IsX86_64 = false;
+#elif PATCHER_X86_64
+constexpr bool IsX86_32 = false;
+constexpr bool IsX86_64 = true;
+#else
+constexpr bool IsX86_32 = false;
+constexpr bool IsX86_64 = false;
+#endif
+constexpr bool IsX86 = IsX86_32 || IsX86_64;
+
+#if PATCHER_MS_ABI
+constexpr bool IsMsAbi   = true;
+constexpr bool IsUnixAbi = false;
+#elif PATCHER_UNIX_ABI
+constexpr bool IsMsAbi   = false;
+constexpr bool IsUnixAbi = true;
+#else
+constexpr bool IsMsAbi   = false;
+constexpr bool IsUnixAbi = false;
+#endif
+
 // Typedefs
 
 using int8    = int8_t;
@@ -248,6 +273,33 @@ template <size_t N, typename T>  struct TupleElementImpl<N, T, EnableIf<(N < std
 template <size_t N, typename T>  using TupleElement = typename TupleElementImpl<N, T>::Type;
 ///@}
 
+///@{ @internal  Helper metafunctions to generate parameter packs of sequences.
+template <typename... Ts>             struct TypeSequence{};
+template <typename T, T... Elements>  struct ValueSequence{};
+template <size_t... Indices>          using  IndexSequence = ValueSequence<size_t, Indices...>;
+
+template <typename SeqA, typename SeqB>      struct ConcatSeqImpl;
+template <typename T, T... SeqA, T... SeqB>  struct ConcatSeqImpl<ValueSequence<T, SeqA...>, ValueSequence<T, SeqB...>>
+  { using Type = ValueSequence<T, SeqA..., SeqB...>; };
+
+template <typename T, T Begin, size_t Length>  struct MakeSeqRangeImpl;
+template <typename T, T Begin, size_t Length>  using MakeSeqRange = typename MakeSeqRangeImpl<T, Begin, Length>::Type;
+
+template <typename T, T Begin>        struct MakeSeqRangeImpl<T, Begin, 0> { using Type = ValueSequence<T>;        };
+template <typename T, T Begin>        struct MakeSeqRangeImpl<T, Begin, 1> { using Type = ValueSequence<T, Begin>; };
+template <typename T, T B, size_t L>  struct MakeSeqRangeImpl
+  { using Type = typename ConcatSeqImpl<MakeSeqRange<T, B, (L/2)>, MakeSeqRange<T, B + (L/2), L - (L/2)>>::Type; };
+
+template <typename Seq, typename T>  struct MakeTypeSeqImpl;
+template <size_t, typename T>        using  IndexToType = T;
+template <typename T, size_t... Is>
+struct MakeTypeSeqImpl<IndexSequence<Is...>, T> { using Type = TypeSequence<IndexToType<Is, int>...>; };
+
+template <size_t Length>              using MakeIndexSequence = MakeSeqRange<size_t, 0, Length>;
+template <size_t Begin, size_t End>   using MakeIndexRange    = MakeSeqRange<size_t, Begin, (End - Begin)>;
+template <typename T, size_t Length>
+using MakeTypeSequence = typename MakeTypeSeqImpl<MakeIndexSequence<Length>, T>::Type;
+///@}
 
 ///@{ @internal  Template metafunction used to obtain function call signature information from a callable.
 template <typename T, typename = void>  struct FuncTraitsImpl   :   public FuncTraitsImpl<decltype(&T::operator())>{};
@@ -728,6 +780,42 @@ private:
   bool  relocate_;      ///< Set to true if this is a relocatable address.
 };
 
+/// How many args that are passed via registers which must be skipped, determined by ABI.
+constexpr size_t InvokeFunctorNumSkipped = (IsX86_64 && IsMsAbi) ? 4 : (IsX86_64 && IsUnixAbi) ? 6 : 0;
+/// Max number of padded variants of InvokeFunctor(), e.g. InvokeFunctor(...), InvokeFunctor(int, ...), [...]
+constexpr size_t InvokeFunctorMaxPad     = max((PATCHER_DEFAULT_STACK_ALIGNMENT / RegisterSize), 1) - 1;
+
+// ** TODO Add comments
+struct InvokeFunctorTable {
+  const void* pfnInvokeWithPad[InvokeFunctorMaxPad + 1];
+  const void* pfnInvokeWithPadAndCleanup[InvokeFunctorMaxPad + 1];
+};
+
+template <typename T, typename Return, typename... Args>
+struct GetInvokeFunctorTable {
+  template <typename    T>  struct Fn;
+  template <typename... Padders>
+  struct Fn<TypeSequence<Padders...>> {
+    static Return PATCHER_CDECL   Invoke(Padders..., T* pFunctor, void* pPrevReturnAddr, Args... args)
+      { return (*pFunctor)(args...); }
+    static Return PATCHER_STDCALL InvokeWithCleanup(Padders..., T* pFunctor, void* pPrevReturnAddr, Args... args)
+      { return (*pFunctor)(args...); }
+  };
+
+  static constexpr InvokeFunctorTable Get()
+    { return Get(MakeIndexRange<InvokeFunctorNumSkipped, InvokeFunctorMaxPad + InvokeFunctorNumSkipped + 1>{}); }
+
+  template <size_t... Is>
+  static constexpr InvokeFunctorTable Get(IndexSequence<Is...>) {
+    return { { ((void*)(&Fn<MakeTypeSequence<int, Is>>::Invoke))...            },
+#if PATCHER_X86_32
+             { ((void*)(&Fn<MakeTypeSequence<int, Is>>::InvokeWithCleanup))... } };
+#else
+             {                                                                 } };
+#endif
+  }
+};
+
 /// Type erasure wrapper for function pointer arguments passed to PatchContext.  Can implicitly convert most callables.
 /// With non-empty callable types, the object and its lifetime become bound to this and to any patches referencing it.
 class FunctionPtr {
@@ -735,23 +823,23 @@ public:
   template <typename StlFunction> using GetTargetFunc = void*(StlFunction* pStlFunction);  ///< Returns stdfunc.target()
 
   /// Conversion constructor for void pointers.  Used when referencing e.g. JIT-compiled code.
-  constexpr FunctionPtr(const void* pFunction) : pfn_(pFunction), sig_(), pObj_(), pState_(), pfnInvoke_() { }
+  constexpr FunctionPtr(const void* pFunction) : pfn_(pFunction), sig_(), pObj_(), pState_(), pfnGetInvokers_() { }
 
   /// Conversion constructor for function pointers.
   template <typename T, typename = EnableIf<std::is_function<T>::value>>
   constexpr FunctionPtr(T* pfn)  // C-style cast due to constexpr quirks.
-    : pfn_((void*)(pfn)), sig_(FuncTraits<T>{}), pObj_(), pState_(), pfnInvoke_() { }
+    : pfn_((void*)(pfn)), sig_(FuncTraits<T>{}), pObj_(), pState_(), pfnGetInvokers_() { }
 
   /// Conversion constructor for pointers-to-member-functions.
   /// @ref pThis can be optionally provided to help look up the function address, but is not bound to this FunctionPtr.
   /// @note Consider using the PATCHER_MFN_PTR() macro, which is more robust than PmfCast() backing this constructor.
   template <typename T, typename Pfn, typename = EnableIf<std::is_function<Pfn>::value>>
   FunctionPtr(Pfn T::*pmf, const T* pThis = nullptr)
-    : pfn_((void*)(Util::PmfCast(pmf, pThis))), sig_(FuncTraits<decltype(pmf)>{}), pObj_(), pState_(), pfnInvoke_() { }
+    : pfn_((void*)(Util::PmfCast(pmf, pThis))), sig_(FuncTraits<Pfn T::*>{}), pObj_(), pState_(), pfnGetInvokers_() { }
 
   /// Conversion constructor for callable objects.  This works with lambdas, (non-overloaded) functors, etc.
   /// @note To hook T::operator() itself, consider constructing a FunctionPtr from &T::operator().
-  // ** TODO try to fix std::bind, which has overloaded operator()
+  // ** TODO Try to fix std::bind, which has const overloaded operator()
   template <
     typename T, Call C = Call::Cdecl, typename E = typename std::is_empty<T>::type, typename = decltype(&T::operator())>
   constexpr FunctionPtr(T&& functor, Util::AsCall<C> call = {}) : FunctionPtr(std::forward<T>(functor), call, E{}) { }
@@ -761,9 +849,9 @@ public:
   template <typename R, typename... A, typename Fn = std::function<R(A...)>, Call C = Call::Cdecl>
   FunctionPtr(
     std::function<R(A...)> functor, Util::AsCall<C> = {}, GetTargetFunc<decltype(functor)>* pfnGetTarget = nullptr)
-    : pfn_(), sig_(FuncSig<R, C, false, A...>{}), pObj_(), pState_(), pfnInvoke_((void*)(&InvokeFunctor<Fn, R, A...>))
+    : pfn_(), sig_(FuncSig<R,C,0,A...>{}), pObj_(), pState_(), pfnGetInvokers_(&GetInvokeFunctorTable<Fn, R, A...>::Get)
   {
-    InitFunctorThunk(new Fn(std::move(functor)), [](void* p) { delete (Fn*)p; });
+    InitFunctorThunk(new Fn(std::move(functor)), [](void* p) { delete static_cast<Fn*>(p); });
     pState_ = ((pfnGetTarget != nullptr) && (pObj_ != nullptr)) ? pfnGetTarget(static_cast<Fn*>(pObj_.get())) : nullptr;
   }
 
@@ -772,10 +860,12 @@ public:
   constexpr const RtFuncSig& Signature() const { return sig_;       }  ///< Gets function call signature information.
   std::shared_ptr<void>        Functor() const { return pObj_;      }  ///< Gets the functor obj to call with, if any.
   constexpr void*         FunctorState() const { return pState_;    }  ///< Gets the functor obj internal state data.
-  constexpr void*    PfnInvokeInternal() const { return pfnInvoke_; }  ///< Gets the internal functor obj invoker.
+  constexpr auto        InvokePfnTable() const -> InvokeFunctorTable   ///< Gets the internal functor obj invoker table.
+    { return pfnGetInvokers_ ? pfnGetInvokers_() : InvokeFunctorTable{}; }
 
 private:
   template <typename T>  using StlFunctionForFunctor = std::function<typename FuncTraitsNoThis<T>::Function>;
+  using PfnGetInvokerTable = InvokeFunctorTable(*)();
 
   /// Conversion constructor for stateless functors and non-capturing lambdas.
   template <typename T, Call C, typename = decltype(&T::operator())>
@@ -789,23 +879,11 @@ private:
   /// Initializes the thunk for calling InvokeFunctor() with @ref pObj_ (state-bound functor or capturing lambda).
   void InitFunctorThunk(void* pFunctorObj, void(*pfnDeleteFunctor)(void*));
 
-  /// Target of the thunk created by InitFunctorThunk().
-  template <typename T, typename Return, typename... Args>
-  static Return PATCHER_CDECL InvokeFunctor(
-#if   PATCHER_X86_64 && PATCHER_MSVC
-    int, int, int, int,            // Ignore 4 register arg slots, so our args are on the stack.
-#elif PATCHER_X86_64 && PATCHER_GXX
-    int, int, int, int, int, int,  // Ignore 6 register arg slots, so our args are on the stack.
-#elif PATCHER_X86_32 && PATCHER_GXX
-    int, int,                      // Add 2 dummy arg slots to pad stack to 16-byte alignment.
-#endif
-    T* pFunctor, void* pPrevReturnAddr, Args... args) { return (*pFunctor)(args...); }
-
-  const void*           pfn_;       ///< Unqualified pointer to the underlying function.
-  RtFuncSig             sig_;       ///< Function call signature information about pfn_, if it is known at compile time.
-  std::shared_ptr<void> pObj_;      ///< If created from a state-bound functor, std::function object needed to call pfn_.
-  void*                 pState_;    ///< If created from a state-bound functor, pointer to the state managed by pObj_.
-  void*                 pfnInvoke_; ///< If created from a state-bound functor, pointer to the InvokeFunctor() instance.
+  const void*           pfn_;             ///< Unqualified pointer to the underlying function.
+  RtFuncSig             sig_;             ///< Function call signature information about pfn_, if known at compile time.
+  std::shared_ptr<void> pObj_;            ///< (State-bound functors) The std::function object bound to pfn_.
+  void*                 pState_;          ///< (State-bound functors) Pointer to the state managed by pObj_.
+  PfnGetInvokerTable    pfnGetInvokers_;  ///< (State-bound functors) Pointer to the InvokeFunctorTable getter function.
 };
 
 /// Template subclass of FunctionPtr that can be implicitly converted to a plain function pointer and used as a callable

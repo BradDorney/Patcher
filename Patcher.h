@@ -99,7 +99,6 @@ public:
     { return Memcpy(pAddress, bytes.Data(), bytes.Length()); }
 
   /// Writes no-ops to module memory up to size in bytes.  If @ref size is 0, then overwrite a whole single instruction.
-  /// @note  32-bit x86 only.
   PatcherStatus WriteNop(TargetPtr pAddress, size_t size = 0);
 
   ///@{ Adds the specified module memory to the history tracker so it can be restored via Revert().
@@ -125,8 +124,6 @@ public:
   ///         ** Hook(&Class::Fn,  Util::ThiscallFunctor([](Class* pThis, int a) { return pThis->b - a; }))
   ///
   /// ** Consider using PATCHER_MFN_PTR(Class::Fn) explicitly, especially for virtual methods.
-  ///
-  /// @note  32-bit x86 only.
   PatcherStatus Hook(TargetPtr pAddress, const FunctionPtr& pfnNewFunction, void* pPfnTrampoline = nullptr);
 
   template <typename T>
@@ -153,7 +150,6 @@ public:
   ///                                 state to pfnOriginal.  Use SetCapturedTrampoline for the first lambda capture.
   ///
   /// @see   Comments of @ref Hook for examples, which has similar usage.
-  /// @note  32-bit x86 only.
   PatcherStatus HookCall(TargetPtr pAddress, const FunctionPtr& pfnNewFunction, void* pPfnOriginal = nullptr);
 
   template <typename T>
@@ -190,7 +186,6 @@ public:
   ///
   /// @warning  This requires 5 bytes at pAddress; if the last 4 bytes overlap any jump targets elsewhere in the module,
   ///           this could crash.
-  /// @note     32-bit x86 only.
   PatcherStatus LowLevelHook(
     TargetPtr pAddress, Span<RegisterInfo> registers, const FunctionPtr& pfnHookCb, const LowLevelHookInfo& info = {});
   ///< Insert a low-level hook with a callback function that takes RegisterArgs or no args.

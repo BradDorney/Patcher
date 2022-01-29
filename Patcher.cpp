@@ -1162,21 +1162,21 @@ static bool CreateFunctorThunk(
 
   const uintptr            functorAddr = reinterpret_cast<uintptr>(pfnNewFunction.Functor().get());
   const RtFuncSig&         sig         = pfnNewFunction.Signature();
-  const InvokeFunctorTable invokers    = pfnNewFunction.InvokePfnTable();
+  const InvokeFunctorTable invokers    = pfnNewFunction.InvokerPfnTable();
 
   // ** TODO This should take into account the positions of the parameters, e.g. if (sizeof(param0) > RegisterSize) then
   //         params 1 and 2 would be the ones in registers
   size_t numRegisterSizeParams = 0;  // Number of parameters that can fit in a register (for the original function)
   for (uint32 i = 0; i < sig.numParams; (sig.pParamSizes[i++] <= RegisterSize) ? ++numRegisterSizeParams : 0);
 
-  auto GetNumPadders = [&numRegisterSizeParams] {
-    const size_t numExtraArgs = min(numRegisterSizeParams, InvokeFunctorNumSkipped);
+  auto GetNumAlignmentPadders = [&numRegisterSizeParams](size_t maxNumRegisterArgs = 0) {
+    const size_t numExtraArgs = min(numRegisterSizeParams, maxNumRegisterArgs);
     return InvokeFunctorMaxPad - ((InvokeFunctorNumArgs + numExtraArgs - 1) & InvokeFunctorMaxPad);
   };
 
-  // pfnInvokeFunctor is always cdecl;  Signature().convention refers to the original function the invoker wraps.
-  // We need to translate from the input calling convention to cdecl by pushing any register args used by the input
-  // convention to the stack, then push the functor obj address and do the call, then do any expected stack cleanup.
+  // We need to translate from the input calling convention to cdecl or stdcall, whichever closest matches caller/callee
+  // cleanup behavior of the input.  We must push any register args used by the input, then push the functor obj address
+  // and do the call, and finally do any expected caller-side cleanup.
   auto WriteCall = [&writer, &invokers, functorAddr](size_t numPadders = 0, bool calleeCleanup = false) {
     const void*const pfnInvokeFunctor =
       (calleeCleanup ? invokers.pfnInvokeWithPadAndCleanup : invokers.pfnInvokeWithPad)[numPadders];
@@ -1193,94 +1193,90 @@ static bool CreateFunctorThunk(
         .BytesIf(numPadders, { 0x48, 0x83, 0xEC, uint8(RegisterSize * numPadders) });  // sub    rsp, i8  (Align RSP)
     }
 
-    // ** TODO If calleeCleanup=true then we should push the old return address and jmp instead of call
-    const ptrdiff_t callDelta = writer.GetPcRelPtr(sizeof(Call32), pfnInvokeFunctor);
-    IsFarDisplacement(callDelta) ? writer.Op(Op2_8{ { 0x49, 0xBB }, uintptr(pfnInvokeFunctor) })  // movabs r11, pfn
-                                         .Bytes({ 0x41, 0xFF, 0xD3 })                             // call   r11
-                                 : writer.Op(Call32{ 0xE8, static_cast<int32>(callDelta) });      // call   pfn
-  };
-
-  auto WriteCallAndCalleeCleanup = [&result, &writer, &sig, &WriteCall] {  // ** TODO Remove this?
-    const size_t stackDelta = sig.totalParamSize + RegisterSize + PopSize;
-    if (sig.returnSize > (RegisterSize * 2)) {
-      result = false;  // ** TODO Need to handle oversized return types
+    if (calleeCleanup) {
+      assert(pfnInvokeFunctor != nullptr);  // This will only be non-nullptr in builds that expose stdcall (i.e. x86-32)
+      writer.Bytes({ 0xFF, 0x74, 0x24, uint8(RegisterSize * (numPadders + 1)) })            // push dword ptr [esp + i8]
+            .Op(Jmp32{ 0xE9, writer.GetPcRelPtr<int32>(sizeof(Jmp32), pfnInvokeFunctor) }); // jmp  pfn
     }
     else {
-      WriteCall();
-      writer.Bytes({ 0x8B, 0x4C, 0x24, PopSize });                                               // mov ecx, [esp + i8]
-      ((int8(stackDelta) == stackDelta) ? writer.Bytes({ 0x83, 0xC4, uint8(stackDelta) })        // add esp, i8
-                                        : writer.Op(Op2_4{{ 0x81, 0xC4 }, uint32(stackDelta)}))  // add esp, i32
-        .Bytes({ 0xFF, 0xE1 });                                                                  // jmp ecx
+      const ptrdiff_t callDelta = writer.GetPcRelPtr(sizeof(Call32), pfnInvokeFunctor);
+      IsFarDisplacement(callDelta) ? writer.Op(Op2_8{ { 0x49, 0xBB }, uintptr(pfnInvokeFunctor) })  // movabs r11, pfn
+                                           .Bytes({ 0x41, 0xFF, 0xD3 })                             // call   r11
+                                   : writer.Op(Call32{ 0xE8, static_cast<int32>(callDelta) });      // call   pfn
     }
   };
 
   switch (sig.convention) {
 #if PATCHER_X86_32
   case Call::Cdecl: {
-    const size_t numAlignmentPadders = GetNumPadders();
-    const uint8  totalPopSize        = uint8(PopSize + (numAlignmentPadders * RegisterSize));
+    const size_t numAlignmentPadders = GetNumAlignmentPadders();
     WriteCall(numAlignmentPadders);
-    writer.Bytes({ 0x83, 0xC4, totalPopSize,  // add esp, i8
-                   0xC3 });                   // retn
+    writer.Bytes({ 0x83, 0xC4, uint8(PopSize + (numAlignmentPadders * RegisterSize)), // add esp, i8  (Cleanup our args)
+                   0xC3 });                                                           // retn
     break;
   }
 
   case Call::Stdcall:
-    WriteCallAndCalleeCleanup();
+    WriteCall(GetNumAlignmentPadders(), true);
     break;
 
   case Call::Thiscall:
-    // MS thiscall puts arg 1 in ECX.  If the arg exists, put it on the stack.
-    writer.Byte(0x5A)                              //  pop  edx
-      .ByteIf((numRegisterSizeParams >= 1), 0x51)  // (push ecx)
-      .Byte(0x52);                                 //  push edx
-    WriteCallAndCalleeCleanup();
+    // MS thiscall puts the first register-sized arg in ECX.  If the arg exists, put it on the stack.
+    writer.BytesIf((numRegisterSizeParams >= 1), { 0x5A,     // pop  edx  (Pop old return address)
+                                                   0x51,     // push ecx  (Push args passed via registers)
+                                                   0x52 });  // push edx  (Push old return address)
+    WriteCall(GetNumAlignmentPadders(1), true);
     break;
 
   case Call::Fastcall:
     // MS fastcall puts the first 2 register-sized args in ECX and EDX.  If the args exist, put them on the stack.
-    ((numRegisterSizeParams >= 2) ? writer.Bytes({ 0x87, 0x14, 0x24 })  // (xchg edx, [esp]) or  ** TODO This is slow
-                                  : writer.Byte(0x5A))                  // (pop  edx)
-      .ByteIf((numRegisterSizeParams >= 1), 0x51)                       // (push ecx)
-      .Byte(0x52);                                                      //  push edx
-    WriteCallAndCalleeCleanup();
+    if (numRegisterSizeParams >= 1) {
+      writer.Byte(0x58)                                  //  pop  eax   (Pop old return address)
+            .ByteIf((numRegisterSizeParams >= 2), 0x52)  // (push edx)  (Push args passed via registers)
+            .Bytes({ 0x51,                               //  push ecx
+                     0x50 });                            //  push eax   (Push old return address)
+    }
+    WriteCall(GetNumAlignmentPadders(2), true);
     break;
 
 #elif PATCHER_X86_64
   case Call::Cdecl: {
     // ** TODO x64 Clean this up
-    if (IsMsAbi) {
-      // We need to pop the shadow space that already exists and the old return address before we can push our args.
-      writer.Bytes({ 0x41, 0x5B,                                    //  pop  r11      (Pop old return address)
-                     0x48, 0x83, 0xC4, uint8(RegisterSize * 4) })   //  add  rsp, 32  (Pop old shadow space)
-            .ByteIf((numRegisterSizeParams  >= 1),   0x51)          // (push rcx)     (Push args passed via registers)
-            .ByteIf((numRegisterSizeParams  >= 2),   0x52)          // (push rdx)
-            .BytesIf((numRegisterSizeParams >= 3), { 0x41, 0x50} )  // (push r8)
-            .BytesIf((numRegisterSizeParams >= 4), { 0x41, 0x51 })  // (push r9)
-            .Bytes({ 0x41, 0x53 });                                 //  push r11      (Push old return address)
-    }
-    else if (IsUnixAbi) {
-      writer.Bytes({ 0x41, 0x5B })                                  //  pop  r11      (Pop old return address)
-            .ByteIf((numRegisterSizeParams  >= 1),   0x57)          // (push rsi)     (Push args passed via registers)
-            .ByteIf((numRegisterSizeParams  >= 2),   0x56)          // (push rdi)
-            .ByteIf((numRegisterSizeParams  >= 3),   0x52)          // (push rdx)
-            .ByteIf((numRegisterSizeParams  >= 4),   0x51)          // (push rcx)
-            .BytesIf((numRegisterSizeParams >= 5), { 0x41, 0x50 })  // (push r8)
-            .BytesIf((numRegisterSizeParams >= 6), { 0x41, 0x51 })  // (push r9)
-            .Bytes({ 0x41, 0x53 });                                 //  push r11      (Push old return address)
+    // The x64 calling convention passes the first 4 arguments via registers in MS ABI, or the first 6 in Unix ABI.
+    if (numRegisterSizeParams >= 1) {
+      if (IsMsAbi) {
+        // We need to pop the shadow space that already exists and the old return address before we can push our args.
+        writer.Bytes({ 0x41, 0x5B,                                    //  pop  r11      (Pop old return address)
+                       0x48, 0x83, 0xC4, uint8(RegisterSize * 4) })   //  add  rsp, 32  (Pop old shadow space)
+              .BytesIf((numRegisterSizeParams >= 4), { 0x41, 0x51 })  // (push r9)      (Push args passed via registers)
+              .BytesIf((numRegisterSizeParams >= 3), { 0x41, 0x50 })  // (push r8)
+              .ByteIf((numRegisterSizeParams  >= 2),   0x52)          // (push rdx)
+              .ByteIf((numRegisterSizeParams  >= 1),   0x51)          // (push rcx)
+              .Bytes({ 0x41, 0x53 });                                 //  push r11      (Push old return address)
+      }
+      else if (IsUnixAbi) {
+        writer.Bytes({ 0x41, 0x5B })                                  //  pop  r11      (Pop old return address)
+              .BytesIf((numRegisterSizeParams >= 6), { 0x41, 0x51 })  // (push r9)      (Push args passed via registers)
+              .BytesIf((numRegisterSizeParams >= 5), { 0x41, 0x50 })  // (push r8)
+              .ByteIf((numRegisterSizeParams  >= 4),   0x51)          // (push rcx)
+              .ByteIf((numRegisterSizeParams  >= 3),   0x52)          // (push rdx)
+              .ByteIf((numRegisterSizeParams  >= 2),   0x56)          // (push rdi)
+              .ByteIf((numRegisterSizeParams  >= 1),   0x57)          // (push rsi)
+              .Bytes({ 0x41, 0x53 });                                 //  push r11      (Push old return address)
+      }
     }
 
-    const size_t numAlignmentPadders     = GetNumPadders();
+    const size_t numAlignmentPadders     = GetNumAlignmentPadders(InvokeFunctorNumSkipped);
     const uint8  popFunctorPtrAndPadSize = uint8(PopSize + (numAlignmentPadders * RegisterSize));
     const uint8  popRegisterArgSize      = uint8(min(numRegisterSizeParams, InvokeFunctorNumSkipped) * RegisterSize);
 
     WriteCall(numAlignmentPadders);
-    writer.Byte(0xCC);
-    writer.Bytes({ 0x48, 0x83, 0xC4, popFunctorPtrAndPadSize });                       // add rsp, i8
+    writer.Byte(0xCC);  // ** TODO
+    writer.Bytes({ 0x48, 0x83, 0xC4, popFunctorPtrAndPadSize });                       // add rsp, i8  ** TODO Combine adds
     (popRegisterArgSize != 0) ?
       writer.Bytes({ 0x48, 0x8B, 0x4C, 0x24, uint8(IsMsAbi ? (RegisterSize * 4) : 0),  // mov rcx, qword ptr [rsp + i8]
                      //0x59,  // ** TODO  pop rcx  (Set RCX to old return address)
-                     0x48, 0x83, 0xC4, uint8(popRegisterArgSize + RegisterSize /* Unless pop rcx! */),  // add rsp, i8
+                     0x48, 0x83, 0xC4, uint8(popRegisterArgSize + (RegisterSize /* Unless pop rcx! */)),  // add rsp, i8
                      0xFF, 0xE1 }) :                                                   // jmp rcx
       writer.Byte(0xC3);                                                               // retn
     break;
@@ -1311,7 +1307,7 @@ void FunctionPtr::InitFunctorThunk(
   void*  pFunctorObj,
   void (*pfnDeleteFunctor)(void*))
 {
-  auto*const pAllocator = Allocator::GetInstance(InvokePfnTable().pfnInvokeWithPad[0]);
+  auto*const pAllocator = Allocator::GetInstance(pfnGetInvokers_);
   pAllocator->Acquire();
   void* pMemory = (pFunctorObj != nullptr) ? pAllocator->Alloc(MaxFunctorThunkSize, CodeAlignment) : nullptr;
 
@@ -1321,7 +1317,7 @@ void FunctionPtr::InitFunctorThunk(
       { pfnDeleteFunctor(pObj);  pAllocator->Free(pMemory);  pAllocator->Release(); });
 
     if (CreateFunctorThunk(pMemory, *this)) {
-      pfn_  = pMemory;
+      pfn_ = pMemory;
       FlushInstructionCache(GetCurrentProcess(), pMemory, MaxFunctorThunkSize);
     }
   }
@@ -1869,7 +1865,7 @@ static size_t CreateLowLevelHookTrampoline(
   static constexpr Insn     PushInsns[] = { {0x50}, {0x51}, {0x52}, {0x53}, {0x56}, {0x57}, {0x55}, {0x54}, {0x9C} };
   static constexpr Insn     PopInsns[]  = { {0x58}, {0x59}, {0x5A}, {0x5B}, {0x5E}, {0x5F}, {0x5D}, {0x5C}, {0x9D} };
   static constexpr Register VolatileRegisters[] = { Register::Ecx, Register::Edx, Register::Eax };
-  static constexpr Register ArgRegisters[1]     = { Register::Count };
+  static constexpr Register ArgRegisters[]      = { Register::Count };
   static constexpr Register ReturnRegister      = Register::Eax;
   static constexpr Register StackRegister       = Register::Esp;
   static constexpr Register FlagsRegister       = Register::Eflags;
@@ -2153,6 +2149,7 @@ static size_t CreateLowLevelHookTrampoline(
     }
   };
 
+  // Move arguments into registers as required by the ABI.
   // ** TODO x64 Moving from register to register would be more optimal, but then we'd have to deal with potential
   //         dependencies (if any arg registers e.g. RCX are requested), and reorder the movs or fall back to
   //         xchg/push+pop as needed.
@@ -2181,14 +2178,14 @@ static size_t CreateLowLevelHookTrampoline(
   writer.BytesIf((IsX86_64 && IsMsAbi), { 0x48, 0x83, 0xEC, uint8(RegisterSize * 4) });        // sub    rsp, 32
 
   {
-    const void* pHookFunction = isFunctor ? pfnHookCb.InvokePfnTable().pfnInvokeWithPad[0] : pfnHookCb.Pfn();
+    const void* pHookFunction = isFunctor ? pfnHookCb.InvokerPfnTable().pfnInvokeWithPad[0] : pfnHookCb.Pfn();
     const auto  callDelta     = writer.GetPcRelPtr<ptrdiff_t>(sizeof(Call32), pHookFunction);
     IsFarDisplacement(callDelta) ? writer.Op(Op2_8{ { 0x48, 0xB8 }, uintptr(pHookFunction) })  // movabs rax, pfn
                                          .Bytes({ 0xFF, 0xD0 })                                // call   rax
                                  : writer.Value(Call32{ 0xE8, int32(callDelta) });             // call   pcrel32
   }
 
-  // Pop the shadow space, and InvokeFunctor() args if we passed them.
+  // Pop the shadow space if MS x64 ABI, and then the InvokeFunctor() args if we passed them.
   if (IsX86_64 && IsMsAbi) {
     PopNil(4);                                                                                 // add    rsp, 32
   }
@@ -2197,9 +2194,9 @@ static size_t CreateLowLevelHookTrampoline(
   }
 
   if ((settings.noCustomReturnAddr || settings.noNullReturnDefault) == false) {
-    writer.Bytes({ IF_X86_64(0x48,) 0x85, 0xC0,  // test eax, eax
-                   0x75, 0x00 });                // jnz  short i8  ** TODO x64 need i32?
-    pSkipCase1Offset = (writer.GetNext() - 1);  // This will be filled later when we know the size.
+    writer.Bytes({ IF_X86_64(0x48,) 0x85, 0xC0,  // test eax, eax  (Test if returned address is nullptr)
+                   0x75, 0x00 });                // jnz  short i8  (Skip to case 2 if non-nullptr) ** TODO x64 need i32?
+    pSkipCase1Offset = (writer.GetNext() - 1);   // Fill the skip to case 2 jump offset later when we know the size.
   }
 
   if (settings.noNullReturnDefault == false) {
@@ -2788,11 +2785,11 @@ void* Allocator::FindNextRegion(
     }
   };
 
-  // Try to find a region after pNearAddr.
+  // Try to find a free memory region after pNearAddr.
   SearchRegions(pOriginAddr, pMaxAddr);
 
   if (pRegion == nullptr) {
-    // Try to find a region before pNearAddr.
+    // Try to find a free memory region before pNearAddr.
     SearchRegions(pMinAddr, pOriginAddr);
   }
 

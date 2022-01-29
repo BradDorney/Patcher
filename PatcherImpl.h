@@ -273,11 +273,11 @@ template <size_t N, typename T>  struct TupleElementImpl<N, T, EnableIf<(N < std
 template <size_t N, typename T>  using TupleElement = typename TupleElementImpl<N, T>::Type;
 ///@}
 
-///@{ @internal  Helper metafunctions to generate parameter packs of sequences.
-template <typename... Ts>             struct TypeSequence{};
-template <typename T, T... Elements>  struct ValueSequence{};
-template <size_t... Indices>          using  IndexSequence = ValueSequence<size_t, Indices...>;
+template <typename... Ts>             struct TypeSequence{};                             ///< Parameter pack of types.
+template <typename T, T... Elements>  struct ValueSequence{};                            ///< Parameter pack of values.
+template <size_t... Indices>  using IndexSequence = ValueSequence<size_t, Indices...>;   ///< Parameter pack of size_t.
 
+///@{ @internal  Helper metafunctions to generate parameter packs of sequences.
 template <typename SeqA, typename SeqB>      struct ConcatSeqImpl;
 template <typename T, T... SeqA, T... SeqB>  struct ConcatSeqImpl<ValueSequence<T, SeqA...>, ValueSequence<T, SeqB...>>
   { using Type = ValueSequence<T, SeqA..., SeqB...>; };
@@ -294,12 +294,15 @@ template <typename Seq, typename T>  struct MakeTypeSeqImpl;
 template <size_t, typename T>        using  IndexToType = T;
 template <typename T, size_t... Is>
 struct MakeTypeSeqImpl<IndexSequence<Is...>, T> { using Type = TypeSequence<IndexToType<Is, int>...>; };
+///@}
 
+/// @internal  Makes an IndexSequence from [0..Length).
 template <size_t Length>              using MakeIndexSequence = MakeSeqRange<size_t, 0, Length>;
+/// @internal  Makes an IndexSequence from [Begin..End).
 template <size_t Begin, size_t End>   using MakeIndexRange    = MakeSeqRange<size_t, Begin, (End - Begin)>;
+/// @internal  Makes a homogenous TypeSequence of Length elements.
 template <typename T, size_t Length>
 using MakeTypeSequence = typename MakeTypeSeqImpl<MakeIndexSequence<Length>, T>::Type;
-///@}
 
 ///@{ @internal  Template metafunction used to obtain function call signature information from a callable.
 template <typename T, typename = void>  struct FuncTraitsImpl   :   public FuncTraitsImpl<decltype(&T::operator())>{};
@@ -444,9 +447,12 @@ struct RtFuncSig {
 };
 
 ///@{ @internal  FuncTraitsImpl template metafunction used to obtain function call signature information from a callable
-#define PATCHER_FUNC_TRAITS_DEF(con, name)  template <typename R, typename... A>  struct FuncTraitsImpl<R(con*)(A...), \
-  Conditional<(Call::Default == Call::name) || (std::is_same<void(*)(), void(con*)()>::value == false),                \
-              void, Util::AsCall<Call::name>>> { using Type = FuncSig<R, Call::name, false, A...>; };
+template <typename Pfn, Call C>  using EnableIfConventionExists = Conditional<
+  (Call::Default == C) || (std::is_same<void(*)(), Pfn>::value == false), void, Util::AsCall<C>>;
+
+#define PATCHER_FUNC_TRAITS_DEF(conv, name)  template <typename R, typename... A>           \
+struct FuncTraitsImpl<R(conv*)(A...), EnableIfConventionExists<void(conv*)(), Call::name>>  \
+  { using Type = FuncSig<R, Call::name, false, A...>; };
 #define PATCHER_FUNC_TRAITS_PMF_DEF(pThisQual, ...)  \
 template <typename R, typename T, typename... A> struct FuncTraitsImpl<R(T::*)(A...)      pThisQual __VA_ARGS__, void> \
   { using Type = FuncSig<R, Call::Membercall, false, pThisQual T*, A...>; };                                           \
@@ -785,12 +791,13 @@ constexpr size_t InvokeFunctorNumSkipped = (IsX86_64 && IsMsAbi) ? 4 : (IsX86_64
 /// Max number of padded variants of InvokeFunctor(), e.g. InvokeFunctor(...), InvokeFunctor(int, ...), [...]
 constexpr size_t InvokeFunctorMaxPad     = max((PATCHER_DEFAULT_STACK_ALIGNMENT / RegisterSize), 1) - 1;
 
-// ** TODO Add comments
+/// @internal  Function table for invoking functors with varying # of alignment padders and possibly with stack cleanup.
 struct InvokeFunctorTable {
   const void* pfnInvokeWithPad[InvokeFunctorMaxPad + 1];
   const void* pfnInvokeWithPadAndCleanup[InvokeFunctorMaxPad + 1];
 };
 
+/// @internal  Helper template for getting the InvokeFunctorTable for a given functor type.
 template <typename T, typename Return, typename... Args>
 struct GetInvokeFunctorTable {
   template <typename    T>  struct Fn;
@@ -805,12 +812,13 @@ struct GetInvokeFunctorTable {
   static constexpr InvokeFunctorTable Get()
     { return Get(MakeIndexRange<InvokeFunctorNumSkipped, InvokeFunctorMaxPad + InvokeFunctorNumSkipped + 1>{}); }
 
+  // Use IndexSequence and TypeSequence to generate the InvokeFunctorTable with all possible padding amount variants.
   template <size_t... Is>
   static constexpr InvokeFunctorTable Get(IndexSequence<Is...>) {
     return { { ((void*)(&Fn<MakeTypeSequence<int, Is>>::Invoke))...            },
 #if PATCHER_X86_32
              { ((void*)(&Fn<MakeTypeSequence<int, Is>>::InvokeWithCleanup))... } };
-#else
+#else  // x86-64 doesn't have callee-cleanup calling conventions.
              {                                                                 } };
 #endif
   }
@@ -860,7 +868,7 @@ public:
   constexpr const RtFuncSig& Signature() const { return sig_;       }  ///< Gets function call signature information.
   std::shared_ptr<void>        Functor() const { return pObj_;      }  ///< Gets the functor obj to call with, if any.
   constexpr void*         FunctorState() const { return pState_;    }  ///< Gets the functor obj internal state data.
-  constexpr auto        InvokePfnTable() const -> InvokeFunctorTable   ///< Gets the internal functor obj invoker table.
+  constexpr auto       InvokerPfnTable() const -> InvokeFunctorTable   ///< Gets the internal functor obj invoker table.
     { return pfnGetInvokers_ ? pfnGetInvokers_() : InvokeFunctorTable{}; }
 
 private:

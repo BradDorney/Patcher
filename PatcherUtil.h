@@ -82,10 +82,10 @@ struct LowLevelHookInfo {
       uint32 noCustomReturnAddr  :  1; ///< Callback return address not allowed (i.e. callback function returns void).
       uint32 noBaseRelocReturn   :  1; ///< Do not auto-adjust callback return address for module base relocation.
       uint32 noShortReturnAddr   :  1; ///< Assume callback return address can't overlap overwritten area (x86: 5 bytes)
-      uint32 noNullReturnDefault :  1; ///< Do not reinterpret callback return address of nullptr to default address.
+      uint32 noNullReturnDefault :  1; ///< Do not reinterpret callback return address of 0/nullptr to default address.
       uint32 argsAsStructPtr     :  1; ///< Args are passed to the callback as a pointer to a struct that contains them.
       uint32 noAlignStackPtr     :  1; ///< Skip aligning the stack pointer. Faster, but may break float and vector ops.
-      uint32 noRestoreFlagsReg   :  1; ///< Do not save/restore the flags register state.
+      uint32 noRestoreFlagsReg   :  1; ///< Do not save/restore the flags register state, which can be expensive.
       uint32 debugBreakpoint     :  1; ///< Adds a debug breakpoint to the start of the trampoline code.
       uint32 reserved            : 24; ///< Reserved for future use.
     };

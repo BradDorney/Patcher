@@ -124,6 +124,7 @@
 # define  PATCHER_REGPARM(n)  PATCHER_ATTR_PARM(__regparm__, n)
 # define  PATCHER_SSEREGPARM  PATCHER_ATTRIBUTE(__sseregparm__)
 
+// Macro that expands to an attribute if it is defined, otherwise expands to nil.
 # define  PATCHER_ATTRIBUTE(attr)        PATCHER_ATTR_IMPL1((__has_attribute(attr), __attribute((attr))))
 # define  PATCHER_ATTR_PARM(attr, ...)   PATCHER_ATTR_IMPL1((__has_attribute(attr), __attribute((attr(__VA_ARGS__)))))
 # define  PATCHER_ATTR_IMPL1(args)       PATCHER_ATTR_IMPL2 args
@@ -132,6 +133,7 @@
 # define  PATCHER_ATTR_EXPAND_0(attr)
 #endif
 
+// Macro that takes a macro which takes (convention, name) as args, and invokes it for each calling convention.
 #define PATCHER_EMIT_CALLING_CONVENTIONS($)  PATCHER_IGNORE_GCC_WARNING("-Wignored-attributes",         \
   $(PATCHER_CDECL,       Cdecl)     $(PATCHER_STDCALL,    Stdcall)     $(PATCHER_FASTCALL,   Fastcall)  \
   $(PATCHER_THISCALL,    Thiscall)  $(PATCHER_VECTORCALL, Vectorcall)  $(PATCHER_REGCALL,    Regcall)   \
@@ -315,6 +317,7 @@ class FunctionPtr;  // Forward declaration of FunctionPtr type erasure class.
 // Forward declation of template subclass of FunctionPtr that can be implicitly converted to a function pointer.
 template <typename T, Call Convention = Call::Cdecl>  class FunctorImpl;
 
+// Macro that takes a macro which takes (cvQual, refQual) as args, and invokes it for each combination of qualifiers.
 #define PATCHER_EMIT_PMF_QUALIFIERS($)  $(,&)  $(,&&)  $(const)  $(const, &)  $(const, &&)  \
   $(volatile)  $(volatile, &)  $(volatile, &&)  $(const volatile)  $(const volatile, &)  $(const volatile, &&)
 
@@ -488,6 +491,8 @@ public:
   constexpr Span(const T* pSrc, size_t length)           : pData_(pSrc),             length_(length)      { }
   constexpr Span(std::initializer_list<T> list)          : Span(list.begin(),        list.size())         { }
   template <size_t N>  constexpr Span(const T (&arr)[N]) : Span(&arr[0],             N)                   { }
+  template <size_t N>
+  constexpr Span(const ConstArray<T, N>& arr)            : Span(&arr[0],             arr.Size())          { }
   template <typename U, typename = EnableIf<std::is_same<decltype(std::declval<const U>().data()), const T*>::value>>
   constexpr Span(const U& stlContainer)                  : Span(stlContainer.data(), stlContainer.size()) { }
 
@@ -539,7 +544,7 @@ protected:
 namespace Util {
 /// Cast pointer-to-member-variable to offset in bytes.
 template <typename T, typename U, typename = Impl::EnableIf<std::is_function<U>::value == false>>
-size_t PmvCast(U   T::* pmv, const T* pThis = nullptr) { return PtrDelta(&pThis->*pmv, pThis); }
+size_t PmvCast(U T::* pmv, const T* pThis = nullptr) { return PtrDelta(&pThis->*pmv, pThis); }
 } // Util
 
 
@@ -687,7 +692,9 @@ auto PmfCast(
 
     for (const auto& vcall : Vcalls) {
       auto*const pOperand = PtrInc<uint8*>(cast.pOut, vcall.bytes.Size());
-      if ((memcmp(cast.pOut, &vcall.bytes[0], vcall.bytes.Size()) == 0) && (*pOperand & vcall.operandBase)) {
+      if ((memcmp(cast.pOut, &vcall.bytes[0], vcall.bytes.Size()) == 0) &&
+          ((*pOperand & vcall.operandBase) || (vcall.operandBase == 0)))
+      {
         // We need an object instance to get the vftable pointer, which is typically initialized during the constructor.
         void**const pVftable = GetVftable(pThis);
 
@@ -786,15 +793,16 @@ private:
   bool  relocate_;      ///< Set to true if this is a relocatable address.
 };
 
-/// How many args that are passed via registers which must be skipped, determined by ABI.
+/// @internal  How many args that are passed via registers which must be skipped, determined by ABI.
 constexpr size_t InvokeFunctorNumSkipped = (IsX86_64 && IsMsAbi) ? 4 : (IsX86_64 && IsUnixAbi) ? 6 : 0;
-/// Max number of padded variants of InvokeFunctor(), e.g. InvokeFunctor(...), InvokeFunctor(int, ...), [...]
+/// @internal  Max number of alignment padders that can be passed to an InvokeFunctor() variant.
 constexpr size_t InvokeFunctorMaxPad     = max((PATCHER_DEFAULT_STACK_ALIGNMENT / RegisterSize), 1) - 1;
 
-/// @internal  Function table for invoking functors with varying # of alignment padders and possibly with stack cleanup.
+/// @internal  Function table for invoking functors with varying # of alignment padders and stack cleanup modes.
 struct InvokeFunctorTable {
-  const void* pfnInvokeWithPad[InvokeFunctorMaxPad + 1];
-  const void* pfnInvokeWithPadAndCleanup[InvokeFunctorMaxPad + 1];
+  const void* pfnInvokeWithPad[InvokeFunctorMaxPad+1];           ///< Takes [i] padders at top of stack; caller-cleanup.
+  const void* pfnInvokeWithPadAndCleanup[InvokeFunctorMaxPad+1]; ///< Takes [i] padders at top of stack; callee-cleanup.
+                                                                 ///  Only defined in x86-32 builds.
 };
 
 /// @internal  Helper template for getting the InvokeFunctorTable for a given functor type.
@@ -812,7 +820,8 @@ struct GetInvokeFunctorTable {
   static constexpr InvokeFunctorTable Get()
     { return Get(MakeIndexRange<InvokeFunctorNumSkipped, InvokeFunctorMaxPad + InvokeFunctorNumSkipped + 1>{}); }
 
-  // Use IndexSequence and TypeSequence to generate the InvokeFunctorTable with all possible padding amount variants.
+  // Expands to the InvokeFunctorTable with all possible padding amount variants (using IndexSequence + TypeSequence).
+  // E.g. 0-3 padders expands to &Invoke(...), &Invoke(int, ...), &Invoke(int, int, ...), &Invoke(int, int, int, ...)
   template <size_t... Is>
   static constexpr InvokeFunctorTable Get(IndexSequence<Is...>) {
     return { { ((void*)(&Fn<MakeTypeSequence<int, Is>>::Invoke))...            },
@@ -863,12 +872,12 @@ public:
     pState_ = ((pfnGetTarget != nullptr) && (pObj_ != nullptr)) ? pfnGetTarget(static_cast<Fn*>(pObj_.get())) : nullptr;
   }
 
-  constexpr operator       const void*() const { return pfn_;       }  ///< Implicit pointer conversion, yielding Pfn().
-  constexpr const void*            Pfn() const { return pfn_;       }  ///< Gets a pointer to the underlying function.
-  constexpr const RtFuncSig& Signature() const { return sig_;       }  ///< Gets function call signature information.
-  std::shared_ptr<void>        Functor() const { return pObj_;      }  ///< Gets the functor obj to call with, if any.
-  constexpr void*         FunctorState() const { return pState_;    }  ///< Gets the functor obj internal state data.
-  constexpr auto       InvokerPfnTable() const -> InvokeFunctorTable   ///< Gets the internal functor obj invoker table.
+  constexpr operator       const void*() const { return pfn_;    }    ///< Implicit pointer conversion, yielding Pfn().
+  constexpr const void*            Pfn() const { return pfn_;    }    ///< Gets a pointer to the underlying function.
+  constexpr const RtFuncSig& Signature() const { return sig_;    }    ///< Gets function call signature information.
+  std::shared_ptr<void>        Functor() const { return pObj_;   }    ///< Gets the functor obj to call with, if any.
+  constexpr void*         FunctorState() const { return pState_; }    ///< Gets the functor obj internal state data.
+  constexpr auto       InvokerPfnTable() const -> InvokeFunctorTable  ///< Gets the internal functor obj invoker table.
     { return pfnGetInvokers_ ? pfnGetInvokers_() : InvokeFunctorTable{}; }
 
 private:

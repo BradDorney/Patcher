@@ -116,12 +116,12 @@ public:
   /// @param [in]  pfnTrampolineOffset  (Optional) Offset or pointer-to-member into pfnNewFunction's functor object.
   ///                                   state to pfnTrampoline.  Use SetCapturedTrampoline for the first lambda capture.
   ///
-  /// Examples:  Hook(&Function,   &NewFunction)
-  ///            Hook(0x439AB0,    0x439AF2,                      &global_pfnOriginal)
-  ///            Hook(&Fn,         Util::SetCapturedTrampoline,   [F = (decltype(&Fn))0](int a) { return F(a * 2); })
-  ///            Hook(&StdcallFn,  &Functor::member_pfnOriginal,  Util::StdcallFunctor(Functor{}))
-  ///         ** Hook(&Class::Fn,  &HookClass::Fn,                &HookClass::static_pfnOriginal)
-  ///         ** Hook(&Class::Fn,  Util::ThiscallFunctor([](Class* pThis, int a) { return pThis->b - a; }))
+  ///    @example  Hook(&Function,   &NewFunction)
+  ///    @example  Hook(0x439AB0,    0x439AF2,                      &global_pfnOriginal)
+  ///    @example  Hook(&Fn,         Util::SetCapturedTrampoline,   [F = (decltype(&Fn))0](int a) { return F(a * 2); })
+  ///    @example  Hook(&StdcallFn,  &Functor::member_pfnOriginal,  Util::StdcallFunctor(Functor{}))
+  /// ** @example  Hook(&Class::Fn,  &HookClass::Fn,                &HookClass::static_pfnOriginal)
+  /// ** @example  Hook(&Class::Fn,  Util::ThiscallFunctor([](Class* pThis, int a) { return pThis->b - a; }))
   ///
   /// ** Consider using PATCHER_MFN_PTR(Class::Fn) explicitly, especially for virtual methods.
   PatcherStatus Hook(TargetPtr pAddress, const FunctionPtr& pfnNewFunction, void* pPfnTrampoline = nullptr);
@@ -171,18 +171,23 @@ public:
   ///
   /// @param [in] pAddress   Address of the instruction where to insert the hook.
   /// @param [in] registers  Registers to pass to the hook function.  Can be template-deduced.
-  /// @param [in] pfnHookCb  The hook callable or address to call instead.
-  /// @param [in] info       (Optional) Settings for callback behavior, performance, etc.  Can be template-deduced.
+  /// @param [in] pfnHookCb  The hook callable to call instead.
+  /// @param [in] info       (Optional) Settings for callback behavior, performance, etc.  Some can be template-deduced.
   ///
-  /// Examples:  LowLevelHook(0x402044,  [](Registers::Eax<int>& rw, Esi<bool> r) { ++rw;  return r ? 0 : 0x402046; })
-  ///            LowLevelHook(0x5200AF,  [=](Registers::Esp<int&, 12> stackVar) { stackVar /= someCapturedLocal; })
-  ///            LowLevelHook(0x542080,  { Registers::Register::Eax, Register::Edx },  [](int64& val) { val = -val; })
+  /// @example  LowLevelHook(0x402044,  [](Registers::Eax<int>& rw, Esi<bool> r) { ++rw;  return r ? 0 : 0x402046; })
+  /// @example  LowLevelHook(0x14005200AF,  [=](Registers::Rsp<int64&, 18> stackVar) { stackVar /= someCapturedLocal; })
+  /// @example  LowLevelHook(0x542080,  { Registers::Register::Eax, Register::Edx },  [](int64& val) { val = -val; })
   ///
-  /// Available registers: [Eax, Ecx, Edx, Ebx, Esi, Edi, Ebp, Esp, Eflags].  Arg types must fit within register size.
-  /// To write to registers, declare args with >& or >*, e.g. Eax<int>&, Ecx<int>*, Ebp<char*>&, Edi<int*>*
-  /// To read/write stack values, declare args with Esp<T&, N> or Esp<T*, N>, where N is offset in bytes into the stack.
-  /// Hook must return either void or an address to jump to, where nullptr = original address (addresses within the
-  /// overwritten area are allowed).
+  /// Available registers: [Eax, Ecx, Edx, Ebx, Esi, Edi, Ebp, Esp, Eflags] (x86-32)
+  ///                      [Rax, Rcx, Rdx, Rbx, Rsi, Rdi, Rbp, Rsp, R8, R9, R10, R11, R12, R13, R14, R15, Rflags] (x64)
+  /// To write to registers, declare args with >& or >*, e.g. Eax<int>&, Ecx<int>*, Ebp<char*>&, R15<int64*>*
+  /// To read/write stack values, declare args with Esp<T&, N> or Rsp<T*, N>, where N is offset in bytes into the stack.
+  ///
+  /// Hook must return either void, or an address/pointer to jump to (where 0 or nullptr = original address by default).
+  /// Return addresses within the overwritten area are allowed by default settings.
+  ///
+  /// @note  Extended registers are currently unsupported.  If you need them to be preserved after returning from the
+  ///        hook code, you may need to explicitly use the XSAVE/XRSTOR or similar intrinsics at the beginning and end.
   ///
   /// @warning  This requires 5 bytes at pAddress; if the last 4 bytes overlap any jump targets elsewhere in the module,
   ///           this could crash.
@@ -231,12 +236,12 @@ public:
   /// Injecting exports with the same name or ordinal as existing exports overwrites them.  Otherwise, they are added as
   /// new export entries.  If the export address is nullptr, the entry will be deleted instead.
   ///
-  /// Examples:  EditExports({ { 0x401260, "AddUndecoratedExport" },  { 0x402000, "_AddDecoratedCFastcallExport@8"  } })
-  ///            EditExports({ { 0x404000, 1 /* By ordinal */     },  { nullptr, "?DeleteDecoratedCppExport@@YAXXZ" } })
+  /// @example  EditExports({ { 0x401260, "AddUndecoratedExport" },  { 0x402000, "_AddDecoratedCFastcallExport@8"  } })
+  /// @example  EditExports({ { 0x404000, 1 /* By ordinal */     },  { nullptr, "?DeleteDecoratedCppExport@@YAXXZ" } })
   /// 
   /// @note     32-bit x86 only.
   PatcherStatus EditExports(Span<ExportInfo> exportInfos);
-  
+
   PatcherStatus Memcpy(TargetPtr pAddress, const void* pSrc, size_t size);            ///< Safe memcpy to module memory.
   PatcherStatus Memset(TargetPtr pAddress, uint8      value, size_t count);           ///< Safe memset to module memory.
   template <size_t Size>  PatcherStatus Memcpy(TargetPtr pAddress, const void* pSrc); ///< Safe memcpy w/constexpr size.

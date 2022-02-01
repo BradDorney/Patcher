@@ -27,6 +27,7 @@ using namespace Patcher::Registers;
 
 // Constructing a PatchContext with no args targets the base module.  To target other modules, we could do e.g.
 // PatchContext("user32.dll"), or PatchContext("someDLL.dll", true) to load and hold a reference to the module.
+// We declare this as a function-level static so that the patches get reverted when this module gets unloaded.
 static Patcher::PatchContext patcher;
 
 // Freeze all other process threads to prevent race conditions between patching and executing.
@@ -56,8 +57,8 @@ patcher.HookCall(0x4047A8, [](void* p, size_t l) -> void { memset(p, 0, l); });
 
 // Insert an instruction-level hook which read/writes specified registers and maybe changes control flow via return
 // value.  Note that a return value of 0 or void means return to origin.  Esp<T&, N> references (esp + N) on the stack.
-// In x64 builds, you would specify registers like e.g. Rax<int>, Rsi<bool>&, Rsp<int&, 24>.
-patcher.LowLevelHook(0x518A00, [](Eax<int> readableRegister, Esi<bool>& writableRegister, Esp<int&, 12> stackValue)
+// In x64 builds, you would specify registers like e.g. Rax<int64>, Rsi<bool>&, Rsp<int16&, 24>.
+patcher.LowLevelHook(0x518A00, [](Eax<int> readableRegister, Esi<bool>& writableRegister, Esp<int16&, 12> stackValue)
   { writableRegister = !writableRegister;  return (readableRegister >= stackValue) ? 0 : 0x518B20; });
 
 // Nop out an instruction.

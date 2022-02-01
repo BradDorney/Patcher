@@ -6,9 +6,9 @@ In addition to installing traditional code hooks over whole functions, Patcher i
 
 The interface has a number of conveniences, including: module base relocation is automatically accounted for in target addresses; hook interfaces can take lambdas to help minimize boilerplate in patch code; and reverting any or all patches is simple and is automated via RAII - convenient when using Patcher in a hot-pluggable mod environment.
 
-Currently, only x86-32, MSVC, and Windows are supported; there is experimental support for Clang/GCC/ICC in MS ABI mode. `LowLevelHook` currently only supports standard registers.
+Currently, only x86 (32 and 64-bit), MSVC, and Windows are supported; there is experimental support for Clang/GCC/ICC in MS ABI mode. `LowLevelHook` currently only supports standard registers.
 
-Future updates may include full support for other common compilers and ABIs, patching imports, patching \*nix binaries, extended registers in `LowLevelHook`, x86-64, and possibly ARM.
+Future updates may include full support for other common compilers and ABIs, patching imports, patching \*nix binaries, extended registers in `LowLevelHook`, and possibly ARM.
 
 # Requirements
 
@@ -56,6 +56,7 @@ patcher.HookCall(0x4047A8, [](void* p, size_t l) -> void { memset(p, 0, l); });
 
 // Insert an instruction-level hook which read/writes specified registers and maybe changes control flow via return
 // value.  Note that a return value of 0 or void means return to origin.  Esp<T&, N> references (esp + N) on the stack.
+// In x64 builds, you would specify registers like e.g. Rax<int>, Esi<bool>&, Rsp<int&, 24>.
 patcher.LowLevelHook(0x518A00, [](Eax<int> readableRegister, Esi<bool>& writableRegister, Esp<int&, 12> stackValue)
   { writableRegister = !writableRegister;  return (readableRegister >= stackValue) ? 0 : 0x518B20; });
 

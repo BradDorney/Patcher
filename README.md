@@ -56,7 +56,7 @@ patcher.HookCall(0x4047A8, [](void* p, size_t l) -> void { memset(p, 0, l); });
 
 // Insert an instruction-level hook which read/writes specified registers and maybe changes control flow via return
 // value.  Note that a return value of 0 or void means return to origin.  Esp<T&, N> references (esp + N) on the stack.
-// In x64 builds, you would specify registers like e.g. Rax<int>, Esi<bool>&, Rsp<int&, 24>.
+// In x64 builds, you would specify registers like e.g. Rax<int>, Rsi<bool>&, Rsp<int&, 24>.
 patcher.LowLevelHook(0x518A00, [](Eax<int> readableRegister, Esi<bool>& writableRegister, Esp<int&, 12> stackValue)
   { writableRegister = !writableRegister;  return (readableRegister >= stackValue) ? 0 : 0x518B20; });
 

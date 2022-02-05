@@ -927,7 +927,9 @@ public:
 };
 
 ///@{ @internal  Helper metafunction for implementing register type and by reference deduction for LowLevelHook().
-template <typename    T>  struct GetRegisterInfo : public GetRegisterInfo<typename FuncTraitsNoThis<T>::Params>{};
+template <typename    T>  using  GetRegisterInfoTraits =
+  Conditional<std::is_function<RemoveCvRefPtr<T>>::value, FuncTraits<T>, FuncTraitsNoThis<T>>;
+template <typename    T>  struct GetRegisterInfo : public GetRegisterInfo<typename GetRegisterInfoTraits<T>::Params>{};
 template <typename... A>  struct GetRegisterInfo<std::tuple<A...>> {
   template <typename T>
   static constexpr bool IsRefPtr() { return (std::is_pointer<T>::value || std::is_reference<T>::value); }

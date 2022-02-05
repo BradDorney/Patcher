@@ -266,6 +266,7 @@ template <bool B, class T = void>    using EnableIf       = typename std::enable
 template <typename... T>             using ToVoid         = void;
 template <bool B, class T, class F>  using Conditional    = typename std::conditional<B, T, F>::type;
 template <typename T>                using TypeStorage    = typename std::aligned_storage<sizeof(T), alignof(T)>::type;
+template <typename... Ts>            using CommonType     = typename std::common_type<Ts...>::type;
 template <typename T, size_t N>      using Array          = T[N];
 
 template <size_t N, typename T, typename = void>  struct TupleElementImpl { typedef struct NotFound{} Type; };
@@ -305,6 +306,13 @@ template <size_t Begin, size_t End>   using MakeIndexRange    = MakeSeqRange<siz
 /// @internal  Makes a homogenous TypeSequence of Length elements.
 template <typename T, size_t Length>
 using MakeTypeSequence = typename MakeTypeSeqImpl<MakeIndexSequence<Length>, T>::Type;
+
+/// @internal  Returns the larger of a or b.
+template <typename T, typename U, typename V = CommonType<T, U>>
+constexpr V Max(const T& a, const U& b) { return (V(a) > V(b)) ? a : b; }
+/// @internal  Returns the smaller of a or b.
+template <typename T, typename U, typename V = CommonType<T, U>>
+constexpr V Min(const T& a, const U& b) { return (V(a) < V(b)) ? a : b; }
 
 ///@{ @internal  Template metafunction used to obtain function call signature information from a callable.
 template <typename T, typename = void>  struct FuncTraitsImpl   :   public FuncTraitsImpl<decltype(&T::operator())>{};
@@ -796,7 +804,7 @@ private:
 /// @internal  How many args that are passed via registers which must be skipped, determined by ABI.
 constexpr size_t InvokeFunctorNumSkipped = (IsX86_64 && IsMsAbi) ? 4 : (IsX86_64 && IsUnixAbi) ? 6 : 0;
 /// @internal  Max number of alignment padders that can be passed to an InvokeFunctor() variant.
-constexpr size_t InvokeFunctorMaxPad     = max((PATCHER_DEFAULT_STACK_ALIGNMENT / RegisterSize), 1) - 1;
+constexpr size_t InvokeFunctorMaxPad     = Max((PATCHER_DEFAULT_STACK_ALIGNMENT / RegisterSize), 1) - 1;
 
 /// @internal  Function table for invoking functors with varying # of alignment padders and stack cleanup modes.
 struct InvokeFunctorTable {

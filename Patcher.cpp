@@ -146,7 +146,7 @@ constexpr uint32 CodeAlignment            = 16;
 // Max instruction size on modern x86 is 15 bytes.
 constexpr uint32 MaxInstructionSize       = 15;
 // Copied instructions sometimes need to be translated to multiple instructions, which requires extra space.
-constexpr uint32 MaxCopiedInstructionSize = max(MaxInstructionSize, sizeof(CallAbs));
+constexpr uint32 MaxCopiedInstructionSize = Max(MaxInstructionSize, sizeof(CallAbs));
 // Worst-case scenario is the last byte overwritten being the start of a MaxInstructionSize-sized instruction.
 constexpr uint32 MaxOverwriteSize         = (IsX86_64 ? sizeof(JmpAbs) : sizeof(Jmp32)) + MaxInstructionSize - 1;
 
@@ -157,7 +157,7 @@ constexpr uint32 MaxFunctorThunkSize  = Align(IsX86_64 ? 64  : 32,  CodeAlignmen
 // Number of extra args needed to call FunctionPtr::InvokeFunctor().
 constexpr uint32 InvokeFunctorNumArgs = 2;
 // Max size in bytes far jump thunk code is expected to require.
-constexpr uint32 FarThunkSize         = Align(uint32(max(sizeof(JmpAbs), MaxFunctorThunkSize)), CodeAlignment);
+constexpr uint32 FarThunkSize         = Align(uint32(Max(sizeof(JmpAbs), MaxFunctorThunkSize)), CodeAlignment);
 
 constexpr uint32 OpenThreadFlags =
   (THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_SET_CONTEXT | THREAD_QUERY_INFORMATION | THREAD_SET_INFORMATION);
@@ -532,14 +532,14 @@ void PatchContext::InitModule() {
         CreateFileW(&path[0], GENERIC_READ, ShareFlags, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_READONLY, NULL);
 
       if ((hFile != NULL) && (hFile != INVALID_HANDLE_VALUE)) {
-        uint8 buf[max(sizeof(IMAGE_NT_HEADERS), sizeof(IMAGE_NT_HEADERS64))];
+        uint8 buf[Max(sizeof(IMAGE_NT_HEADERS), sizeof(IMAGE_NT_HEADERS64))];
         DWORD numRead = 0;
 
         if ((SetFilePointer(hFile, pDosHeader->e_lfanew, nullptr, FILE_BEGIN) != INVALID_SET_FILE_POINTER) &&
             ReadFile(hFile, &buf[0], sizeof(buf), &numRead, nullptr)                                       &&
             (numRead >= sizeof(buf)))
         {
-          const auto& peHeader = *reinterpret_cast<IMAGE_NT_HEADERS*>(buf);
+          const auto& peHeader = *reinterpret_cast<IMAGE_NT_HEADERS*>(&buf[0]);
           if (peHeader.OptionalHeader.Magic == IMAGE_NT_OPTIONAL_HDR32_MAGIC) {
             moduleRelocDelta_ = PtrDelta(hModule_, reinterpret_cast<const void*>(peHeader.OptionalHeader.ImageBase));
             status_ = Status::Ok;
@@ -703,7 +703,7 @@ Status PatchContext::WriteNop(
   const uint32 oldAttr = BeginDeProtect(pAddress, size);
 
   if (status_ == Status::Ok) {
-    for (size_t remain = size, copySize; (copySize = min(ArrayLen(NopTable), remain)) != 0; remain -= copySize) {
+    for (size_t remain = size, copySize; (copySize = Min(ArrayLen(NopTable), remain)) != 0; remain -= copySize) {
       memcpy(PtrInc(pAddress, (remain - copySize)), &NopTable[copySize - 1], copySize);
     }
     EndDeProtect(pAddress, size, oldAttr);
@@ -1199,7 +1199,7 @@ static bool CreateFunctorThunk(
   for (uint32 i = 0; i < sig.numParams; (sig.pParamSizes[i++] <= RegisterSize) ? ++numRegisterSizeParams : 0);
 
   auto GetNumAlignmentPadders = [numRegisterSizeParams](size_t maxNumRegisterArgs = 0) {
-    const size_t numExtraArgs = min(numRegisterSizeParams, maxNumRegisterArgs);
+    const size_t numExtraArgs = Min(numRegisterSizeParams, maxNumRegisterArgs);
     return InvokeFunctorMaxPad - ((InvokeFunctorNumArgs + numExtraArgs - 1) & InvokeFunctorMaxPad);
   };
 
@@ -1237,7 +1237,7 @@ static bool CreateFunctorThunk(
 
   // Push args originally passed via registers to the stack.
   auto PushArgRegisters = [&writer, numRegisterSizeParams](Span<Register> registers)
-    { for (size_t i = min(numRegisterSizeParams, registers.Length()); i > 0; writer.Push(registers[--i])); };
+    { for (size_t i = Min(numRegisterSizeParams, registers.Length()); i > 0; writer.Push(registers[--i])); };
 
   switch (sig.convention) {
 #if PATCHER_X86_32
@@ -1279,7 +1279,7 @@ static bool CreateFunctorThunk(
     // We need to pop the old return address (and the shadow space if MS ABI) before we can push our args.
     const size_t numAlignmentPadders        = GetNumAlignmentPadders(InvokeFunctorNumSkipped);
     const uint8 popOldRetnAddrAndRegArgSize =
-      uint8((1 + min(numRegisterSizeParams, InvokeFunctorNumSkipped)) * RegisterSize);
+      uint8((1 + Min(numRegisterSizeParams, InvokeFunctorNumSkipped)) * RegisterSize);
     const uint8 totalPopSize      = uint8(PopSize + (numAlignmentPadders * RegisterSize) + popOldRetnAddrAndRegArgSize);
     const uint8 oldRetnAddrOffset = uint8(int8((IsMsAbi ? (RegisterSize * 4) : 0) - popOldRetnAddrAndRegArgSize));
 
@@ -1990,7 +1990,7 @@ static size_t CreateLowLevelHookTrampoline(
   const bool saveFlags     = (settings.noRestoreFlagsReg == false);
 
   // The x64 calling convention passes the first 4 arguments via registers in MS ABI, or the first 6 in Unix ABI.
-  const size_t numPassedViaRegisters = (IsX86_32 || isFunctor) ? 0 : min(registers.Length(), ArrayLen(ArgRegisters));
+  const size_t numPassedViaRegisters = (IsX86_32 || isFunctor) ? 0 : Min(registers.Length(), ArrayLen(ArgRegisters));
 
   // Scratch space reserved on the stack first that can be used to store temporary data, which is mainly used to avoid
   // issues where we'd otherwise reference invalidated stack memory (we assume there is no "red zone" below the stack).
@@ -2067,7 +2067,7 @@ static size_t CreateLowLevelHookTrampoline(
 
       if (spareRegister != Register::Count) {
         // We have a spare register we can use.
-        // If not fromOrigin, set it to (esp + addend). Otherwise, set it to set it to (*(esp + originOffset) + addend).
+        // If not fromOrigin, set it to (esp + addend).  Otherwise, set it to (*(esp + originOffset) + addend).
         const uint32 regIdx = uint32(spareRegister);
 #if PATCHER_X86_32                            // Eax:  Ecx:  Edx:  Ebx:  Esi:  Edi:
         static constexpr uint8 SetOperands[] = { 0x44, 0x4C, 0x54, 0x5C, 0x74, 0x7C };
@@ -2306,9 +2306,8 @@ static size_t CreateLowLevelHookTrampoline(
       // If we're restoring the stack pointer: the return address to either scratch[0], or if it's been changed, to just
       // below what the SP will be; and save the new SP (with space reserved for return address) to near end of scratch,
       // unless it's the last arg to pop.  Warning: if new SP is below its original value, we could clobber our stack!
-      const uint8 scratchOffset  =
-        uint8((RegisterSize * (stackRegisters.size() - ((stackRegIndex == 0) ? 3 : 2))) + ScratchSpaceSize);
       const uint8 stackValOffset = uint8(RegisterSize * (stackRegisters.size() - stackRegIndex - 1));
+      const uint8 scratchOffset  = (stackRegIndex == 0) ? stackValOffset : uint8(RegisterSize * stackRegisters.size());
       writer.Bytes({ IF_X86_64(0x48,) 0x8B, 0x4C, 0x24, stackValOffset,       // mov ecx, dword ptr [esp + i8]  ** TODO x64 need i32?
                      IF_X86_64(0x48,) 0x8D, 0x49, uint8(-int8(RegisterSize)), // lea ecx, [ecx - 4]  (-4 for retn addr)
                      IF_X86_64(0x48,) 0x89, 0x01,                             // mov dword ptr [ecx], eax

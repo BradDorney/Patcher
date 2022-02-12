@@ -59,19 +59,11 @@ constexpr size_t SetCapturedTrampoline = 0;
 ///   This can be passed to PatchContext methods, be used as a callable, and implicitly converts to a function pointer.
 ///   If created from a non-empty type, then the returned FunctionPtr needs to be kept alive or referenced by a patch.
 #define PATCHER_CREATE_FUNCTOR_INVOKER_DEF(convention, name)  template <typename T>  \
-Impl::FunctorImpl<T, Call::name> name##Functor(T&& f) { return Impl::FunctorImpl<T, Call::name>(std::forward<T>(f)); }
+Impl::FunctorRef<T, Call::name> name##Functor(T&& f) { return Impl::FunctorRef<T, Call::name>(std::forward<T>(f)); }
 template <Call C = Call::Default, typename T = void>
-Impl::FunctorImpl<T, C>                Functor(T&& f) { return Impl::FunctorImpl<T, C>(std::forward<T>(f));          }
+Impl::FunctorRef<T, C>                Functor(T&& f) { return Impl::FunctorRef<T, C>(std::forward<T>(f));          }
 PATCHER_EMIT_CALLING_CONVENTIONS(PATCHER_CREATE_FUNCTOR_INVOKER_DEF);
 ///@}
-
-
-/// Cast pointer-to-member-function to a standard pointer-to-function using the thiscall convention.
-/// @note  If not compiling using GCC or ICC, for virtual PMFs, either an object instance must be provided, or a dummy
-///        object instance will be attempted to be created (may be unsafe!).  Class cannot multiply inherit.
-/// @see   PATCHER_MFN_PTR() macro, which is more robust for certain compilers and more reliable for virtual methods.
-template <typename T, typename Pfn>
-auto PmfCast(Pfn T::* pmf, const T* pThis = nullptr) -> typename Impl::FuncTraits<decltype(pmf)>::Pfn;
 } // Util
 
 
@@ -94,6 +86,9 @@ struct LowLevelHookInfo {
 
   Impl::TargetPtr pDefaultReturnAddr; ///< If set, overrides the default return address when callback returns nullptr or
                                       ///  void.  Otherwise, the default return address will be to the original code.
+
+  uint32 reserveStackSize;  ///< Size in bytes of extra stack space to reserve.  Set this if you intend to modify ESP to
+                            ///  allocate space on the stack (up to a maximum of the specified size).
 };
 
 namespace Impl {

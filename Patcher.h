@@ -49,7 +49,7 @@ class PatchContext {
 public:
   template <typename T>  using Span = Impl::Span<T>;
   using TargetPtr   = Impl::TargetPtr;
-  using FunctionPtr = Impl::FunctionPtr;
+  using FunctionRef = Impl::FunctionRef;
   using Offset      = Impl::Offset;
   using Register    = Registers::Register;
 
@@ -88,11 +88,11 @@ public:
   ///@}
 
   /// Writes the given value to module memory.
-  template <typename T, typename = Impl::EnableIf<std::is_base_of<FunctionPtr, T>::value == false>>
+  template <typename T, typename = Impl::EnableIf<std::is_base_of<FunctionRef, T>::value == false>>
   PatcherStatus Write(TargetPtr pAddress, const T& value) { return Memcpy<sizeof(T)>(pAddress, &value); }
 
-  /// Writes the given FunctionPtr address to module memory.
-  PatcherStatus Write(TargetPtr pAddress, const FunctionPtr& pfnNewFunction);
+  /// Writes the given FunctionRef address to module memory.
+  PatcherStatus Write(TargetPtr pAddress, const FunctionRef& pfnNewFunction);
 
   /// Writes the given bytes to module memory.
   PatcherStatus WriteBytes(TargetPtr pAddress, Span<uint8> bytes)
@@ -124,17 +124,17 @@ public:
   /// ** @example  Hook(&Class::Fn,  Util::ThiscallFunctor([](Class* pThis, int a) { return pThis->b - a; }))
   ///
   /// ** Consider using PATCHER_MFN_PTR(Class::Fn) explicitly, especially for virtual methods.
-  PatcherStatus Hook(TargetPtr pAddress, const FunctionPtr& pfnNewFunction, void* pPfnTrampoline = nullptr);
+  PatcherStatus Hook(TargetPtr pAddress, const FunctionRef& pfnNewFunction, void* pPfnTrampoline = nullptr);
 
   template <typename T>
-  PatcherStatus Hook(TargetPtr pAddress, const FunctionPtr& pfnNewFunction, T** pPfnTrampoline)
+  PatcherStatus Hook(TargetPtr pAddress, const FunctionRef& pfnNewFunction, T** pPfnTrampoline)
     { return Hook(pAddress, pfnNewFunction, static_cast<void*>(pPfnTrampoline)); }
 
   template <typename T = void>
   PatcherStatus Hook(TargetPtr pAddress, uintptr toAddress, T** pPfnTrampoline = nullptr)
     { return Hook(pAddress, FixPtr(toAddress), static_cast<void*>(pPfnTrampoline)); }
 
-  PatcherStatus Hook(TargetPtr pAddress, Offset pfnTrampolineOffset, const FunctionPtr& pfnNewFunction) {
+  PatcherStatus Hook(TargetPtr pAddress, Offset pfnTrampolineOffset, const FunctionRef& pfnNewFunction) {
     void*const pState = pfnNewFunction.FunctorState();
     return Hook(pAddress, pfnNewFunction, (pState == nullptr) ? nullptr : Util::PtrInc(pState, pfnTrampolineOffset));
   }
@@ -150,17 +150,17 @@ public:
   ///                                 state to pfnOriginal.  Use SetCapturedTrampoline for the first lambda capture.
   ///
   /// @see   Comments of @ref Hook for examples, which has similar usage.
-  PatcherStatus HookCall(TargetPtr pAddress, const FunctionPtr& pfnNewFunction, void* pPfnOriginal = nullptr);
+  PatcherStatus HookCall(TargetPtr pAddress, const FunctionRef& pfnNewFunction, void* pPfnOriginal = nullptr);
 
   template <typename T>
-  PatcherStatus HookCall(TargetPtr pAddress, const FunctionPtr& pfnNewFunction, T** pPfnOriginal)
+  PatcherStatus HookCall(TargetPtr pAddress, const FunctionRef& pfnNewFunction, T** pPfnOriginal)
     { return HookCall(pAddress, pfnNewFunction, static_cast<void*>(pPfnOriginal)); }
 
   template <typename T = void>
   PatcherStatus HookCall(TargetPtr pAddress, uintptr toAddress, T** pPfnOriginal = nullptr)
     { return HookCall(pAddress, FixPtr(toAddress), static_cast<void*>(pPfnOriginal)); }
 
-  PatcherStatus HookCall(TargetPtr pAddress, Offset pfnOriginalOffset, const FunctionPtr& pfnNewFunction) {
+  PatcherStatus HookCall(TargetPtr pAddress, Offset pfnOriginalOffset, const FunctionRef& pfnNewFunction) {
     void*const pState = pfnNewFunction.FunctorState();
     return HookCall(pAddress, pfnNewFunction, (pState == nullptr) ? nullptr : Util::PtrInc(pState, pfnOriginalOffset));
   }
@@ -192,16 +192,16 @@ public:
   /// @warning  This requires 5 bytes at pAddress; if the last 4 bytes overlap any jump targets elsewhere in the module,
   ///           this could crash.
   PatcherStatus LowLevelHook(
-    TargetPtr pAddress, Span<RegisterInfo> registers, const FunctionPtr& pfnHookCb, const LowLevelHookInfo& info = {});
+    TargetPtr pAddress, Span<RegisterInfo> registers, const FunctionRef& pfnHookCb, const LowLevelHookInfo& info = {});
   ///< Insert a low-level hook with a callback function that takes RegisterArgs or no args.
-  template <typename T, typename Enable = decltype(FunctionPtr(std::declval<T>()))>
+  template <typename T, typename Enable = decltype(FunctionRef(std::declval<T>()))>
   PatcherStatus LowLevelHook(TargetPtr pAddress, T&& pfnHookCb, LowLevelHookInfo info = {}) {
     Impl::DeduceLowLevelHookSettings(info, Impl::FuncTraits<T>{});
     return LowLevelHook(pAddress, Impl::GetRegisterInfo<T>::Info, std::forward<T>(pfnHookCb), info);
   }
   ///< Insert a low-level hook with a callback function that takes a struct pointer or reference as a single parameter.
   // ** TODO use SFINAE to clarify disambiguation between this LowLevelHook overload and the non-templated one
-  template <typename T, typename Enable = decltype(FunctionPtr(std::declval<T>()))>
+  template <typename T, typename Enable = decltype(FunctionRef(std::declval<T>()))>
   PatcherStatus LowLevelHook(TargetPtr pAddress, Span<Register> registers, T&& pfnHookCb, LowLevelHookInfo info = {}) {
     Impl::DeduceLowLevelHookSettings(info, Impl::FuncTraits<T>{}).argsAsStructPtr = 1;
     std::vector<RegisterInfo> registerInfos;
@@ -210,13 +210,15 @@ public:
   }
   ///@}
 
-  ///@{ Replaces all static, direct pointer references to a global by scanning the module's .reloc section for any
-  ///   references to it.
+  ///@{ Replaces all static, direct pointer references to a global.  Note that this only affects hardcoded pointers, not
+  ///   ones that have already been dynamically assigned at runtime; therefore this should be used as early as possible.
   ///
   /// @param [in]  pOldGlobal  Pointer to the old global we want to replace.
   /// @param [in]  size        Size in bytes of the old global.
   /// @param [in]  pNewGlobal  Pointer to the new global we want to replace all references to pOldGlobal with.
   /// @param [out] pRefsOut    (Optional) Pointer to a vector to contain all locations that have been patched up.
+  /// 
+  /// @note If the module's .reloc section has been stripped (mainly only seen in some older exe files), this will fail.
   PatcherStatus ReplaceReferencesToGlobal(
     TargetPtr pOldGlobal, size_t size, const void* pNewGlobal, std::vector<void*>* pRefsOut = nullptr);
   template <typename T>
@@ -239,7 +241,7 @@ public:
   /// @example  EditExports({ { 0x401260, "AddUndecoratedExport" },  { 0x402000, "_AddDecoratedCFastcallExport@8"  } })
   /// @example  EditExports({ { 0x404000, 1 /* By ordinal */     },  { nullptr, "?DeleteDecoratedCppExport@@YAXXZ" } })
   /// 
-  /// @note     32-bit x86 only.
+  /// @note  32-bit x86 only.
   PatcherStatus EditExports(Span<ExportInfo> exportInfos);
 
   PatcherStatus Memcpy(TargetPtr pAddress, const void* pSrc, size_t size);            ///< Safe memcpy to module memory.

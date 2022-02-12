@@ -32,10 +32,8 @@
 #include <tlhelp32.h>
 
 #include <algorithm>
-#include <utility>
 #include <limits>
 #include <mutex>
-#include <memory>
 
 #include <unordered_set>
 #include <map>
@@ -62,6 +60,11 @@ using namespace Registers;
 #define PATCHER_PACK_STRUCT      PATCHER_PRAGMA(pack(push, 1))
 #define PATCHER_END_PACK_STRUCT  PATCHER_PRAGMA(pack(pop))
 
+#if PATCHER_X86_32
+# define IF_X86_32(...)  __VA_ARGS__
+#else
+# define IF_X86_32(...)
+#endif
 #if PATCHER_X86_64
 # define IF_X86_64(...)  __VA_ARGS__
 #else
@@ -86,7 +89,7 @@ using Op1_4  = Op<1, uint32>;
 using Op2_4  = Op<2, uint32>;
 using Op1_8  = Op<1, uint64>;
 using Op2_8  = Op<2, uint64>;
-using Jmp8   = Op<1, int8,  0xEB>; // Opcodes: 0xEB (unconditional), 0x7* & 0xE0-E3 (conditional)
+using Jmp8   = Op<1, int8,  0xEB>;  // Opcodes: 0xEB (unconditional), 0x7* & 0xE0-E3 (conditional)
 using Jmp32  = Op<1, int32, 0xE9>;
 using Call32 = Op<1, int32, 0xE8>;
 
@@ -94,30 +97,31 @@ struct Loop32 {
   constexpr Loop32(uint8 loopOpcode, int32 displacement)  // Opcodes: 0xE0-E3 (jecx, loop*)
     : loop{ loopOpcode, sizeof(ifFalse) }, ifFalse{ 0xEB, sizeof(ifTrue) }, ifTrue{ 0xE9, displacement } { }
 
-  Jmp8  loop;     // (jecx/loop*) 2 (go to Jmp32 if true)
-  Jmp8  ifFalse;  // jmp 2 (skip Jmp32 if false)
+  Jmp8  loop;     // (jecx/loop*) 2  (Go to Jmp32 if true)
+  Jmp8  ifFalse;  // jmp 2           (Skip Jmp32 if false)
   Jmp32 ifTrue;
 };
 
 struct JmpAbs {
 #if PATCHER_X86_32
-  constexpr JmpAbs(uintptr address) : pushLowDword{ 0x68, address }, retn(0xC3) { }
-#else
-  constexpr JmpAbs(uintptr address)
-    : pushHighDword{ 0x68, address >> 32u }, pushLowDword{ 0x68, address & UINT32_MAX }, retn(0xC3) { }
+  constexpr JmpAbs(uintptr address) : push{ 0x68, address }, retn(0xC3) { }
 
-  Op1_4 pushHighDword;
+  Op1_4 push;  // push address
+  uint8 retn;  // retn          (Note: return branch misprediction penalty)
+#else
+  constexpr JmpAbs(uintptr address) : jmp{ { 0xFF, 0x25 }, 0 }, address(address) { }
+
+  Op2_4   jmp;      // jmp qword ptr [rip + 0]
+  uintptr address;
 #endif
-  Op1_4 pushLowDword;
-  uint8 retn;
 };
 
 struct JccAbs {
   constexpr JccAbs(uint8 jcc8Opcode, uintptr address)  // Opcodes: 0x7* & 0xE0-E3
     : jcc{ jcc8Opcode, sizeof(ifFalse) }, ifFalse{ 0xEB, sizeof(ifTrue) }, ifTrue(address) { }
 
-  Jmp8   jcc;      // jcc 2 (go to JmpAbs if true)
-  Jmp8   ifFalse;  // jmp 2 (skip JmpAbs if false)
+  Jmp8   jcc;      // jcc 2  (Go to JmpAbs if true)
+  Jmp8   ifFalse;  // jmp 2  (Skip JmpAbs if false)
   JmpAbs ifTrue;
 };
 
@@ -126,13 +130,13 @@ struct CallAbs {
 #if PATCHER_X86_32
     : pushRetnPtr{ 0xE8, 0 }, adjustRetnPtr{ 0x83, 0x04, 0x24, sizeof(CallAbs) - sizeof(pushRetnPtr) }, jmp(address) { }
 
-  Call32 pushRetnPtr;       // call 0          (push return pointer (eip + sizeof(Call32)))
-  uint8  adjustRetnPtr[4];  // add  [esp], 10  (adjust return pointer to be after jmp)
-  JmpAbs jmp;
+  Call32 pushRetnPtr;       // call 0                    (Push return pointer (eip + sizeof(Call32)))
+  uint8  adjustRetnPtr[4];  // add  dword ptr [esp], 10  (Adjust return pointer to be after jmp)
+  JmpAbs jmp;               //                           (Note: return branch misprediction penalty)
 #else
     : call{ { 0xFF, 0x15 }, sizeof(Jmp8) }, skipAddressData{ 0xEB, sizeof(address) }, address(address) { }
 
-  Op2_4   call;             // call [rip + 2]
+  Op2_4   call;             // call qword ptr [rip + 2]
   Jmp8    skipAddressData;  // jmp  8
   uintptr address;
 #endif
@@ -146,7 +150,7 @@ constexpr uint32 CodeAlignment            = 16;
 // Max instruction size on modern x86 is 15 bytes.
 constexpr uint32 MaxInstructionSize       = 15;
 // Copied instructions sometimes need to be translated to multiple instructions, which requires extra space.
-constexpr uint32 MaxCopiedInstructionSize = Max(MaxInstructionSize, sizeof(CallAbs));
+constexpr uint32 MaxCopiedInstructionSize = uint32(Max(Max(MaxInstructionSize, sizeof(JccAbs)), sizeof(CallAbs)));
 // Worst-case scenario is the last byte overwritten being the start of a MaxInstructionSize-sized instruction.
 constexpr uint32 MaxOverwriteSize         = (IsX86_64 ? sizeof(JmpAbs) : sizeof(Jmp32)) + MaxInstructionSize - 1;
 
@@ -154,7 +158,7 @@ constexpr uint32 MaxOverwriteSize         = (IsX86_64 ? sizeof(JmpAbs) : sizeof(
 constexpr uint32 MaxLowLevelHookSize  = Align(IsX86_64 ? 200 : 160, CodeAlignment);
 // Max size in bytes functor thunk code is expected to require.
 constexpr uint32 MaxFunctorThunkSize  = Align(IsX86_64 ? 64  : 32,  CodeAlignment);
-// Number of extra args needed to call FunctionPtr::InvokeFunctor().
+// Number of extra args needed to call FunctionRef::InvokeFunctor().
 constexpr uint32 InvokeFunctorNumArgs = 2;
 // Max size in bytes far jump thunk code is expected to require.
 constexpr uint32 FarThunkSize         = Align(uint32(Max(sizeof(JmpAbs), MaxFunctorThunkSize)), CodeAlignment);
@@ -184,8 +188,7 @@ constexpr bool IsAligned(T value, size_t align) { return ((value & static_cast<T
 static bool IsPtrAligned(const void* ptr, size_t align) { return IsAligned(reinterpret_cast<uintptr>(ptr), align); }
 
 // Returns true if a (program counter-relative) displacement is larger than 32-bit signed addressing.
-constexpr bool IsFarDisplacement(ptrdiff_t displacement)
-  { return IsX86_64 && ((displacement > INT32_MAX) || (displacement < INT32_MIN)); }
+constexpr bool IsFarDisplacement(ptrdiff_t displacement) { return IsX86_64 && (displacement != int32(displacement)); }
 
 // Calculates a hash using std::hash.
 template <typename T>  static size_t Hash(const T& src) { return std::hash<T>()(src); }
@@ -203,43 +206,71 @@ static void AppendString(char** ppWriter, const char*       pSrc)
 static void AppendString(char** ppWriter, const std::string& src)
   { const size_t length = (src.length() + 1);  strcpy_s(*ppWriter, length, src.data());  *ppWriter += length; }
 
-// Helper class to append data, typically machine code instructions, to a buffer.
-class Writer {
+// A very basic assembler class.  Writes machine code instructions to a given buffer.
+class Assembler {
 public:
-  Writer(void* pBuffer) : pBuffer_(pBuffer), pWriter_(static_cast<uint8*>(pBuffer)) { }
+  Assembler(void* pBuffer) : pBuffer_(pBuffer), pWriter_(static_cast<uint8*>(pBuffer)) { }
 
-  Writer& Byte(uint8 byte)                   { (pWriter_++)[0] = byte;                   return *this; }
-  Writer& ByteIf(bool condition, uint8 byte) { if (condition) { Byte(byte); }            return *this; }
-  Writer& Bytes(Span<uint8> bytes) 
-    { std::copy(bytes.begin(), bytes.end(), pWriter_);  pWriter_ += bytes.Length();      return *this; }
-  Writer& BytesIf(bool condition, Span<uint8> bytes) { if (condition) { Bytes(bytes); }  return *this; }
+  Assembler& Byte(uint8 byte)                   { (pWriter_++)[0] = byte;                   return *this; }
+  Assembler& ByteIf(bool condition, uint8 byte) { if (condition) { Byte(byte); }            return *this; }
+  Assembler& Bytes(Span<uint8> bytes) 
+    { std::copy(bytes.begin(), bytes.end(), pWriter_);  pWriter_ += bytes.Length();         return *this; }
+  Assembler& BytesIf(bool condition, Span<uint8> bytes) { if (condition) { Bytes(bytes); }  return *this; }
+
+  Assembler& Memset(uint8 value, size_t size) { memset(pWriter_, value, size);  pWriter_ += size;  return *this; }
 
   template <typename T, typename = EnableIf<std::is_trivially_copyable<T>::value>>
-  Writer& Value(const T& value) { memcpy(pWriter_, &value, sizeof(T));  pWriter_ += sizeof(T);  return *this; }
+  Assembler& Value(const T& value) { memcpy(pWriter_, &value, sizeof(T));  pWriter_ += sizeof(T);  return *this; }
 
   template <size_t OpcodeSize, typename OperandType, uint8... DefaultOpcode>
-  Writer& Op(const Patcher::Op<OpcodeSize, OperandType, DefaultOpcode...>& op) { Value(op);     return *this; }
+  Assembler& Op(const Patcher::Op<OpcodeSize, OperandType, DefaultOpcode...>& op) { Value(op);     return *this; }
 
-  Writer& Push(Register reg) { return Bytes(PushInsns[size_t(reg)]); }
-  Writer& Pop(Register  reg) { return Bytes(PopInsns[size_t(reg)]);  }
-
-  Writer& PopNil(int8 count = 1) {
-    // Use lea instead of add to avoid clobbering flags.
-    constexpr uint8 SkipPop[] = { IF_X86_64(0x48,) 0x8D, 0x64, 0x24, 0x00 };  // lea esp, [esp + i8]
-    assert(count <= (INT8_MAX / RegisterSize));
-    const int8 skipSize = (count * RegisterSize);
-    // Combine adjacent skips, otherwise write a new instruction.
-    if ((GetPosition() < sizeof(SkipPop))                                                   ||
-        (memcmp(&SkipPop[0], &pWriter_[-int32(sizeof(SkipPop))], sizeof(SkipPop) - 1) != 0) ||
-        ((pWriter_[-1] + skipSize) > INT8_MAX))
-    {
-      Value(SkipPop);
+  Assembler& Nop(size_t size = 1) {
+    for (size_t remain = size, copySize; (copySize = Min(ArrayLen(NopTable), remain)) != 0; remain -= copySize) {
+      memcpy(PtrInc(pWriter_, (remain - copySize)), &NopTable[copySize - 1], copySize);
     }
-    pWriter_[-1] += skipSize;
+    pWriter_ += size;
     return *this;
   }
 
-  Writer& Memset(uint8 value, size_t size) { memset(pWriter_, value, size);  pWriter_ += size;  return *this; }
+  Assembler& Push(Register reg) { return Bytes(PushInsns[size_t(reg)]); }
+  Assembler& Pop(Register  reg) { return Bytes(PopInsns[size_t(reg)]);  }
+
+  Assembler& PopNil(int32 count = 1) {
+    // Use lea instead of add to avoid clobbering flags.
+    if (count <= (INT8_MAX / RegisterSize)) {
+      constexpr uint8 SkipPop[] = { IF_X86_64(0x48,) 0x8D, 0x64, 0x24, 0x00 };  // lea esp, [esp + i8]
+      const int8 skipSize = int8(count * RegisterSize);
+      // Combine adjacent skips, otherwise write a new instruction.
+      if ((GetPosition() < sizeof(SkipPop))                                                   ||
+          (memcmp(&SkipPop[0], &pWriter_[-int32(sizeof(SkipPop))], sizeof(SkipPop) - 1) != 0) ||
+          ((pWriter_[-1] + skipSize) > INT8_MAX))
+      {
+        Value(SkipPop);
+      }
+      pWriter_[-1] += skipSize;
+    }
+    else {
+      Add(IF_X86_32(Register::Esp) IF_X86_64(Register::Rsp), (count * RegisterSize));
+    }
+    return *this;
+  }
+
+  Assembler& Add(Register reg, int32 value) {
+    if (value != 0) {
+      // Use lea instead of add to avoid clobbering flags.
+      const bool  valueIs8Bit = (value == int8(value));
+      const uint8 addOperand  = uint8(AddOperands[uint32(reg)] + (valueIs8Bit ? 0 : 0x40));
+      Bytes({ IF_X86_64(uint8((reg < Register::R8) ? 0x48 : 0x4D),) 0x8D, addOperand });  // lea reg, [reg + value]
+      ByteIf(IF_X86_32(reg == Register::Esp) IF_X86_64((reg == Register::Rsp) || (reg == Register::R12)), 0x24);
+      valueIs8Bit ? Value(int8(value)) : Value(value);
+    }
+    return *this;
+  }
+
+  Assembler& LoadStackValue(Register   reg, int32 off) { return MovStack(0x8B, reg, off); } // mov reg, [esp + off]
+  Assembler& LoadStackAddress(Register reg, int32 off) { return MovStack(0x8D, reg, off); } // lea reg, [esp + off]
+  Assembler& StoreStackValue(Register  reg, int32 off) { return MovStack(0x89, reg, off); } // mov [esp + off], reg
 
   uint8& operator[](ptrdiff_t index) { return pWriter_[index]; }
 
@@ -253,9 +284,11 @@ public:
 
 private:
   using Insn = ConstArray<uint8, IsX86_64 ? 2 : 1>;
-#if PATCHER_X86_32  //                   Eax:    Ecx:    Edx:    Ebx:    Esi:    Edi:    Ebp:    Esp:    Eflags:
-  static constexpr Insn PushInsns[] = { {0x50}, {0x51}, {0x52}, {0x53}, {0x56}, {0x57}, {0x55}, {0x54}, {0x9C} };
-  static constexpr Insn PopInsns[]  = { {0x58}, {0x59}, {0x5A}, {0x5B}, {0x5E}, {0x5F}, {0x5D}, {0x5C}, {0x9D} };
+#if PATCHER_X86_32  //                      Eax:    Ecx:    Edx:    Ebx:    Esi:    Edi:    Ebp:    Esp:    Eflags:
+  static constexpr Insn  PushInsns[]   = { {0x50}, {0x51}, {0x52}, {0x53}, {0x56}, {0x57}, {0x55}, {0x54}, {0x9C} };
+  static constexpr Insn  PopInsns[]    = { {0x58}, {0x59}, {0x5A}, {0x5B}, {0x5E}, {0x5F}, {0x5D}, {0x5C}, {0x9D} };
+  static constexpr uint8 SetOperands[] = {  0x44,   0x4C,   0x54,   0x5C,   0x74,   0x7C,   0x6C,   0x64 };
+  static constexpr uint8 AddOperands[] = {  0x40,   0x49,   0x52,   0x5B,   0x76,   0x7F,   0x6D,   0x64 };
 #elif PATCHER_X86_64
   static constexpr Insn PushInsns[] = {
   // Rax:    Rcx:    Rdx:    Rbx:    Rsi:    Rdi:    R8:           R9:           R10:          R11:
@@ -267,7 +300,32 @@ private:
     {0x58}, {0x59}, {0x5A}, {0x5B}, {0x5E}, {0x5F}, {0x41, 0x58}, {0x41, 0x59}, {0x41, 0x5A}, {0x41, 0x5B},
     {0x41, 0x5C}, {0x41, 0x5D}, {0x41, 0x5E}, {0x41, 0x5F}, {0x5D}, {0x5C}, {0x9D}
   };
+  static constexpr uint8 SetOperands[] =
+  //  Rax:  Rcx:  Rdx:  Rbx:  Rsi:  Rdi:  R8:   R9:   R10:  R11:  R12:  R13:  R14:  R15:  Rbp:  Rsp:
+    { 0x44, 0x4C, 0x54, 0x5C, 0x74, 0x7C, 0x44, 0x4C, 0x54, 0x5C, 0x64, 0x6C, 0x74, 0x7C, 0x6C, 0x64 };
+  static constexpr uint8 AddOperands[] =
+    { 0x40, 0x49, 0x52, 0x5B, 0x76, 0x7F, 0x40, 0x49, 0x52, 0x5B, 0x64, 0x7D, 0x76, 0x7F, 0x6D, 0x64 };
 #endif
+  static constexpr uint8 NopTable[][10] = {
+    { 0x90,                                                       },
+    { 0x66, 0x90,                                                 },
+    { 0x0F, 0x1F, 0x00,                                           },
+    { 0x0F, 0x1F, 0x40, 0x00,                                     },
+    { 0x0F, 0x1F, 0x44, 0x00, 0x00,                               },
+    { 0x66, 0x0F, 0x1F, 0x44, 0x00, 0x00,                         },
+    { 0x0F, 0x1F, 0x80, 0x00, 0x00, 0x00, 0x00,                   },
+    { 0x0F, 0x1F, 0x84, 0x00, 0x00, 0x00, 0x00, 0x00,             },
+    { 0x66, 0x0F, 0x1F, 0x84, 0x00, 0x00, 0x00, 0x00, 0x00,       },
+    { 0x66, 0x2E, 0x0F, 0x1F, 0x84, 0x00, 0x00, 0x00, 0x00, 0x00, },
+  };
+
+  Assembler& MovStack(uint8 opcode, Register reg, int32 offset) {
+    const bool offsetIs8Bit = (offset == int8(offset));
+    Bytes({ IF_X86_64(uint8((reg < Register::R8) ? 0x48 : 0x4C),) opcode });                    // mov or lea...
+    offsetIs8Bit ? Bytes({ SetOperands[uint32(reg)], 0x24, uint8(offset) })                     // ... reg, [esp + i8]
+                 : Op<2, int32>({ { uint8(SetOperands[uint32(reg)] + 0x40), 0x24 }, offset });  // ... reg, [esp + i32]
+    return *this;
+  }
 
   void*  pBuffer_;  // Starting pointer.
   uint8* pWriter_;  // Current pointer.
@@ -646,7 +704,7 @@ Status PatchContext::Memset(
 // =====================================================================================================================
 Status PatchContext::Write(
   TargetPtr           pAddress,
-  const FunctionPtr&  pfnNewFunction)
+  const FunctionRef&  pfnNewFunction)
 {
   if ((status_ == Status::Ok) && (pfnNewFunction == nullptr)) {
     status_ = Status::FailInvalidCallback;
@@ -672,24 +730,6 @@ Status PatchContext::WriteNop(
 
   pAddress = MaybeFixTargetPtr(pAddress);
 
-#if PATCHER_X86
-  static constexpr uint8 NopTable[][10] = {
-    { 0x90,                                                       },
-    { 0x66, 0x90,                                                 },
-    { 0x0F, 0x1F, 0x00,                                           },
-    { 0x0F, 0x1F, 0x40, 0x00,                                     },
-    { 0x0F, 0x1F, 0x44, 0x00, 0x00,                               },
-    { 0x66, 0x0F, 0x1F, 0x44, 0x00, 0x00,                         },
-    { 0x0F, 0x1F, 0x80, 0x00, 0x00, 0x00, 0x00,                   },
-    { 0x0F, 0x1F, 0x84, 0x00, 0x00, 0x00, 0x00, 0x00,             },
-    { 0x66, 0x0F, 0x1F, 0x84, 0x00, 0x00, 0x00, 0x00, 0x00,       },
-    { 0x66, 0x2E, 0x0F, 0x1F, 0x84, 0x00, 0x00, 0x00, 0x00, 0x00, },
-  };
-#else
-  static constexpr uint8 NopTable[][1] = { };
-  status_ = (status_ == Status::Ok) ? Status::FailUnsupported : status_;
-#endif
-
   if ((status_ == Status::Ok) && (size == 0)) {
     // If size == 0, then overwrite the whole instruction at pAddress.
     const auto& insns = g_disasm.Disassemble(pAddress, 1);
@@ -703,9 +743,7 @@ Status PatchContext::WriteNop(
   const uint32 oldAttr = BeginDeProtect(pAddress, size);
 
   if (status_ == Status::Ok) {
-    for (size_t remain = size, copySize; (copySize = Min(ArrayLen(NopTable), remain)) != 0; remain -= copySize) {
-      memcpy(PtrInc(pAddress, (remain - copySize)), &NopTable[copySize - 1], copySize);
-    }
+    Assembler(pAddress).Nop(size);
     EndDeProtect(pAddress, size, oldAttr);
   }
 
@@ -1179,14 +1217,14 @@ Status PatchContext::ReplaceReferencesToGlobal(
 
 // =====================================================================================================================
 // Writes the code for a functor thunk.  Note that this function does not flush the instruction cache.
-// Thunk translates from the function's calling convention to cdecl so it can call FunctionPtr::InvokeFunctor().
+// Thunk translates from the function's calling convention to cdecl so it can call FunctionRef::InvokeFunctor().
 static bool CreateFunctorThunk(
   void*              pMemory,
-  const FunctionPtr& pfnNewFunction)
+  const FunctionRef& pfnNewFunction)
 {
   static constexpr uint8 PopSize = RegisterSize * (InvokeFunctorNumArgs - 1);
 
-  Writer writer(pMemory);
+  Assembler writer(pMemory);
   bool result = (pMemory != nullptr);
 
   const uintptr            functorAddr = reinterpret_cast<uintptr>(pfnNewFunction.Functor().get());
@@ -1244,7 +1282,7 @@ static bool CreateFunctorThunk(
   case Call::Cdecl: {
     const size_t numAlignmentPadders = GetNumAlignmentPadders();
     WriteCall(numAlignmentPadders);
-    writer.Bytes({ 0x83, 0xC4, uint8(PopSize + (numAlignmentPadders * RegisterSize)), // add esp, i8  (Cleanup our args)
+    writer.Bytes({ 0x83, 0xC4, uint8((numAlignmentPadders * RegisterSize) + PopSize), // add esp, i8  (Cleanup our args)
                    0xC3 });                                                           // retn
     break;
   }
@@ -1276,28 +1314,38 @@ static bool CreateFunctorThunk(
 #elif PATCHER_X86_64
   case Call::Cdecl: {
     // The x64 calling convention passes the first 4 arguments via registers in MS ABI, or the first 6 in Unix ABI.
-    // We need to pop the old return address (and the shadow space if MS ABI) before we can push our args.
-    const size_t numAlignmentPadders        = GetNumAlignmentPadders(InvokeFunctorNumSkipped);
-    const uint8 popOldRetnAddrAndRegArgSize =
-      uint8((1 + Min(numRegisterSizeParams, InvokeFunctorNumSkipped)) * RegisterSize);
-    const uint8 totalPopSize      = uint8(PopSize + (numAlignmentPadders * RegisterSize) + popOldRetnAddrAndRegArgSize);
-    const uint8 oldRetnAddrOffset = uint8(int8((IsMsAbi ? (RegisterSize * 4) : 0) - popOldRetnAddrAndRegArgSize));
+    const size_t numAlignmentPadders    = GetNumAlignmentPadders(InvokeFunctorNumSkipped);
+    const size_t numRegArgs             = Min(numRegisterSizeParams, InvokeFunctorNumSkipped);
+    const uint8  popPadAndInvokeArgSize = uint8((numAlignmentPadders * RegisterSize) + PopSize);
+    const uint8  popRegArgSize          = uint8(numRegArgs * RegisterSize);
 
     if (numRegisterSizeParams >= 1) {
-      writer.Pop(Register::R11);                                      // pop  r11        (Pop old return address)
+      // We need to pop the old return address (and the shadow space if MS ABI) before we can push our args.
+      writer.Pop(Register::R11);                                      // pop  r11      (Pop old return address)
       if (IsMsAbi) {
-        writer.Bytes({ 0x48, 0x83, 0xC4, uint8(RegisterSize * 4) });  // add  rsp, 32    (Pop old shadow space)
+        writer.Bytes({ 0x48, 0x83, 0xC4, uint8(RegisterSize * 4) });  // add  rsp, 32  (Pop old shadow space)
         PushArgRegisters({ Register::Rcx, Register::Rdx, Register::R8, Register::R9 });
       }
       else if (IsUnixAbi) {
-        PushArgRegisters({ Register:: Rsi, Register::Rdi, Register::Rdx, Register::Rcx, Register::R8, Register::R9 });
+        PushArgRegisters({ Register::Rsi, Register::Rdi, Register::Rdx, Register::Rcx, Register::R8, Register::R9 });
       }
-      writer.Push(Register::R11);                                     // push r11        (Push old return address)
+      writer.Push(Register::R11);                                     // push r11      (Push old return address)
     }
 
     WriteCall(numAlignmentPadders);
-    writer.Bytes({ 0x48, 0x83, 0xC4, totalPopSize,                    // add rsp, i8     (Cleanup our args)
-                   0xFF, 0x64, 0x24, oldRetnAddrOffset });            // jmp [rsp + i8]  (Jump to old return address)
+
+    if (IsMsAbi) {
+      // In MS ABI, we moved the shadow space, but the original caller will try to pop it, so we need to compensate.
+      const uint8 totalPopSize = uint8(popPadAndInvokeArgSize + ((numRegArgs < 4) ? RegisterSize : 0) + popRegArgSize);
+      const uint8 shadowOffset = uint8((RegisterSize * 3) - popRegArgSize);
+      writer.Bytes({ 0x48, 0x83, 0xC4, totalPopSize })                     // add rsp, i8      (Cleanup our args)
+            .BytesIf((numRegArgs < 4), { 0xFF, 0x74, 0x24, shadowOffset }) // push [rsp + i8]  (Push old return address)
+            .Byte(0xC3);                                                   // retn             (Return)
+    }
+    else {
+      writer.Bytes({ 0x48, 0x83, 0xC4, popPadAndInvokeArgSize })  // add  rsp, i8  (Cleanup padders and pFunctor)
+            .Op<1, uint16>({ 0xC2, popRegArgSize });              // retn u16      (Return and finish cleanup)
+    }
     break;
   }
 #endif
@@ -1321,8 +1369,8 @@ static bool CreateFunctorThunk(
 }
 
 // =====================================================================================================================
-// Initializes the underlying function for FunctionPtrs that have a state (capturing lambda or non-empty functor).
-void FunctionPtr::InitFunctorThunk(
+// Initializes the underlying function for FunctionRefs that have a state (capturing lambda or non-empty functor).
+void FunctionRef::InitFunctorThunk(
   void*  pFunctorObj,
   void (*pfnDeleteFunctor)(void*))
 {
@@ -1430,7 +1478,7 @@ static Status FindHookPatchRegion(
 // Functionally copies machine code instructions from one code memory location to another.
 // Note that this function does not flush the instruction cache.
 static void CopyInstructions(
-  Writer*            pWriter,
+  Assembler*         pWriter,
   const InsnVector&  insns,
   uint8              overwrittenSize,
   uint8              offsetLut[MaxOverwriteSize])
@@ -1571,7 +1619,7 @@ static Status CreateTrampoline(
     }
 
     // Our trampoline needs to be able to reissue instructions overwritten by the jump to it.
-    Writer writer(static_cast<uint8*>(pTrampoline) + prologSize);
+    Assembler writer(static_cast<uint8*>(pTrampoline) + prologSize);
     CopyInstructions(&writer, insns, overwrittenSize, offsetLut);
 
     // Complete the trampoline by writing a jmp instruction to the original function.
@@ -1606,7 +1654,7 @@ static Status CreateTrampoline(
 // Writes code for a far (absolute) jump thunk.
 static Status CreateFarThunk(
   void*               pFarThunk,
-  const FunctionPtr&  pfnNewFunction)
+  const FunctionRef&  pfnNewFunction)
 {
   Status status = Status::Ok;
 
@@ -1633,7 +1681,7 @@ static Status CreateFarThunk(
 // =====================================================================================================================
 Status PatchContext::Hook(
   TargetPtr           pAddress,
-  const FunctionPtr&  pfnNewFunction,
+  const FunctionRef&  pfnNewFunction,
   void*               pPfnTrampoline)
 {
   status_ = (status_        != Status::Ok) ? status_                     :
@@ -1691,7 +1739,7 @@ Status PatchContext::Hook(
 
   if (status_ == Status::Ok) {
     uint8 buffer[MaxOverwriteSize];
-    Writer writer(buffer);
+    Assembler writer(buffer);
 
     void* pPatchAddr = pAddress;
 
@@ -1753,7 +1801,7 @@ Status PatchContext::Hook(
 // =====================================================================================================================
 Status PatchContext::HookCall(
   TargetPtr           pAddress,
-  const FunctionPtr&  pfnNewFunction,
+  const FunctionRef&  pfnNewFunction,
   void*               pPfnOriginal)
 {
   status_ = (status_        != Status::Ok) ? status_                     :
@@ -1864,7 +1912,7 @@ static size_t CreateLowLevelHookTrampoline(
   void*               pLowLevelHook,
   Span<RegisterInfo>  registers,
   const void*         pAddress,
-  const FunctionPtr&  pfnHookCb,
+  const FunctionRef&  pfnHookCb,
   ptrdiff_t           moduleRelocDelta,
   const uint8         (&offsetLut)[MaxOverwriteSize],
   uint8               overwrittenSize,
@@ -1873,9 +1921,6 @@ static size_t CreateLowLevelHookTrampoline(
 #if PATCHER_X86_32
   static constexpr Register VolatileRegisters[] = { Register::Ecx, Register::Edx, Register::Eax };
   static constexpr Register ArgRegisters[]      = { Register::Count };
-  static constexpr Register ReturnRegister      = Register::Eax;
-  static constexpr Register StackRegister       = Register::Esp;
-  static constexpr Register FlagsRegister       = Register::Eflags;
 #elif PATCHER_X86_64
   static constexpr Register VolatileRegisters[] = {
 # if PATCHER_UNIX_ABI
@@ -1889,14 +1934,15 @@ static size_t CreateLowLevelHookTrampoline(
   static constexpr Register ArgRegisters[]      =
     { Register::Rdi, Register::Rsi, Register::Rdx, Register::Rcx, Register::R8, Register::R9 };
 # endif
-  static constexpr Register ReturnRegister      = Register::Rax;
-  static constexpr Register StackRegister       = Register::Rsp;
-  static constexpr Register FlagsRegister       = Register::Rflags;
 #endif
+  static constexpr Register ReturnRegister      = IF_X86_32(Register::Eax)    IF_X86_64(Register::Rax);
+  static constexpr Register StackRegister       = IF_X86_32(Register::Esp)    IF_X86_64(Register::Rsp);
+  static constexpr Register FlagsRegister       = IF_X86_32(Register::Eflags) IF_X86_64(Register::Rflags);
   static constexpr Register ByReference         = Register::Count;  // Placeholder for args by reference.
   static constexpr uint8    StackAlignment      = PATCHER_DEFAULT_STACK_ALIGNMENT;
+  static constexpr bool     UseRedZone          = (PATCHER_STACK_RED_ZONE_SIZE >= RegisterSize);
 
-  // Fix user-provided options to ignore redundant flags.
+  // Fix user-provided options to ignore redundant flags and sanitize inputs.
   if (settings.noCustomReturnAddr) {
     settings.noBaseRelocReturn   = 0;
     settings.noShortReturnAddr   = 0;
@@ -1905,6 +1951,7 @@ static size_t CreateLowLevelHookTrampoline(
   if (StackAlignment <= RegisterSize) {
     settings.noAlignStackPtr = 1;
   }
+  settings.reserveStackSize = Align(settings.reserveStackSize, RegisterSize);
 
   uint32 numByRef = 0;
   for (const auto& reg : registers) {
@@ -1922,16 +1969,20 @@ static size_t CreateLowLevelHookTrampoline(
   uint32 stackRegOffset = 0;  // ** TODO Optimize this away in logic
   uint32 firstArgIndex  = 0;
 
-  auto AddRegisterToStack = [&stackRegisters, &returnRegIndex, &stackRegIndex, &stackRegOffset](RegisterInfo reg) {
-    if ((reg.type == ReturnRegister) && ((returnRegIndex == UINT_MAX) || reg.byReference)) {
-      returnRegIndex = uint32(stackRegisters.size());
-    }
-    else if ((reg.type == StackRegister) && ((stackRegIndex == UINT_MAX) || ((reg.offset == 0) && reg.byReference))) {
-      stackRegIndex  = uint32(stackRegisters.size());
-      stackRegOffset = reg.offset;
-    }
-    stackRegisters.push_back(reg);
-  };
+  auto AddRegisterToStack =
+    [&stackRegisters, &returnRegIndex, &stackRegIndex, &stackRegOffset, &regValueIndex](RegisterInfo reg) {
+      if ((reg.type == ReturnRegister) && ((returnRegIndex == UINT_MAX) || reg.byReference)) {
+        returnRegIndex = uint32(stackRegisters.size());
+      }
+      else if ((reg.type == StackRegister) && ((stackRegIndex == UINT_MAX) || ((reg.offset == 0) && reg.byReference))) {
+        stackRegIndex  = uint32(stackRegisters.size());
+        stackRegOffset = reg.offset;
+      }
+      if ((regValueIndex[uint32(reg.type)] == UINT_MAX) && (reg.offset == 0)) {
+        regValueIndex[uint32(reg.type)] = uint32(stackRegisters.size());  // ** TODO
+      }
+      stackRegisters.push_back(reg);
+    };
 
   // Registers that the ABI considers volatile between function calls must be pushed to the stack unconditionally.
   // Find which ones haven't been explicitly requested, and have them be pushed to the stack before everything else.
@@ -1983,18 +2034,19 @@ static size_t CreateLowLevelHookTrampoline(
   }
 
   // Write the low-level hook trampoline code.
-  Writer writer(pLowLevelHook);
+  Assembler writer(pLowLevelHook);
 
-  Register   spareRegister = Register::Count;
-  const bool isFunctor     = (pfnHookCb.Functor() != nullptr);
-  const bool saveFlags     = (settings.noRestoreFlagsReg == false);
+  const bool isFunctor = (pfnHookCb.Functor() != nullptr);
+  const bool saveFlags = (settings.noRestoreFlagsReg == false);
 
   // The x64 calling convention passes the first 4 arguments via registers in MS ABI, or the first 6 in Unix ABI.
-  const size_t numPassedViaRegisters = (IsX86_32 || isFunctor) ? 0 : Min(registers.Length(), ArrayLen(ArgRegisters));
+  const size_t numPassedViaRegisters = (IsX86_32 || isFunctor) ? 0 :
+    Min((settings.argsAsStructPtr ? 1 : registers.Length()), ArrayLen(ArgRegisters));
 
   // Scratch space reserved on the stack first that can be used to store temporary data, which is mainly used to avoid
-  // issues where we'd otherwise reference invalidated stack memory (we assume there is no "red zone" below the stack).
+  // issues where we could otherwise reference invalidated stack memory.
   static constexpr uint8 ScratchSpaceSize = uint8(RegisterSize * 2);
+  const uint32 totalReserveSize = ScratchSpaceSize + settings.reserveStackSize;
 
   // Prolog begins here.
   writer.ByteIf(settings.debugBreakpoint, 0xCC);  // int 3
@@ -2008,111 +2060,96 @@ static size_t CreateLowLevelHookTrampoline(
         - numPassedViaRegisters                     // Passed via registers
         + ((IsX86_64 && IsMsAbi) ? 4 : 0)           // Shadow space (MS x86-64 ABI)
         + (isFunctor ? InvokeFunctorNumArgs : 0));  // InvokeFunctor() args
-    assert(totalStackSize <= INT8_MAX);  // ** TODO x64 Is this a safe assumption? Probably not
 
     static constexpr uint8 StackAlignMask = uint8(-int8(StackAlignment));
-    static constexpr uint8 EaxOffset      = uint8(-int8(RegisterSize * 1));
-    static constexpr uint8 FlagsOffset    = uint8(-int8(RegisterSize * 2));
-    const            uint8 alignDelta     = uint8(-int8(
+    const int32 eaxOffset    = -int32(settings.reserveStackSize + (RegisterSize * 1));
+    const int32 flagsOffset  = -int32(settings.reserveStackSize + (RegisterSize * 2));
+    const uint8 alignDelta   = uint8(-int8(
       (totalStackSize & (StackAlignment - 1)) - StackAlignment)) & (StackAlignment - 1);
-    const            uint8 usedScratch    = uint8(RegisterSize * (saveFlags ? 2 : 1));  // For push eax (+ pushf)
-    const            uint8 scratch        =
+    const uint8 usedScratch  = uint8(RegisterSize * (saveFlags ? 2 : 1));  // For push eax (+ pushf)
+    const uint8 remScratch   =
       uint8((ScratchSpaceSize > usedScratch) ? (ScratchSpaceSize - usedScratch) : 0);
+    const bool  restoreFlags = saveFlags && IsRegisterRequested(FlagsRegister);
+
+    if (settings.reserveStackSize != 0) {
+      // Reserve user-requested stack space.
+      writer.Add(StackRegister, -int32(settings.reserveStackSize));
+    }
 
     writer
-      .Push(ReturnRegister)                                        // push eax              (Save EAX to scratch[0])
-      .ByteIf(saveFlags, 0x9C)                                     // pushf                 (Save Eflags to scratch[1])
-      .BytesIf(scratch, { IF_X86_64(0x48,) 0x83, 0xEC, scratch })  // sub  esp, i8          (Reserve remaining scratch)
-      .Bytes({ IF_X86_64(0x48,) 0x89, 0xE0 })                      // mov  eax, esp
-      .BytesIf(saveFlags, { 0xFF, 0x74, 0x24, scratch })           // push dword ptr [esp + i8]  (Fast copy Eflags)
-      .Bytes({ IF_X86_64(0x48,) 0x83, 0xE0, StackAlignMask,        // and  eax, -16              (Calculate aligned ESP)
-               IF_X86_64(0x48,) 0x83, 0xE8, alignDelta })          // sub  eax, alignDelta
-      .ByteIf(saveFlags, 0x9D)                                     // popf                       (Restore Eflags)
-      .Bytes({ IF_X86_64(0x48,) 0x94,                              // xchg eax, esp              (Align ESP)
-               IF_X86_64(0x48,) 0x8D, 0x40, ScratchSpaceSize })    // lea  eax, [eax + i8]
-      .Push(ReturnRegister)                                        // push eax                       (Save old ESP)
-      .BytesIf(saveFlags, { 0xFF, 0x70, FlagsOffset })             // push dword ptr [eax - 8]       (Save Eflags)
-      .Bytes({ IF_X86_64(0x48,) 0x8B, 0x40, EaxOffset });          // mov  eax, dword ptr [eax - 4]  (Restore EAX)
+      .Push(ReturnRegister)                                             // push eax      (Save EAX to scratch[0])
+      .ByteIf(saveFlags, 0x9C)                                          // pushf         (Save Eflags to scratch[1])
+      .BytesIf(remScratch, { IF_X86_64(0x48,) 0x83, 0xEC, remScratch }) // sub  esp, i8  (Reserve remaining scratch)
+      .Bytes({ IF_X86_64(0x48,) 0x89, 0xE0 })                           // mov  eax, esp
+      .BytesIf(restoreFlags, { 0xFF, 0x74, 0x24, remScratch })          // push dword ptr [esp + i8]  (Fast copy Eflags)
+      .Bytes({ IF_X86_64(0x48,) 0x83, 0xE0, StackAlignMask,             // and  eax, -16              (Calc aligned ESP)
+               IF_X86_64(0x48,) 0x83, 0xE8, alignDelta })               // sub  eax, alignDelta
+      .ByteIf(restoreFlags, 0x9D)                                       // popf                       (Restore Eflags)
+      .Bytes({ IF_X86_64(0x48,) 0x94 })                                 // xchg eax, esp              (Align ESP)
+      .Add(ReturnRegister, totalReserveSize)                            // lea  eax, [eax + N]
+      .Push(ReturnRegister);                                            // push eax                       (Save old ESP)
+
+    if (totalReserveSize == int8(totalReserveSize)) {
+      writer.BytesIf(saveFlags, { 0xFF, 0x70, uint8(flagsOffset) })     // push dword ptr [eax + N]       (Save Eflags)
+            .Bytes({ IF_X86_64(0x48,) 0x8B, 0x40, uint8(eaxOffset) });  // mov  eax, dword ptr [eax + N]  (Restore EAX)
+    }
+    else {
+      if (saveFlags) { writer.Op<2, int32>({ { 0xFF, 0xB0 }, flagsOffset }); }
+      writer.Op<IsX86_64 ? 3 : 2, int32>({ { IF_X86_64(0x48,) 0x8B, 0x80 }, eaxOffset });
+    }
   }
   else {
-    // Reserve scratch space.
-    writer.Bytes({ IF_X86_64(0x48,) 0x8D, 0x64, 0x24, uint8(-int8(ScratchSpaceSize)) });  // lea esp, [esp - i8]
+    // Reserve user-requested stack space and our scratch space.
+    writer.Add(StackRegister, -int32(totalReserveSize));  // lea esp, [esp - i8]
   }
 
   // Pushes the current stack pointer, possibly adjusted by some offset, to the top of the stack.  Iff we generated the
   // stack align code above, passing fromOrigin = true pushes the old pre-aligned stack pointer instead of current SP.
+  Register spareRegister = Register::Count;
   auto PushAdjustedStackReg = [&](size_t index, uint32 addend, bool fromOrigin = false) {
     assert((fromOrigin == false) || (settings.noAlignStackPtr == false));  // fromOrigin requires aligned stack mode.
     addend += (fromOrigin == false) ? uint32(RegisterSize * index) : 0;
+
     if ((addend == 0) && (fromOrigin == false)) {
       writer.Push(StackRegister);  // push esp
     }
     else {
-      // Offset to origin ESP, i.e. the first thing pushed to the stack in aligned-stack mode.  Since we can't
-      // statically calculate the stack alignment offset in that mode, we need to reference the copy of the old value.
-      const uint32 originOffset = uint32(RegisterSize * (index - 1));
-      const bool   offsetIs8Bit = int8(originOffset) == int32(originOffset);
-      const bool   addendIs8Bit = int8(addend)       == int32(addend);
-
       // See if there's an already-stored register we can use.  This assumes that index only monotonically increases.
       if (spareRegister == Register::Count) {
         for (auto it = stackRegisters.begin(); it != (stackRegisters.begin() + index); ++it) {
           const Register reg = it->type;
+
           if (reg < Register::GprLast) {
-            spareRegister = reg;
-            break;
+            // Ensure this register does not need to be stored by value again later.
+            const auto futureUse =
+              std::find_if(it + 1, stackRegisters.end(), [reg](const RegisterInfo& x) { return (x.type == reg); });
+            if (futureUse == stackRegisters.end()) {
+              spareRegister = reg;
+              break;
+            }
           }
         }
       }
 
-      if (spareRegister != Register::Count) {
-        // We have a spare register we can use.
-        // If not fromOrigin, set it to (esp + addend).  Otherwise, set it to (*(esp + originOffset) + addend).
-        const uint32 regIdx = uint32(spareRegister);
-#if PATCHER_X86_32                            // Eax:  Ecx:  Edx:  Ebx:  Esi:  Edi:
-        static constexpr uint8 SetOperands[] = { 0x44, 0x4C, 0x54, 0x5C, 0x74, 0x7C };
-        static constexpr uint8 AddOperands[] = { 0x40, 0x49, 0x52, 0x5B, 0x76, 0x7F };
-#elif PATCHER_X86_64
-        static constexpr uint8 SetOperands[] =
-        //  Rax:  Rcx:  Rdx:  Rbx:  Rsi:  Rdi:  R8:   R9:   R10:  R11:  R12:  R13:  R14:  R15:
-          { 0x44, 0x4C, 0x54, 0x5C, 0x74, 0x7C, 0x44, 0x4C, 0x54, 0x5C, 0x64, 0x6C, 0x74, 0x7C };
-        static constexpr uint8 AddOperands[] =
-          { 0x40, 0x49, 0x52, 0x5B, 0x76, 0x7F, 0x40, 0x49, 0x52, 0x5B, 0x64, 0x7D, 0x76, 0x7F };  // R12 also has 0x24
+      // Offset to origin ESP, i.e. the first thing pushed to the stack in aligned-stack mode.  Since we can't
+      // statically calculate the stack alignment offset in that mode, we need to reference the copy of the old value.
+      const int32    originOffset    = int32(RegisterSize * (index - ((spareRegister != Register::Count) ? 1 : -1)));
+      const Register scratchRegister = (spareRegister != Register::Count) ? spareRegister : ReturnRegister;
 
-        writer.Byte((spareRegister < Register::R8) ? 0x48 : 0x4C);
-#endif
-        writer.Byte(fromOrigin ? 0x8B : 0x8D);                                         // mov or lea...
-        const uint32 delta = fromOrigin ? originOffset : addend;
-        (fromOrigin ? offsetIs8Bit : addendIs8Bit)                  ?
-          writer.Bytes({ SetOperands[regIdx], 0x24, uint8(delta) }) :                  // ... reg, [esp + i8]
-          writer.Op(Op2_4{ { uint8(SetOperands[regIdx] + 0x40), 0x24 }, delta });      // ... reg, [esp + i32]
-
-        if (fromOrigin && (addend != 0)) {
-          // Use lea instead of add to avoid clobbering flags.
-#if PATCHER_X86_64
-          writer.Byte((spareRegister < Register::R8) ? 0x48 : 0x4D);
-          (spareRegister == Register::R12) ?                                           // lea r12, [r12 + i8/i32]
-            (addendIs8Bit ? writer.Bytes({ 0x8D, AddOperands[regIdx], 0x24, uint8(addend)}) :
-               writer.Op<3, uint32>({ { 0x8D, uint8(AddOperands[regIdx] + 0x40), 0x24 }, addend })) :
-#endif
-          addendIs8Bit ? writer.Bytes({ 0x8D, AddOperands[regIdx], uint8(addend) }) :  // lea reg, [reg + i8]
-            writer.Op(Op2_4{ { 0x8D, uint8(AddOperands[regIdx] + 0x40) }, addend });   // lea reg, [reg + i32]
-        }
-
-        writer.Push(spareRegister);                                                    // push reg
+      if (spareRegister == Register::Count) {
+        // There is no available register, so we need to save and later restore a scratch register.
+        writer.Add(StackRegister, -int32(RegisterSize))  // lea  esp, [esp - 4]  (Reserve space)
+              .Push(scratchRegister);                    // push eax
+        addend += (fromOrigin == false) ? (RegisterSize * 2) : 0;
       }
-      else {
-        // No spare registers.  Push stack pointer then adjust it on the stack in-place, while preserving flags.
-        fromOrigin ? writer.Op<3, uint32>({ { 0xFF, 0xB4, 0x24 }, originOffset })  // push dword ptr [esp + i32]
-                   : writer.Push(StackRegister);                                   // push esp
 
-        if (addend != 0) {
-          writer.ByteIf(saveFlags, 0x9C)                                           // pushf  ** TODO This is slow
-                .Op<IsX86_64 ? 5 : 4, uint32>(                                     // add dword ptr [esp + 4], i32
-                  { { IF_X86_64(0x48,) 0x81, 0x44, 0x24, uint8(saveFlags ? RegisterSize : 0) }, addend })
-                .ByteIf(saveFlags, 0x9D);                                          // popf
-        }
-      }
+      // If fromOrigin, push (*(esp + originOffset) + addend).  Otherwise, push (esp + addend).
+      fromOrigin ? writer.LoadStackValue(scratchRegister, originOffset)      // mov  reg, [esp + originOffset]
+                         .Add(scratchRegister, int32(addend))                // lea  reg, [reg + addend]
+                 : writer.LoadStackAddress(scratchRegister, int32(addend));  // lea  reg, [esp + addend]
+      (spareRegister != Register::Count) ? writer.Push(scratchRegister)                           // push reg
+                                         : writer.StoreStackValue(scratchRegister, RegisterSize)  // mov  [esp + 4], reg
+                                                 .Pop(scratchRegister);                           // pop  reg
     }
   };
 
@@ -2124,7 +2161,7 @@ static size_t CreateLowLevelHookTrampoline(
     const Register reg   = it->type;
     const size_t   index = (it - stackRegisters.begin());
     if (reg == StackRegister) {
-      settings.noAlignStackPtr ? PushAdjustedStackReg(index, it->offset + ScratchSpaceSize)
+      settings.noAlignStackPtr ? PushAdjustedStackReg(index, it->offset + totalReserveSize)
                                : PushAdjustedStackReg(index, it->offset, true);
     }
     else if (reg != ByReference) {
@@ -2149,16 +2186,13 @@ static size_t CreateLowLevelHookTrampoline(
   // Write the call instruction to our hook callback function.
   // If return value == nullptr, or custom return destinations aren't allowed, we can take a simpler path.
   if (isFunctor) {
-    // We need to push the first 2 args to FunctionPtr::InvokeFunctor().
-#if PATCHER_X86_32
-    writer.Bytes({ 0x6A, 0x00 })                                            // push   0  (Dummy pPrevReturnAddr)
-          .Op(Op1_4{ 0x68, uintptr(pfnHookCb.Functor().get()) });           // push   pFunctor
-#elif PATCHER_X86_64
-    writer.Bytes({ 0x48, 0x31, 0xC0 })                                      // xor    rax, rax
-          .Push(Register::Rax)                                              // push   rax  (Dummy pPrevReturnAddr)
-          .Op(Op2_8{ { 0x48, 0xB8 }, uintptr(pfnHookCb.Functor().get()) })  // movabs rax, pFunctor
-          .Push(Register::Rax);                                             // push   rax
-#endif
+    // We need to push the first 2 args to FunctionRef::InvokeFunctor().
+    IsX86_32 ? writer.Bytes({ 0x6A, 0x00 })                                            // push   0  (pPrevReturnAddr)
+                     .Op(Op1_4{ 0x68, uint32(uintptr(pfnHookCb.Functor().get())) })    // push   pFunctor
+             : writer.Bytes({ 0x48, 0x31, 0xC0 })                                      // xor    rax, rax
+                     .Push(ReturnRegister)                                             // push   rax
+                     .Op(Op2_8{ { 0x48, 0xB8 }, uintptr(pfnHookCb.Functor().get()) })  // movabs rax, pFunctor
+                     .Push(ReturnRegister);                                            // push   rax
   }
 
   // MS x64 ABI expects 32 bytes of shadow space be allocated on the stack just before the call.
@@ -2183,7 +2217,7 @@ static size_t CreateLowLevelHookTrampoline(
 
   if ((settings.noCustomReturnAddr || settings.noNullReturnDefault) == false) {
     writer.Bytes({ IF_X86_64(0x48,) 0x85, 0xC0,  // test eax, eax  (Test if returned address is nullptr)
-                   0x75, 0x00 });                // jnz  short i8  (Skip to case 2 if non-nullptr) ** TODO x64 need i32?
+                   0x75, 0x00 });                // jnz  short i8  (Skip to case 2 if non-nullptr)
     pSkipCase1Offset = (writer.GetNext() - 1);   // Fill the skip to case 2 jump offset later when we know the size.
   }
 
@@ -2202,7 +2236,10 @@ static size_t CreateLowLevelHookTrampoline(
       }
       else if ((reg == StackRegister) && (index == stackRegIndex) && lateRestoreStack) {
         // If this is the stack register, pop this arg to the near end of the scratch space.
-        writer.Bytes({ 0x8F, 0x44, 0x24, uint8(RegisterSize * index) });  // pop dword ptr [esp + i8]  ** TODO x64 need i32?
+        const int32 offset       = int32(RegisterSize * index);
+        const bool  offsetIs8Bit = (offset == int8(offset));
+        writer.Bytes({ 0x8F, uint8(0x44 + (offsetIs8Bit ? 0 : 0x40)), 0x24 });  // pop dword ptr [esp + offset]
+        offsetIs8Bit ? writer.Value(int8(offset)) : writer.Value(offset);
       }
       else {
         // Skip this arg.
@@ -2214,7 +2251,7 @@ static size_t CreateLowLevelHookTrampoline(
       writer.Pop(StackRegister);                       // pop esp              (Restore ESP)
     }
     else if ((stackRegIndex == UINT_MAX) || (stackRegOffset != 0)) {
-      writer.PopNil(ScratchSpaceSize / RegisterSize);  // lea esp, [esp + i8]  (Pop scratch space)
+      writer.PopNil(totalReserveSize / RegisterSize);  // lea esp, [esp + i8]  (Pop scratch space and user reserve)
     }
 
     // If there's a user-specified default return address, relocate and use that;  otherwise, return to original code.
@@ -2240,7 +2277,7 @@ static size_t CreateLowLevelHookTrampoline(
 
     // Case 2: Return to custom destination
     if ((settings.noBaseRelocReturn == false) && (moduleRelocDelta != 0)) {
-      IsX86_32 ? writer.Op(Op1_4{ 0x05,           uint32(moduleRelocDelta) })  // add    eax, u32
+      IsX86_32 ? writer.Op(Op1_4{ 0x05,           uint32(moduleRelocDelta) })  // add    eax, u32 (Relocate return addr)
                : writer.Op(Op2_8{ { 0x48, 0xB9 }, uint64(moduleRelocDelta) })  // movabs rcx, u64
                        .Bytes({ 0x48, 0x01, 0xC8 });                           // add    rax, rcx
     }
@@ -2290,11 +2327,9 @@ static size_t CreateLowLevelHookTrampoline(
 
     if (settings.noShortReturnAddr == false) {
       writer.Value(RelocateIntoTrampolineCodeChunkImage);
-      pRelocateCode->testAfterOverwrite.operand                  = PtrInc<uintptr>(pAddress, overwrittenSize);
-      pRelocateCode->branch1.testBeforeOverwrite.operand         = reinterpret_cast<uintptr>(pAddress);
-#if PATCHER_X86_32
-      pRelocateCode->branch1.branch1A.subtractOldAddress.operand = reinterpret_cast<uintptr>(pAddress);
-#endif
+      pRelocateCode->testAfterOverwrite.operand                            = PtrInc<uintptr>(pAddress, overwrittenSize);
+      pRelocateCode->branch1.testBeforeOverwrite.operand                   = reinterpret_cast<uintptr>(pAddress);
+      IF_X86_32(pRelocateCode->branch1.branch1A.subtractOldAddress.operand = reinterpret_cast<uintptr>(pAddress));
       // We will defer initializing the offset LUT lookup operand until we know where the LUT will be placed.
       pRelocateCode->branch1.branch1A.addTrampolineToOld.operand = reinterpret_cast<uintptr>(pTrampolineToOld);
     }
@@ -2303,20 +2338,30 @@ static size_t CreateLowLevelHookTrampoline(
                                   (stackRegOffset == 0)       &&
                                   (stackRegisters[stackRegIndex].byReference || (settings.noAlignStackPtr == false)));
     if (restoreStackPtr) {
-      // If we're restoring the stack pointer: the return address to either scratch[0], or if it's been changed, to just
-      // below what the SP will be; and save the new SP (with space reserved for return address) to near end of scratch,
-      // unless it's the last arg to pop.  Warning: if new SP is below its original value, we could clobber our stack!
-      const uint8 stackValOffset = uint8(RegisterSize * (stackRegisters.size() - stackRegIndex - 1));
-      const uint8 scratchOffset  = (stackRegIndex == 0) ? stackValOffset : uint8(RegisterSize * stackRegisters.size());
-      writer.Bytes({ IF_X86_64(0x48,) 0x8B, 0x4C, 0x24, stackValOffset,       // mov ecx, dword ptr [esp + i8]  ** TODO x64 need i32?
-                     IF_X86_64(0x48,) 0x8D, 0x49, uint8(-int8(RegisterSize)), // lea ecx, [ecx - 4]  (-4 for retn addr)
-                     IF_X86_64(0x48,) 0x89, 0x01,                             // mov dword ptr [ecx], eax
-                     IF_X86_64(0x48,) 0x89, 0x4C, 0x24, scratchOffset });     // mov dword ptr [esp + i8], ecx  ** TODO x64 need i32?
+      // If we're restoring the stack pointer: save the return address to either scratch[0], or if it's been changed, to
+      // just below what the SP will be; and save the new SP (with space reserved for return address) to the near end of
+      // scratch, or in-place if it's the last arg to pop.
+      static constexpr auto ScratchRegister = IF_X86_32(Register::Ecx) IF_X86_64(Register::Rcx);
+      const int32 stackValOffset = int32(RegisterSize * (stackRegisters.size() - stackRegIndex - 1));
+      const int32 scratchOffset  = (stackRegIndex == 0) ? stackValOffset : int32(RegisterSize * stackRegisters.size());
+
+      writer.LoadStackValue(ScratchRegister, stackValOffset);     // mov ecx, dword ptr [esp + stackValOffset] (Load SP)
+      if (UseRedZone) {
+        writer.Bytes({ IF_X86_64(0x48,) 0x89, 0x41, uint8(-int8(RegisterSize)) });
+        if (stackRegIndex != 0) {                                 // mov dword ptr [ecx - 4], eax  (Save return address)
+          writer.StoreStackValue(ScratchRegister, scratchOffset); // mov dword ptr [esp + scratchOffset], ecx  (Save SP)
+        }
+      }
+      else {
+        writer.Add(ScratchRegister, -int32(RegisterSize))         // lea ecx, [ecx - 4]        (Reserve space)
+              .Bytes({ IF_X86_64(0x48,) 0x89, 0x01 })             // mov dword ptr [ecx], eax  (Save return address)
+              .StoreStackValue(ScratchRegister, scratchOffset);   // mov dword ptr [esp + scratchOffset], ecx  (Save SP)
+      }
     }
     else {
       // Save the return address to scratch[0].
-      const uint8 scratchOffset = uint8((RegisterSize * (stackRegisters.size() - 1)) + ScratchSpaceSize);
-      writer.Bytes({ IF_X86_64(0x48,) 0x89, 0x44, 0x24, scratchOffset });     // mov dword ptr [esp + i8], eax
+      const int32 scratchOffset = int32((RegisterSize * (stackRegisters.size() - 1)) + totalReserveSize);
+      writer.StoreStackValue(ReturnRegister, scratchOffset);  // mov dword ptr [esp + scratchOffset], eax
     }
 
     // Restore register values from the stack.  We must take care not to clobber flags at this point.
@@ -2338,15 +2383,28 @@ static size_t CreateLowLevelHookTrampoline(
       }
     }
 
-    restoreStackPtr ? writer.Pop(StackRegister)                             // pop esp           (Restore ESP, or...)
-                    : writer.PopNil((ScratchSpaceSize / RegisterSize) - 1); // lea esp, [esp+i8] (... Pop scratch space)
-    writer.Byte(0xC3);                                                      // retn              (Jump to return addr)
+    // Finish cleanup and jump to the address requested by the callback.
+    if (UseRedZone && IsMsAbi) {
+      // The first instruction at the start of the cache line is more likely to be executed just before a context
+      // switch.  By ensuring the jmp instruction is at the start of the cache line, we may reduce (but not eliminate!)
+      // the chance that Windows preempts us in between the pop and the jmp.
+      void*const pJmp =
+        PtrInc(writer.GetNext(), restoreStackPtr ? 1 : ((IsX86_64 ? 4 : 3) + ((totalReserveSize > INT8_MAX) ? 4 : 1)));
+      writer.Nop(PtrDelta(PtrAlign(pJmp, CodeAlignment), pJmp));
+    }
+
+    restoreStackPtr ? writer.Pop(StackRegister)                                  // pop esp            (Restore ESP, or)
+      : writer.PopNil((totalReserveSize / RegisterSize) - (UseRedZone ? 0 : 1)); // lea esp, [esp+i8]  (Pop scratch)
+
+    // If the stack red zone is safe to use, then we can avoid a RSB branch misprediction by using jmp instead of retn.
+    UseRedZone ? writer.Bytes({ 0xFF, 0x64, 0x24, uint8(-int8(RegisterSize)) })  // jmp dword ptr [esp-4]  (Jump)
+               : writer.Byte(0xC3);                                              // retn                   (Return)
 
     if (settings.noShortReturnAddr == false) {
       // Initialize the offset LUT lookup instruction we had deferred, now that we know where we're copying the LUT to.
       pRelocateCode->branch1.branch1A.offsetTableLookup.operand = writer.GetNext<uintptr>();
       // Copy the offset lookup table.
-      writer.Bytes({ &offsetLut[0], sizeof(offsetLut) });
+      writer.Bytes({ &offsetLut[0], overwrittenSize });
     }
   }
 
@@ -2366,7 +2424,7 @@ static size_t CreateLowLevelHookTrampoline(
 Status PatchContext::LowLevelHook(
   TargetPtr                pAddress,
   Span<RegisterInfo>       registers,
-  const FunctionPtr&       pfnHookCb,
+  const FunctionRef&       pfnHookCb,
   const LowLevelHookInfo&  info)
 {
   status_ = (status_   != Status::Ok) ? status_                     :

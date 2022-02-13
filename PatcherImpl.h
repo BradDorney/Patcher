@@ -540,7 +540,7 @@ class SmallVector {
 public:
   constexpr SmallVector() : localStorage_{}, pData_(&localStorage_[0]), numElements_(0), capacity_(InitialSize) { }
   explicit  SmallVector(size_t size) : numElements_(0), capacity_(InitialSize)
-    { pData_ = (size > ArrayLen(localStorage_)) ? static_cast<uint8*>(malloc(numElements_)) : &localStorage_[0]; }
+    { pData_ = (size > ArrayLen(localStorage_)) ? static_cast<uint8*>(malloc(size)) : &localStorage_[0]; }
   explicit  SmallVector(Span<T> src);
   template <size_t N>  SmallVector(const SmallVector<T, N>& src) : SmallVector(Span<T>(src.Data(), src.Size())) { }
   template <size_t N>  SmallVector(SmallVector<T, N>&& src);

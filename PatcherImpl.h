@@ -323,6 +323,9 @@ constexpr U Max(const T1& a, const T2& b) { return (static_cast<U>(a) > static_c
 template <typename T1, typename T2, typename U = CommonType<T1, T2>>
 constexpr U Min(const T1& a, const T2& b) { return (static_cast<U>(a) < static_cast<U>(b)) ? a : b; }
 
+// Gets the length of an array.
+template <typename T, size_t N>  constexpr uint32 ArrayLen(const T (&src)[N]) { return static_cast<uint32>(N); }
+
 ///@{ @internal  Template metafunction used to obtain function call signature information from a callable.
 template <typename T, typename = void>  struct FuncTraitsImpl   :   public FuncTraitsImpl<decltype(&T::operator())>{};
 template <typename T>                   using  FuncTraits       = typename FuncTraitsImpl<Decay<T>>::Type;
@@ -530,30 +533,49 @@ private:
   size_t    length_;
 };
 
-/// RAII byte array container with a fixed-size initial storage buffer that mallocs on creation if the requested size
-/// exceeds the initial size.  Suitable for use in containers.
-template <size_t InitialSize>
-class ByteArray {
+/// RAII growable array container with a fixed-size initial storage buffer.  POD types only.
+template <typename T, size_t InitialSize = 10>
+class SmallVector {
+  static_assert(std::is_trivially_copyable<T>::value, "SmallVector only supports POD types.");
 public:
-  explicit ByteArray(size_t size);
-  ByteArray(const void* pSrc, size_t size);
-  template <size_t N>  ByteArray(const uint8 (&src)[N])   : ByteArray(&src[0],    N)          { }
-  template <size_t N>  ByteArray(const ByteArray<N>& src) : ByteArray(src.Data(), src.Size()) { }
-  template <size_t N>  ByteArray(ByteArray<N>&& src);
+  constexpr SmallVector() : localStorage_{}, pData_(&localStorage_[0]), numElements_(0), capacity_(InitialSize) { }
+  explicit  SmallVector(size_t size) : numElements_(0), capacity_(InitialSize)
+    { pData_ = (size > ArrayLen(localStorage_)) ? static_cast<uint8*>(malloc(numElements_)) : &localStorage_[0]; }
+  explicit  SmallVector(Span<T> src);
+  template <size_t N>  SmallVector(const SmallVector<T, N>& src) : SmallVector(Span<T>(src.Data(), src.Size())) { }
+  template <size_t N>  SmallVector(SmallVector<T, N>&& src);
 
-  ~ByteArray() { if (pData_ != &localStorage_[0]) { free(pData_); } }
+  ~SmallVector() { if (pData_ != &localStorage_[0]) { free(pData_); } }
 
-  size_t Size() const { return size_; }
+  size_t size() const { return numElements_; }
 
-  const uint8* Data() const { return pData_; }
-  uint8*       Data()       { return pData_; }
+  const T* data() const { return pData_; }
+  T*       data()       { return pData_; }
 
-  bool Append(const void* pSrc, size_t size);
+  bool Reserve(size_t newCapacity);
+
+  bool Push(const T& element) {
+    const bool result = Reserve(numElements_ + 1);
+    if (result) {
+      pData_[numElements_++] = element;
+    }
+    return result;
+  }
+
+  bool Append(Span<T> elements) {
+    const bool result = Reserve(numElements_ + elements.Length());
+    if (result) {
+      memcpy(&pData_[numElements_], elements.Data(), elements.Length());
+      numElements_ += elements.Length();
+    }
+    return result;
+  }
 
 protected:
-  uint8   localStorage_[InitialSize];
-  uint8*  pData_;
-  size_t  size_;
+  T       localStorage_[InitialSize];
+  T*      pData_;
+  size_t  numElements_;
+  size_t  capacity_;
 };
 } // Impl
 
@@ -991,103 +1013,83 @@ auto PmfCast(
 namespace Impl {
 
 // =====================================================================================================================
-template <size_t InitialSize>
-ByteArray<InitialSize>::ByteArray(
-  size_t size)
+template <typename T, size_t InitialSize>
+SmallVector<T, InitialSize>::SmallVector(
+  Span<T> src)
   :
   pData_(&localStorage_[0]),
-  size_(size)
+  numElements_(src.Length()),
+  capacity_(InitialSize)
 {
-  if (size > sizeof(localStorage_)) {
-    // Dynamically allocate storage buffer exceeding InitialSize.
-    pData_ = static_cast<uint8*>(malloc(size_));
-    if (pData_ != nullptr) {
-      memset(pData_, 0, size);
-    }
-  }
-  else {
-    memset(&localStorage_[0], 0, sizeof(localStorage_));
-  }
-}
+  assert(src.Data() != nullptr);
 
-// =====================================================================================================================
-template <size_t InitialSize>
-ByteArray<InitialSize>::ByteArray(
-  const void*  pSrc,
-  size_t       size)
-  :
-  pData_(&localStorage_[0]),
-  size_(size)
-{
-  assert(pSrc != nullptr);
-
-  if (size > sizeof(localStorage_)) {
+  if (src.Length() > ArrayLen(localStorage_)) {
     // Dynamically allocate storage buffer exceeding InitialSize.
-    pData_ = static_cast<uint8*>(malloc(size_));
+    pData_ = static_cast<T*>(malloc(numElements_));
   }
 
   if (pData_) {
-    memcpy(pData_, pSrc, size);
+    memcpy(pData_, src.Data(), src.Length());
   }
 }
 
 // =====================================================================================================================
-template <size_t InitialSize> template <size_t N>
-ByteArray<InitialSize>::ByteArray(
-  ByteArray<N>&& src)
+template <typename T, size_t InitialSize> template <size_t N>
+SmallVector<T, InitialSize>::SmallVector(
+  SmallVector<T, N>&& src)
   :
   pData_(&localStorage_[0]),
-  size_(src.Size())
+  numElements_(src.numElements_),
+  capacity_(src.capacity_)
 {
   if (src.pData_ != &src.localStorage_[0]) {
     // Take ownership of the dynamic allocation of the ByteArray we're moving from.
-    pData_ = src.pData_;
+    pData_    = src.pData_;
+    capacity_ = src.capacity_;
   }
   else if (src.pData_ != nullptr) {
-    if (size_ > sizeof(localStorage_)) {
+    if (numElements_ > ArrayLen(localStorage_)) {
       // Dynamically allocate storage buffer exceeding InitialSize.
-      pData_ = static_cast<uint8*>(malloc(size_));
+      pData_ = static_cast<T*>(malloc(numElements_));
     }
 
     if (pData_) {
-      memcpy(pData_, src.pData_, size_);
+      memcpy(pData_, src.pData_, numElements_);
     }
   }
   else {
-    pData_ = nullptr;
-    size_  = 0;
+    pData_        = nullptr;
+    numElements_  = 0;
+    capacity_     = 0;
   }
 
-  src.pData_ = nullptr;
-  src.size_  = 0;
+  src.pData_        = nullptr;
+  src.numElements_  = 0;
+  src.capacity_     = 0;
 }
 
 // =====================================================================================================================
-template <size_t InitialSize>
-bool ByteArray<InitialSize>::Append(
-  const void*  pSrc,
-  size_t       size)
+template <typename T, size_t InitialSize>
+bool SmallVector<T, InitialSize>::Reserve(
+  size_t newCapacity)
 {
   bool result = true;
 
-  if ((size + size_) > InitialSize) {
-    // Dynamically allocate storage buffer exceeding InitialSize.
-    uint8*const pNewData = static_cast<uint8*>(malloc(size + size_));
+  if (newCapacity > capacity_) {
+    // Dynamically allocate storage buffer.
+    T*const pNewData = static_cast<T*>(malloc(newCapacity));
 
     if (pNewData != nullptr) {
-      memcpy(pNewData, pData_, size_);
+      memcpy(pNewData, pData_, numElements_);
       if (pData_ != &localStorage_[0]) {
         free(pData_);
       }
-      pData_ = pNewData;
+      pData_    = pNewData;
+      capacity_ = newCapacity;
     }
     else {
       result = false;
     }
-  }
-  if (result == true) {
-    memcpy(&pData_[size_], pSrc, size);
-    size_ += size;
   }
 
   return result;

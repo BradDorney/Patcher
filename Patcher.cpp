@@ -193,9 +193,6 @@ constexpr bool IsFarDisplacement(ptrdiff_t displacement) { return IsX86_64 && (d
 // Calculates a hash using std::hash.
 template <typename T>  static size_t Hash(const T& src) { return std::hash<T>()(src); }
 
-// Gets the length of an array.
-template <typename T, size_t N>  constexpr uint32 ArrayLen(const T (&src)[N]) { return static_cast<uint32>(N); }
-
 // Gets the OS system info, which includes memory allocator parameters.
 static const SYSTEM_INFO& SystemInfo()
   { static SYSTEM_INFO si = []{ SYSTEM_INFO si;  GetSystemInfo(&si);  return si; }();  return si; }
@@ -762,7 +759,7 @@ Status PatchContext::Revert(
   if (it != historyAt_.end()) {
     const PatchInfo& entry = *it->second;
 
-    Memcpy(entry.pAddress, entry.oldData.Data(), entry.oldData.Size());
+    Memcpy(entry.pAddress, entry.oldData.data(), entry.oldData.size());
 
     if (status_ == Status::Ok) {
       if (entry.pTrackedAlloc != nullptr) {
@@ -805,7 +802,7 @@ Status PatchContext::RevertAll() {
   Status endStatus = status_ = Status::Ok;
 
   for (const auto& entry: history_) {
-    Memcpy(entry.pAddress, entry.oldData.Data(), entry.oldData.Size());
+    Memcpy(entry.pAddress, entry.oldData.data(), entry.oldData.size());
 
     if ((status_ == Status::Ok) || (status_ == Status::FailModuleUnloaded)) {
       if (entry.pTrackedAlloc != nullptr) {
@@ -1019,17 +1016,17 @@ Status PatchContext::Touch(
     auto it = historyAt_.find(pAddress);
     if (it == historyAt_.end()) {
       const size_t oldSize = history_.size();
-      history_.emplace_front(PatchInfo{ pAddress, ByteArray<StorageSize>(pAddress, size) });
+      history_.emplace_front(PatchInfo{ pAddress, DataStorage({ (uint8*)(pAddress), size }) });
 
       if ((history_.size() == oldSize) || (historyAt_.emplace(pAddress, history_.begin()).first == historyAt_.end())) {
         status_ = Status::FailMemAlloc;
       }
     }
     else {
-      ByteArray<StorageSize>& oldData = it->second->oldData;
-      if (oldData.Size() < size) {
+      DataStorage& oldData = it->second->oldData;
+      if (oldData.size() < size) {
         // Merge the original tracked data with the extra bytes we also need to track.
-        oldData.Append(PtrInc(pAddress, oldData.Size()), (size - oldData.Size()));
+        oldData.Append({ PtrInc<uint8*>(pAddress, oldData.size()), (size - oldData.size()) });
       }
     }
   }
@@ -1173,12 +1170,12 @@ Status PatchContext::ReplaceReferencesToGlobal(
         if (pRelocArray[i].type == IMAGE_REL_BASED_HIGHLOW) {
           ptrSize  = 4;
           pAddress = reinterpret_cast<const void*>(static_cast<uintptr>(*static_cast<uint32*>(
-            ((pHistoryData != nullptr) && (pHistoryData->Size() == ptrSize)) ? pHistoryData->Data() : ppAddress)));
+            ((pHistoryData != nullptr) && (pHistoryData->size() == ptrSize)) ? pHistoryData->data() : ppAddress)));
         }
         else if (pRelocArray[i].type == IMAGE_REL_BASED_DIR64) {
           ptrSize  = 8;
           pAddress = reinterpret_cast<const void*>(*static_cast<uint64*>(
-            ((pHistoryData != nullptr) && (pHistoryData->Size() == ptrSize)) ? pHistoryData->Data() : ppAddress));
+            ((pHistoryData != nullptr) && (pHistoryData->size() == ptrSize)) ? pHistoryData->data() : ppAddress));
         }
 
         if ((pAddress != nullptr) && (ptrSize != 0)) {

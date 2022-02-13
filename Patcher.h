@@ -296,16 +296,16 @@ private:
   Allocator*     pAllocator_;       ///< Code allocator instance used by this PatchContext.
   PatcherStatus  status_;           ///< Status of this PatchContext.  If this is an error, most methods become a no-op.
 
-  static constexpr size_t StorageSize = 8;
+  using DataStorage = Impl::SmallVector<uint8, 8>;
 
   /// @internal  Struct for storing mappings of patch addresses to infomation required for cleanup and other purposes.
   struct PatchInfo {
-    void*                        pAddress;         ///< Actual patch address (may differ from requested address)
-    Impl::ByteArray<StorageSize> oldData;          ///< Old memory copy
-    void*                        pTrackedAlloc;    ///< Tracked allocation, e.g. trampoline code (optional)
-    size_t                       trackedAllocSize; ///< Tracked allocation size (optional)
-    std::shared_ptr<void>        pFunctorObj;      ///< Pointer to functor object; also owns thunk allocation (optional)
-    const void*                  pfnFunctorThunk;  ///< Pointer to functor thunk code allocation (optional)
+    void*                   pAddress;          ///< Actual patch address (may differ from requested address)
+    DataStorage             oldData;           ///< Old memory copy
+    void*                   pTrackedAlloc;     ///< Tracked allocation, e.g. trampoline code (optional)
+    size_t                  trackedAllocSize;  ///< Tracked allocation size (optional)
+    std::shared_ptr<void>   pFunctorObj;       ///< Pointer to functor object; also owns thunk allocation (optional)
+    const void*             pfnFunctorThunk;   ///< Pointer to functor thunk code allocation (optional)
   };
 
   /// Patch history, sorted from newest to oldest.

@@ -547,23 +547,47 @@ public:
 
   ~SmallVector() { if (pData_ != &localStorage_[0]) { free(pData_); } }
 
-  size_t size() const { return numElements_; }
+                  T* begin()        { return pData_;                }
+  constexpr const T* begin()  const { return pData_;                }
+  constexpr const T* cbegin() const { return pData_;                }
+                  T* end()          { return pData_ + numElements_; }
+  constexpr const T* end()    const { return pData_ + numElements_; }
+  constexpr const T* cend()   const { return pData_ + numElements_; }
 
-  const T* data() const { return pData_; }
-  T*       data()       { return pData_; }
+  constexpr size_t size()  const { return numElements_;  }
+  constexpr bool   empty() const { return (size() == 0); }
+
+                  T* data()       { return pData_; }
+  constexpr const T* data() const { return pData_; }
+
+  template <typename I>                  T& operator[](I index)       { return *(pData_ + static_cast<size_t>(index)); }
+  template <typename I>  constexpr const T& operator[](I index) const { return *(pData_ + static_cast<size_t>(index)); }
 
   bool Reserve(size_t newCapacity);
+  bool Grow(size_t numElements) {
+    const size_t totalElements = numElements_ + numElements;
+    return Reserve((totalElements > capacity_) ? Max(totalElements, (capacity_ * 2)) : 0);
+  }
 
   bool Push(const T& element) {
-    const bool result = Reserve(numElements_ + 1);
+    const bool result = Grow(1);
     if (result) {
       pData_[numElements_++] = element;
     }
     return result;
   }
 
+  template <typename... Ts>
+  bool Emplace(Ts&&... args) {
+    const bool result = Grow(1);
+    if (result) {
+      pData_[numElements_++] = { std::forward<Ts>(args)... };
+    }
+    return result;
+  }
+
   bool Append(Span<T> elements) {
-    const bool result = Reserve(numElements_ + elements.Length());
+    const bool result = Grow(elements.Length());
     if (result) {
       memcpy(&pData_[numElements_], elements.Data(), elements.Length());
       numElements_ += elements.Length();

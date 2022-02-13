@@ -240,8 +240,6 @@ public:
   ///
   /// @example  EditExports({ { 0x401260, "AddUndecoratedExport" },  { 0x402000, "_AddDecoratedCFastcallExport@8"  } })
   /// @example  EditExports({ { 0x404000, 1 /* By ordinal */     },  { nullptr, "?DeleteDecoratedCppExport@@YAXXZ" } })
-  /// 
-  /// @note  32-bit x86 only.
   PatcherStatus EditExports(Span<ExportInfo> exportInfos);
 
   PatcherStatus Memcpy(TargetPtr pAddress, const void* pSrc, size_t size);            ///< Safe memcpy to module memory.
@@ -296,16 +294,16 @@ private:
   Allocator*     pAllocator_;       ///< Code allocator instance used by this PatchContext.
   PatcherStatus  status_;           ///< Status of this PatchContext.  If this is an error, most methods become a no-op.
 
-  using DataStorage = Impl::SmallVector<uint8, 8>;
+  using DataStorage        = Impl::SmallVector<uint8, 8>;
+  using TrackedAllocVector = Impl::SmallVector<std::pair<void*, size_t>, (IsX86_64 ? 2 : 1)>;
 
   /// @internal  Struct for storing mappings of patch addresses to infomation required for cleanup and other purposes.
   struct PatchInfo {
-    void*                   pAddress;          ///< Actual patch address (may differ from requested address)
-    DataStorage             oldData;           ///< Old memory copy
-    void*                   pTrackedAlloc;     ///< Tracked allocation, e.g. trampoline code (optional)
-    size_t                  trackedAllocSize;  ///< Tracked allocation size (optional)
-    std::shared_ptr<void>   pFunctorObj;       ///< Pointer to functor object; also owns thunk allocation (optional)
-    const void*             pfnFunctorThunk;   ///< Pointer to functor thunk code allocation (optional)
+    void*                 pAddress;         ///< Actual patch address (may differ from requested address)
+    DataStorage           oldData;          ///< Old memory copy
+    TrackedAllocVector    trackedAllocs;    ///< Tracked allocations, e.g. trampoline code, far thunk, etc. (optional)
+    std::shared_ptr<void> pFunctorObj;      ///< Pointer to functor object; also owns thunk allocation (optional)
+    const void*           pfnFunctorThunk;  ///< Pointer to functor thunk code allocation (optional)
   };
 
   /// Patch history, sorted from newest to oldest.

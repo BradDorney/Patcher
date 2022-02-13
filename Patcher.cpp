@@ -762,11 +762,10 @@ Status PatchContext::Revert(
     Memcpy(entry.pAddress, entry.oldData.data(), entry.oldData.size());
 
     if (status_ == Status::Ok) {
-      if (entry.pTrackedAlloc != nullptr) {
-        AdvanceThreads(entry.pTrackedAlloc, entry.trackedAllocSize);
-
-        // If Memcpy failed, this won't get cleaned up until the allocation heap is destroyed.
-        pAllocator_->Free(entry.pTrackedAlloc);
+      // Note: if Memcpy failed, tracked allocs won't get cleaned up until the trampoline allocation heap is destroyed.
+      for (const auto& alloc : entry.trackedAllocs) {
+        AdvanceThreads(alloc.first, alloc.second);
+        pAllocator_->Free(alloc.first);
       }
 
       if (entry.pfnFunctorThunk != nullptr) {
@@ -805,11 +804,10 @@ Status PatchContext::RevertAll() {
     Memcpy(entry.pAddress, entry.oldData.data(), entry.oldData.size());
 
     if ((status_ == Status::Ok) || (status_ == Status::FailModuleUnloaded)) {
-      if (entry.pTrackedAlloc != nullptr) {
-        AdvanceThreads(entry.pTrackedAlloc, entry.trackedAllocSize);
-
-        // If Memcpy failed, this won't get cleaned up until the trampoline allocation heap is destroyed.
-        pAllocator_->Free(entry.pTrackedAlloc);
+      // Note: if Memcpy failed, tracked allocs won't get cleaned up until the trampoline allocation heap is destroyed.
+      for (const auto& alloc : entry.trackedAllocs) {
+        AdvanceThreads(alloc.first, alloc.second);
+        pAllocator_->Free(alloc.first);
       }
 
       if (entry.pfnFunctorThunk != nullptr) {
@@ -978,25 +976,27 @@ Status PatchContext::AdvanceThreads(
   const void*  pAddress,
   size_t       size)
 {
-  const uintptr address = reinterpret_cast<uintptr>(pAddress);
+  if (size != 0) {
+    const uintptr address = reinterpret_cast<uintptr>(pAddress);
 
-  for (auto& threadInfo : frozenThreads_) {
-    if ((threadInfo.second >= address) && (threadInfo.second < (address + size))) {
-      HANDLE hThread = OpenThread(OpenThreadFlags, FALSE, threadInfo.first);
+    for (auto& threadInfo : frozenThreads_) {
+      if ((threadInfo.second >= address) && (threadInfo.second < (address + size))) {
+        HANDLE hThread = OpenThread(OpenThreadFlags, FALSE, threadInfo.first);
 
-      if (hThread != NULL) {
-        threadInfo.second = AdvanceThread(hThread, pAddress, size);
-        CloseHandle(hThread);
+        if (hThread != NULL) {
+          threadInfo.second = AdvanceThread(hThread, pAddress, size);
+          CloseHandle(hThread);
+        }
+        else {
+          status_ = Status::FailLockThreads;
+          break;
+        }
       }
-      else {
+
+      if ((threadInfo.second >= address) && (threadInfo.second < (address + size))) {
         status_ = Status::FailLockThreads;
         break;
       }
-    }
-
-    if ((threadInfo.second >= address) && (threadInfo.second < (address + size))) {
-      status_ = Status::FailLockThreads;
-      break;
     }
   }
 
@@ -1778,10 +1778,11 @@ Status PatchContext::Hook(
     PatchInfo& entry = *historyAt_[pAddress];
 
     // Add trampoline/functor info to the history tracker entry for this patch so we can clean it up later.
-    entry.pTrackedAlloc    = (pFarThunk != nullptr) ? pFarThunk : pTrampoline;
-    entry.trackedAllocSize = trampolineSize;
-    entry.pFunctorObj      = pfnNewFunction.Functor();
-    entry.pfnFunctorThunk  =
+    if ((pFarThunk != nullptr) || (pTrampoline != nullptr)) {
+      entry.trackedAllocs.Emplace(((pFarThunk != nullptr) ? pFarThunk : pTrampoline), trampolineSize);
+    }
+    entry.pFunctorObj     = pfnNewFunction.Functor();
+    entry.pfnFunctorThunk =
       ((needsFarThunk == false) && (pfnNewFunction.Functor() != nullptr)) ? pfnNewFunction : nullptr;
 
     if (pPfnTrampoline != nullptr) {
@@ -1891,8 +1892,9 @@ Status PatchContext::HookCall(
   if (status_ == Status::Ok) {
     // Add functor and far thunk info to the history tracker entry for this patch so we can clean it up later.
     auto& entry = *historyAt_[pAddress];
-    entry.pTrackedAlloc    = pFarThunk;
-    entry.trackedAllocSize = isFar ? FarThunkSize : 0;
+    if (isFar) {
+      entry.trackedAllocs.Emplace(pFarThunk, FarThunkSize);
+    }
     entry.pFunctorObj      = pfnNewFunction.Functor();
     entry.pfnFunctorThunk  = ((isFar == false) && (pfnNewFunction.Functor() != nullptr)) ? pfnNewFunction : nullptr;
   }
@@ -2502,10 +2504,8 @@ Status PatchContext::LowLevelHook(
     PatchInfo& entry = *historyAt_[pAddress];
 
     // Add trampoline (and functor) info to the history tracker entry for this patch so we can clean it up later.
-    entry.pTrackedAlloc    = pTrampoline;
-    entry.trackedAllocSize = trampolineSize;
-    entry.pFunctorObj      = pfnHookCb.Functor();
-    entry.pfnFunctorThunk  = (pfnHookCb.Functor() != nullptr) ? pfnHookCb : nullptr;
+    entry.trackedAllocs.Emplace(pTrampoline, trampolineSize);
+    entry.pFunctorObj = pfnHookCb.Functor();
   }
   else if (pTrampoline != nullptr) {
     pAllocator_->Free(pTrampoline);
@@ -2525,13 +2525,9 @@ Status PatchContext::EditExports(
     status_ = Status::FailInvalidModule;
   }
 
-  if ((status_ == Status::Ok) && IsX86_64) {
-    // ** TODO x64 Would need to generate far jump thunks for new/replacement functions injected
-    status_ = Status::FailUnsupported;
-  }
-
   if (status_ == Status::Ok) {
     std::vector<void*>            exports;
+    std::vector<void*>            farThunks;
     std::unordered_set<uint16>    forwardExportOrdinals;
     std::map<std::string, uint16> namesToOrdinals;  // Name table must be sorted, so use map rather than unordered_map.
 
@@ -2636,7 +2632,7 @@ Status PatchContext::EditExports(
 
     const size_t allocSize =
       (HeaderSize + addressTableSize + namePtrTableSize + nameOrdinalTableSize + totalNameStrlen + totalForwardStrlen);
-    void*const pAllocation = pAllocator_->Alloc(allocSize);
+    void*const pAllocation = pAllocator_->Alloc(allocSize);  // We must allocate this within 32-bit signed addressing.
 
     if (pAllocation != nullptr) {
       auto*const  pHeader              = static_cast<IMAGE_EXPORT_DIRECTORY*>(pAllocation);
@@ -2663,9 +2659,22 @@ Status PatchContext::EditExports(
       // Export Name Table.
       AppendString(&pStringBuffer, moduleName);
 
-      for (uint32 i = 0; i < exports.size(); ++i) {
+      for (uint32 i = 0; ((status_ == Status::Ok) && (i < exports.size())); ++i) {
         if (forwardExportOrdinals.count(i) == 0) {
-          pAddressTable[i] = (exports[i] != nullptr) ? static_cast<uint32>(PtrDelta(exports[i], hModule_)) : 0;
+          size_t exportRva = (exports[i] != nullptr) ? PtrDelta(exports[i], hModule_) : 0;
+
+          if (IsFarDisplacement(exportRva)) {
+            // Exports must be within 32-bit addressing.
+            void*const pFarThunk = pAllocator_->Alloc(FarThunkSize, CodeAlignment);
+            status_ = (pFarThunk != nullptr) ? CreateFarThunk(pFarThunk, exports[i]) : Status::FailMemAlloc;
+
+            if (status_ == Status::Ok) {
+              exportRva = PtrDelta(pFarThunk, hModule_);
+              farThunks.push_back(pFarThunk);
+            }
+          }
+
+          pAddressTable[i] = static_cast<uint32>(exportRva);
         }
         else {
           pAddressTable[i] = static_cast<uint32>(PtrDelta(pForwardStringBuffer, hModule_));
@@ -2679,20 +2688,35 @@ Status PatchContext::EditExports(
         AppendString(&pStringBuffer, nameOrdinal.first);
       }
 
-      // If we previously had injected exports, revert it to clean up the heap allocation for it.
-      Revert(pExportDataDir);
+      const bool previouslyEdited = HasPatched(pExportDataDir);
 
       // Modify the module's header to point to our new export table.
       Write(pExportDataDir, IMAGE_DATA_DIRECTORY{ DWORD(PtrDelta(pAllocation, hModule_)), DWORD(allocSize) });
 
       if (status_ == Status::Ok) {
-        // Add export table allocation info to the history tracker entry for this patch so we can clean it up later.
+        // Add export table allocation and far thunk info to the history tracker entry for this patch so we can clean it
+        // up later.
         auto& entry = *historyAt_[pExportDataDir];
-        entry.pTrackedAlloc    = pAllocation;
-        entry.trackedAllocSize = allocSize;
+
+        if (previouslyEdited && (entry.trackedAllocs.empty() == false)) {
+          // If we previously had injected exports, we need to clean up the heap allocation for the old table.
+          pAllocator_->Free(entry.trackedAllocs[0].first);
+        }
+        else {
+          entry.trackedAllocs.Emplace();  // Ensure element 0 exists, which is reserved for the table pointer.
+        }
+
+        entry.trackedAllocs.Reserve(1 + farThunks.size());
+        entry.trackedAllocs[0] = { pAllocation, 0 };
+        for (void* pFarThunk : farThunks) {
+          entry.trackedAllocs.Emplace(pFarThunk, FarThunkSize);
+        }
       }
       else {
         pAllocator_->Free(pAllocation);
+        for (void* pFarThunk : farThunks) {
+          pAllocator_->Free(pFarThunk);
+        }
       }
     }
     else {

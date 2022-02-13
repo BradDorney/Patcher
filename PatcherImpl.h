@@ -539,7 +539,7 @@ class SmallVector {
   static_assert(std::is_trivially_copyable<T>::value, "SmallVector only supports POD types.");
 public:
   constexpr SmallVector() : localStorage_{}, pData_(&localStorage_[0]), numElements_(0), capacity_(InitialSize) { }
-  explicit  SmallVector(size_t size) : numElements_(0), capacity_(InitialSize)
+  explicit  SmallVector(size_t size) : numElements_(0), capacity_(Max(InitialSize, size))
     { pData_ = (size > ArrayLen(localStorage_)) ? static_cast<uint8*>(malloc(size)) : &localStorage_[0]; }
   explicit  SmallVector(Span<T> src);
   template <size_t N>  SmallVector(const SmallVector<T, N>& src) : SmallVector(Span<T>(src.Data(), src.Size())) { }

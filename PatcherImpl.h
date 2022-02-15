@@ -566,7 +566,7 @@ public:
   bool Reserve(size_t newCapacity);
   bool Grow(size_t numElements) {
     const size_t totalElements = numElements_ + numElements;
-    return Reserve((totalElements > capacity_) ? Max(totalElements, (capacity_ * 2)) : 0);
+    return Reserve((totalElements > capacity_) ? Max((totalElements + capacity_), (capacity_ * 2)) : 0);
   }
 
   bool Push(const T& element) {
@@ -640,7 +640,7 @@ public:
 
   /// Conversion constructor for raw uint addresses.  Defaults to relocated.
   constexpr TargetPtr(uintptr address, bool relocate = true)  :  address_(address),  relocate_(relocate) { }
-  
+
   /// Conversion constructor for function pointers.  Never relocated.
   template <typename T, typename = Impl::EnableIf<std::is_function<Impl::RemoveCvRefPtr<T>>::value>>
   constexpr TargetPtr(T pfn) : pAddress_((void*)(pfn)), relocate_() { }  // C-style cast due to constexpr quirks.
@@ -894,6 +894,7 @@ struct DummyFactory<T, true> {
 } // Impl
 
 namespace Util {
+// =====================================================================================================================
 /// Helper function for getting the virtual function table for a given type.  If an object instance is not provided, a
 /// dummy instance will attempt to be created - this may potentially be unsafe depending on constructor implementation!
 template <typename T>
@@ -920,7 +921,7 @@ void** GetVftable(
   return pVftable;
 }
 
-// PmfCast() implementation.
+// =====================================================================================================================
 template <typename T, typename Pfn>
 auto PmfCast(
   Pfn   T::*  pmf,
@@ -936,7 +937,7 @@ auto PmfCast(
   // Test if this is a virtual PMF, which requires special compiler-specific handling and an object instance.  If so and
   // pThis was not provided, then we will need to try to create a dummy object instance in order to get the vftable. 
   // Non-virtual PMFs are straightforward to convert, and do not require an object instance.
-  
+
 #if PATCHER_UNIX_ABI
   // In the Itanium ABI (used by GCC, Clang, etc. for x86), virtual PMFs have the low bit set to 1.
   if (std::is_polymorphic<T>::value && (cast.vftOffset & 1)) {
@@ -1035,7 +1036,6 @@ auto PmfCast(
 
 
 namespace Impl {
-
 // =====================================================================================================================
 template <typename T, size_t InitialSize>
 SmallVector<T, InitialSize>::SmallVector(

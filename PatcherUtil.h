@@ -69,6 +69,9 @@ PATCHER_EMIT_CALLING_CONVENTIONS(PATCHER_CREATE_FUNCTOR_INVOKER_DEF);
 
 /// Settings passed to LowLevelHook() for hook callback behavior, performance, etc.  Some flags can be template-deduced.
 struct LowLevelHookInfo {
+  Impl::TargetPtr pDefaultReturnAddr; ///< If set, overrides the default return address when callback returns nullptr or
+                                      ///  void.  Otherwise, the default return address will be to the original code.
+
   uint32 noCustomReturnAddr  :  1;  ///< Callback return address not allowed (i.e. callback function returns void).
   uint32 noBaseRelocReturn   :  1;  ///< Do not auto-adjust callback return address for module base relocation.
   uint32 noShortReturnAddr   :  1;  ///< Assume callback return address can't overlap overwritten area (x86: 5 bytes)
@@ -78,9 +81,6 @@ struct LowLevelHookInfo {
   uint32 noRestoreFlagsReg   :  1;  ///< Do not save/restore the flags register state, which can be expensive.
   uint32 debugBreakpoint     :  1;  ///< Adds a debug breakpoint to the start of the trampoline code.
   uint32 reserved            : 24;  ///< Reserved for future use.
-
-  Impl::TargetPtr pDefaultReturnAddr; ///< If set, overrides the default return address when callback returns nullptr or
-                                      ///  void.  Otherwise, the default return address will be to the original code.
 
   uint32 reserveStackSize;  ///< Size in bytes of extra stack space to reserve.  Set this if you intend to modify ESP to
                             ///  allocate space on the stack (up to a maximum of the specified size).

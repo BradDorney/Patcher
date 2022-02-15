@@ -210,7 +210,7 @@ public:
 
   Assembler& Byte(uint8 byte)                   { (pWriter_++)[0] = byte;                   return *this; }
   Assembler& ByteIf(bool condition, uint8 byte) { if (condition) { Byte(byte); }            return *this; }
-  Assembler& Bytes(Span<uint8> bytes) 
+  Assembler& Bytes(Span<uint8> bytes)
     { std::copy(bytes.begin(), bytes.end(), pWriter_);  pWriter_ += bytes.Length();         return *this; }
   Assembler& BytesIf(bool condition, Span<uint8> bytes) { if (condition) { Bytes(bytes); }  return *this; }
 
@@ -1502,7 +1502,7 @@ static void CopyInstructions(
     isNear      = isInternal || ((targetOffset <= INT32_MAX) && (targetOffset >= INT32_MIN));
 #endif
   };
-  
+
   auto WritePcRel32Operand = [pWriter, &isInternal, &target, &offset, &internalPcRel32Relocs] {
     if (isInternal) {
       internalPcRel32Relocs.emplace_back(pWriter->GetNext<int32*>(), int32(offset));
@@ -1598,7 +1598,7 @@ static Status CreateTrampoline(
 {
   assert((pAddress != nullptr) && (ppTrampoline != nullptr) && (pAllocator != nullptr));
   assert((prologSize % CodeAlignment) == 0);
-  
+
   void*  pTrampoline = nullptr;
   size_t allocSize   = 0;
 
@@ -1961,27 +1961,19 @@ static size_t CreateLowLevelHookTrampoline(
 
   std::vector<RegisterInfo> stackRegisters;  // Registers, in order they are pushed to the stack in (RTL).
   stackRegisters.reserve(registers.Length() + ArrayLen(VolatileRegisters) + numByRef + 2);  // +2 for ESP and Eflags
-  uint32 regValueIndex[uint32(Register::Count)];  // Stack slot indexes of register values (-1 if not present).
-  for (uint32 i = 0; i < uint32(Register::Count); regValueIndex[i++] = UINT_MAX);  // ** TODO Clean this up
-  uint32 returnRegIndex = UINT_MAX;
-  uint32 stackRegIndex  = UINT_MAX;
-  uint32 stackRegOffset = 0;  // ** TODO Optimize this away in logic
+
+  uint32 regValueIndexData[uint32(Register::Count)]; // Stack slot indexes of register values (UINT_MAX if not present).
+  for (uint32 i = 0; i < uint32(Register::Count); regValueIndexData[i++] = UINT_MAX);
+  const Span<uint32> regValueIndex(regValueIndexData);
+
   uint32 firstArgIndex  = 0;
 
-  auto AddRegisterToStack =
-    [&stackRegisters, &returnRegIndex, &stackRegIndex, &stackRegOffset, &regValueIndex](RegisterInfo reg) {
-      if ((reg.type == ReturnRegister) && ((returnRegIndex == UINT_MAX) || reg.byReference)) {
-        returnRegIndex = uint32(stackRegisters.size());
-      }
-      else if ((reg.type == StackRegister) && ((stackRegIndex == UINT_MAX) || ((reg.offset == 0) && reg.byReference))) {
-        stackRegIndex  = uint32(stackRegisters.size());
-        stackRegOffset = reg.offset;
-      }
-      if ((regValueIndex[uint32(reg.type)] == UINT_MAX) && (reg.offset == 0)) {
-        regValueIndex[uint32(reg.type)] = uint32(stackRegisters.size());  // ** TODO
-      }
-      stackRegisters.push_back(reg);
-    };
+  auto AddRegisterToStack = [&stackRegisters, &regValueIndexData, regValueIndex](RegisterInfo reg) {
+    if ((reg.type != ByReference) && (reg.offset == 0) && ((regValueIndex[reg.type] == UINT_MAX) || reg.byReference)) {
+      regValueIndexData[uint32(reg.type)] = uint32(stackRegisters.size());
+    }
+    stackRegisters.push_back(reg);
+  };
 
   // Registers that the ABI considers volatile between function calls must be pushed to the stack unconditionally.
   // Find which ones haven't been explicitly requested, and have them be pushed to the stack before everything else.
@@ -2054,7 +2046,7 @@ static size_t CreateLowLevelHookTrampoline(
     // Ensure the stack address upon reaching the upcoming call instruction is aligned to ABI requirements.
     // This always pushes the original stack pointer (and flags register if needed) to the stack after aligning.
     // Generating this code isn't necessary if stack alignment <= register size (i.e. MSVC x86-32).
-    const size_t totalStackSize = RegisterSize * 
+    const size_t totalStackSize = RegisterSize *
       (stackRegisters.size()
         - numPassedViaRegisters                     // Passed via registers
         + ((IsX86_64 && IsMsAbi) ? 4 : 0)           // Shadow space (MS x86-64 ABI)
@@ -2222,23 +2214,23 @@ static size_t CreateLowLevelHookTrampoline(
 
   if (settings.noNullReturnDefault == false) {
     // Case 1: Return to default address (hook function returned nullptr, or custom returns are disabled)
-    const bool lateRestoreStack = (IsRegisterRequested(StackRegister) && (stackRegIndex != 0) && (stackRegOffset == 0));
+    const bool lateRestoreStack = (IsRegisterRequested(StackRegister) &&
+      (regValueIndex[StackRegister] != 0) && (regValueIndex[StackRegister] != UINT_MAX));
 
     // Restore register values from the stack.  We must take care not to clobber flags at this point.
     for (auto it = stackRegisters.rbegin(); it != stackRegisters.rend(); ++it) {
-      const Register reg   = it->type;
-      const size_t   index = stackRegisters.size() - (it - stackRegisters.rbegin()) - 1;
-      if (((reg != StackRegister) || ((index == 0) && (stackRegIndex == 0) && (stackRegOffset == 0))) &&
-           (reg != ByReference))
-      {
-        writer.Pop(reg);
-      }
-      else if ((reg == StackRegister) && (index == stackRegIndex) && lateRestoreStack) {
+      const Register reg          = it->type;
+      const size_t   index        = stackRegisters.size() - (it - stackRegisters.rbegin()) - 1;
+      const bool     needsRestore = (reg != ByReference) && (index == regValueIndex[reg]);
+      if (needsRestore && (reg == StackRegister) && lateRestoreStack) {
         // If this is the stack register, pop this arg to the near end of the scratch space.
         const int32 offset       = int32(RegisterSize * index);
         const bool  offsetIs8Bit = (offset == int8(offset));
         writer.Bytes({ 0x8F, uint8(0x44 + (offsetIs8Bit ? 0 : 0x40)), 0x24 });  // pop dword ptr [esp + offset]
         offsetIs8Bit ? writer.Value(int8(offset)) : writer.Value(offset);
+      }
+      else if (needsRestore) {
+        writer.Pop(reg);
       }
       else {
         // Skip this arg.
@@ -2249,7 +2241,7 @@ static size_t CreateLowLevelHookTrampoline(
     if (lateRestoreStack) {
       writer.Pop(StackRegister);                       // pop esp              (Restore ESP)
     }
-    else if ((stackRegIndex == UINT_MAX) || (stackRegOffset != 0)) {
+    else if (regValueIndex[StackRegister] == UINT_MAX) {
       writer.PopNil(totalReserveSize / RegisterSize);  // lea esp, [esp + i8]  (Pop scratch space and user reserve)
     }
 
@@ -2333,21 +2325,21 @@ static size_t CreateLowLevelHookTrampoline(
       pRelocateCode->branch1.branch1A.addTrampolineToOld.operand = reinterpret_cast<uintptr>(pTrampolineToOld);
     }
 
-    const bool restoreStackPtr = ((stackRegIndex != UINT_MAX) &&
-                                  (stackRegOffset == 0)       &&
-                                  (stackRegisters[stackRegIndex].byReference || (settings.noAlignStackPtr == false)));
+    const bool restoreStackPtr = (regValueIndex[StackRegister] != UINT_MAX) &&
+      (stackRegisters[regValueIndex[StackRegister]].byReference || (settings.noAlignStackPtr == false));
     if (restoreStackPtr) {
       // If we're restoring the stack pointer: save the return address to either scratch[0], or if it's been changed, to
       // just below what the SP will be; and save the new SP (with space reserved for return address) to the near end of
       // scratch, or in-place if it's the last arg to pop.
       static constexpr auto ScratchRegister = IF_X86_32(Register::Ecx) IF_X86_64(Register::Rcx);
-      const int32 stackValOffset = int32(RegisterSize * (stackRegisters.size() - stackRegIndex - 1));
-      const int32 scratchOffset  = (stackRegIndex == 0) ? stackValOffset : int32(RegisterSize * stackRegisters.size());
+      const int32 stackValOffset = int32(RegisterSize * (stackRegisters.size() - regValueIndex[StackRegister] - 1));
+      const int32 scratchOffset  =
+        (regValueIndex[StackRegister] == 0) ? stackValOffset : int32(RegisterSize * stackRegisters.size());
 
       writer.LoadStackValue(ScratchRegister, stackValOffset);     // mov ecx, dword ptr [esp + stackValOffset] (Load SP)
       if (UseRedZone) {
         writer.Bytes({ IF_X86_64(0x48,) 0x89, 0x41, uint8(-int8(RegisterSize)) });
-        if (stackRegIndex != 0) {                                 // mov dword ptr [ecx - 4], eax  (Save return address)
+        if (regValueIndex[StackRegister] != 0) {                  // mov dword ptr [ecx - 4], eax  (Save return address)
           writer.StoreStackValue(ScratchRegister, scratchOffset); // mov dword ptr [esp + scratchOffset], ecx  (Save SP)
         }
       }
@@ -2369,7 +2361,7 @@ static size_t CreateLowLevelHookTrampoline(
       const size_t   index = stackRegisters.size() - (it - stackRegisters.rbegin()) - 1;
       if (reg == StackRegister) {
         // Stack register is special cased.
-        if ((stackRegIndex != 0) || (index != 0)) {
+        if ((regValueIndex[StackRegister] != 0) || (index != 0)) {
           writer.PopNil();
         }
       }
@@ -2706,7 +2698,7 @@ Status PatchContext::EditExports(
           entry.trackedAllocs.Emplace();  // Ensure element 0 exists, which is reserved for the table pointer.
         }
 
-        entry.trackedAllocs.Reserve(1 + farThunks.size());
+        entry.trackedAllocs.Grow(farThunks.size());
         entry.trackedAllocs[0] = { pAllocation, 0 };
         for (void* pFarThunk : farThunks) {
           entry.trackedAllocs.Emplace(pFarThunk, FarThunkSize);

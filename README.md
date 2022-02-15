@@ -46,7 +46,8 @@ patcher.Hook(&SomeFunction, SetCapturedTrampoline, [F = (decltype(&SomeFunction)
 // In this example, we assume the target function uses the thiscall calling convention, so we use the ThiscallFunctor
 // util to convert the lambda to use thiscall.  There is also StdcallFunctor, FastcallFunctor, and VectorcallFunctor.
 patcher.Hook(
-  PATCHER_MFN_PTR(SomeClass::SomeVirtualFunction), ThiscallFunctor([](SomeClass* pThis, int x) { pThis->someField_ -= x; }));
+  PATCHER_MFN_PTR(SomeClass::SomeVirtualFunction),
+  ThiscallFunctor([](SomeClass* pThis, int x) { pThis->someField_ -= x; }));
 
 // Hook a class virtual function by overwriting its vftable entry.  This will not hook the function for subclasses.
 int someCapturedLocal = 42;
@@ -81,7 +82,7 @@ static int newExtendedGlobal[10] = { };
 patcher.ReplaceReferencesToGlobal(0x608220, sizeof(int[3]), &newExtendedGlobal);
 
 // Revert a previous patch.
-patcher.Revert(0x5FF740);
+patcher.Revert(0x5F29AC);
 
 // Revert all patches. Note that this also gets called automatically when the PatchContext is destroyed.
 patcher.RevertAll();

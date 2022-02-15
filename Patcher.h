@@ -36,7 +36,7 @@
 namespace Patcher {
 
 /// @brief  RAII memory patch context class.  Allows for safe writes and insertion of code hooks into process memory.
-/// 
+///
 /// The first time some memory is modified, the original data is tracked, and is automatically restored when the context
 /// object instance is destroyed.  Contexts should be declared as function-level statics, globals, or smart pointers.
 ///
@@ -149,7 +149,7 @@ public:
   /// @param [in]  pfnOriginalOffset  (Optional) Offset or pointer-to-member into pfnNewFunction's functor object.
   ///                                 state to pfnOriginal.  Use SetCapturedTrampoline for the first lambda capture.
   ///
-  /// @see   Comments of @ref Hook for examples, which has similar usage.
+  /// @see  Comments of @ref Hook for examples, which has similar usage.
   PatcherStatus HookCall(TargetPtr pAddress, const FunctionRef& pfnNewFunction, void* pPfnOriginal = nullptr);
 
   template <typename T>
@@ -217,7 +217,7 @@ public:
   /// @param [in]  size        Size in bytes of the old global.
   /// @param [in]  pNewGlobal  Pointer to the new global we want to replace all references to pOldGlobal with.
   /// @param [out] pRefsOut    (Optional) Pointer to a vector to contain all locations that have been patched up.
-  /// 
+  ///
   /// @note If the module's .reloc section has been stripped (mainly only seen in some older exe files), this will fail.
   PatcherStatus ReplaceReferencesToGlobal(
     TargetPtr pOldGlobal, size_t size, const void* pNewGlobal, std::vector<void*>* pRefsOut = nullptr);

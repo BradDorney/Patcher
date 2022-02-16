@@ -2003,9 +2003,8 @@ static size_t CreateLowLevelHookTrampoline(
 
   if (registers.IsEmpty() == false) {
     // Registers by reference must be pushed prior to function args;  references to them are pushed alongside the args.
-    // ** TODO Coalesce multiple registers of the same type to one entry
     for (auto reg : registers) {
-      if (reg.byReference) {
+      if (reg.byReference && (regValueIndex[reg.type] == UINT_MAX)) {
         reg.byReference = false;
         AddRegisterToStack(reg);
       }

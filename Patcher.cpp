@@ -235,7 +235,7 @@ public:
 
   Assembler& PopNil(int32 count = 1) {
     // Use lea instead of add to avoid clobbering flags.
-    if (count <= (INT8_MAX / RegisterSize)) {
+    if ((count <= (INT8_MAX / RegisterSize)) && (count != 0)) {
       constexpr uint8 SkipPop[] = { IF_X86_64(0x48,) 0x8D, 0x64, 0x24, 0x00 };  // lea esp, [esp + i8]
       const int8 skipSize = int8(count * RegisterSize);
       // Combine adjacent skips, otherwise write a new instruction.
@@ -1979,8 +1979,10 @@ static size_t CreateLowLevelHookTrampoline(
   if (registers.IsEmpty() == false) {
     for (uint32 i = 0; i < registers.Length(); ++i) {
       assert(registers[i].type < Register::Count);
-      requestedRegMask   |= (1u << uint32(registers[i].type));
-      requestedByRefMask |= registers[i].byReference ? (1u << uint32(registers[i].type)) : 0;
+      if (registers[i].offset == 0) {
+        requestedRegMask   |= (1u << uint32(registers[i].type));
+        requestedByRefMask |= registers[i].byReference ? (1u << uint32(registers[i].type)) : 0;
+      }
     }
   }
   auto IsRegisterRequested = [&requestedRegMask, &requestedByRefMask](Register reg, bool byRef = false)
@@ -2032,7 +2034,9 @@ static size_t CreateLowLevelHookTrampoline(
   // Scratch space reserved on the stack first that can be used to store temporary data, which is mainly used to avoid
   // issues where we could otherwise reference invalidated stack memory.
   static constexpr uint8 ScratchSpaceSize = uint8(RegisterSize * 2);
-  const uint32 totalReserveSize = ScratchSpaceSize + settings.reserveStackSize;
+  const bool   noNeedScratchSpace = (settings.noAlignStackPtr && settings.noCustomReturnAddr &&
+    ((IsRegisterRequested(StackRegister) == false) || (regValueIndex[StackRegister] == 0)));
+  const uint32 totalReserveSize   = settings.reserveStackSize + (noNeedScratchSpace ? 0 : ScratchSpaceSize);
 
   // Prolog begins here.
   writer.ByteIf(settings.debugBreakpoint, 0xCC);  // int 3

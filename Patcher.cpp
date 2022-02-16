@@ -1937,7 +1937,6 @@ static size_t CreateLowLevelHookTrampoline(
   static constexpr Register ReturnRegister      = IF_X86_32(Register::Eax)    IF_X86_64(Register::Rax);
   static constexpr Register StackRegister       = IF_X86_32(Register::Esp)    IF_X86_64(Register::Rsp);
   static constexpr Register FlagsRegister       = IF_X86_32(Register::Eflags) IF_X86_64(Register::Rflags);
-  static constexpr Register ByReference         = Register::Count;  // Placeholder for args by reference.
   static constexpr uint8    StackAlignment      = PATCHER_DEFAULT_STACK_ALIGNMENT;
   static constexpr bool     UseRedZone          = (PATCHER_STACK_RED_ZONE_SIZE >= RegisterSize);
 
@@ -1966,10 +1965,8 @@ static size_t CreateLowLevelHookTrampoline(
   for (uint32 i = 0; i < uint32(Register::Count); regValueIndexData[i++] = UINT_MAX);
   const Span<uint32> regValueIndex(regValueIndexData);
 
-  uint32 firstArgIndex  = 0;
-
-  auto AddRegisterToStack = [&stackRegisters, &regValueIndexData, regValueIndex](RegisterInfo reg) {
-    if ((reg.type != ByReference) && (reg.offset == 0) && ((regValueIndex[reg.type] == UINT_MAX) || reg.byReference)) {
+  auto AddRegisterToStack = [&stackRegisters, &regValueIndexData, &regValueIndex](RegisterInfo reg) {
+    if ((reg.byReference == false) && (reg.offset == 0) && (regValueIndex[reg.type] == UINT_MAX)) {
       regValueIndexData[uint32(reg.type)] = uint32(stackRegisters.size());
     }
     stackRegisters.push_back(reg);
@@ -1977,15 +1974,17 @@ static size_t CreateLowLevelHookTrampoline(
 
   // Registers that the ABI considers volatile between function calls must be pushed to the stack unconditionally.
   // Find which ones haven't been explicitly requested, and have them be pushed to the stack before everything else.
-  uint32 requestedRegMask = 0;
+  uint32 requestedRegMask   = 0;
+  uint32 requestedByRefMask = 0;
   if (registers.IsEmpty() == false) {
     for (uint32 i = 0; i < registers.Length(); ++i) {
       assert(registers[i].type < Register::Count);
-      requestedRegMask |= (1u << uint32(registers[i].type));
+      requestedRegMask   |= (1u << uint32(registers[i].type));
+      requestedByRefMask |= registers[i].byReference ? (1u << uint32(registers[i].type)) : 0;
     }
   }
-  auto IsRegisterRequested = [&requestedRegMask](Register reg)
-    { return BitFlagTest(requestedRegMask, 1u << uint32(reg)); };
+  auto IsRegisterRequested = [&requestedRegMask, &requestedByRefMask](Register reg, bool byRef = false)
+    { return BitFlagTest(byRef ? requestedByRefMask : requestedRegMask, 1u << uint32(reg)); };
 
   if (settings.noAlignStackPtr == false) {
     // If we are aligning the stack pointer, then the original stack register address is the first thing we must push.
@@ -2005,18 +2004,15 @@ static size_t CreateLowLevelHookTrampoline(
   if (registers.IsEmpty() == false) {
     // Registers by reference must be pushed prior to function args;  references to them are pushed alongside the args.
     // ** TODO Coalesce multiple registers of the same type to one entry
-    for (const auto& reg : registers) {
+    for (auto reg : registers) {
       if (reg.byReference) {
+        reg.byReference = false;
         AddRegisterToStack(reg);
       }
     }
 
     // Push the function args the user-provided callback will actually see now.
-    firstArgIndex = uint32(stackRegisters.size());
-    for (size_t i = registers.Length(); i > 0; --i) {
-      const size_t index = i - 1;
-      AddRegisterToStack(registers[index].byReference ? RegisterInfo{ ByReference } : registers[index]);
-    }
+    for (size_t i = registers.Length(); i > 0; AddRegisterToStack(registers[--i]));
 
     if (settings.argsAsStructPtr) {
       // Pushing ESP last is equivalent of pushing a pointer to everything before it on the stack.
@@ -2151,17 +2147,16 @@ static size_t CreateLowLevelHookTrampoline(
   for (auto it = stackRegisters.begin() + numAlreadyPushed; it != stackRegisters.end(); ++it) {
     const Register reg   = it->type;
     const size_t   index = (it - stackRegisters.begin());
-    if (reg == StackRegister) {
+    if (it->byReference) {
+      // Register by reference.
+      PushAdjustedStackReg(index, uint32(RegisterSize * -(int32(regValueIndex[reg]) + 1)), false);
+    }
+    else if (reg == StackRegister) {
       settings.noAlignStackPtr ? PushAdjustedStackReg(index, it->offset + totalReserveSize)
                                : PushAdjustedStackReg(index, it->offset, true);
     }
-    else if (reg != ByReference) {
-      writer.Push(reg);
-    }
     else {
-      // Register by reference.
-      assert(index >= firstArgIndex);
-      PushAdjustedStackReg(index, uint32(RegisterSize * ((numReferencesPushed++) - firstArgIndex)));
+      writer.Push(reg);
     }
   }
 
@@ -2221,7 +2216,7 @@ static size_t CreateLowLevelHookTrampoline(
     for (auto it = stackRegisters.rbegin(); it != stackRegisters.rend(); ++it) {
       const Register reg          = it->type;
       const size_t   index        = stackRegisters.size() - (it - stackRegisters.rbegin()) - 1;
-      const bool     needsRestore = (reg != ByReference) && (index == regValueIndex[reg]);
+      const bool     needsRestore = (it->byReference == false) && (index == regValueIndex[reg]);
       if (needsRestore && (reg == StackRegister) && lateRestoreStack) {
         // If this is the stack register, pop this arg to the near end of the scratch space.
         const int32 offset       = int32(RegisterSize * index);
@@ -2326,7 +2321,7 @@ static size_t CreateLowLevelHookTrampoline(
     }
 
     const bool restoreStackPtr = (regValueIndex[StackRegister] != UINT_MAX) &&
-      (stackRegisters[regValueIndex[StackRegister]].byReference || (settings.noAlignStackPtr == false));
+      (IsRegisterRequested(StackRegister, true) || (settings.noAlignStackPtr == false));
     if (restoreStackPtr) {
       // If we're restoring the stack pointer: save the return address to either scratch[0], or if it's been changed, to
       // just below what the SP will be; and save the new SP (with space reserved for return address) to the near end of
@@ -2359,15 +2354,15 @@ static size_t CreateLowLevelHookTrampoline(
     for (auto it = stackRegisters.rbegin(); it != stackRegisters.rend(); ++it) {
       const Register reg   = it->type;
       const size_t   index = stackRegisters.size() - (it - stackRegisters.rbegin()) - 1;
-      if (reg == StackRegister) {
+      if (it->byReference) {
+        // Skip arg references; we only care about the actual values they point to further up the stack.
+        writer.PopNil();
+      }
+      else if (reg == StackRegister) {
         // Stack register is special cased.
         if ((regValueIndex[StackRegister] != 0) || (index != 0)) {
           writer.PopNil();
         }
-      }
-      else if (reg == ByReference) {
-        // Skip arg references; we only care about the actual values they point to further up the stack.
-        writer.PopNil();
       }
       else {
         writer.Pop(reg);

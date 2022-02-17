@@ -187,7 +187,7 @@ constexpr bool IsAligned(T value, size_t align) { return ((value & static_cast<T
 
 static bool IsPtrAligned(const void* ptr, size_t align) { return IsAligned(reinterpret_cast<uintptr>(ptr), align); }
 
-// Returns true if a (program counter-relative) displacement is larger than 32-bit signed addressing.
+// Returns true if a (program counter-relative) displacement exceeds 32-bit signed addressing.
 constexpr bool IsFarDisplacement(ptrdiff_t displacement) { return IsX86_64 && (displacement != int32(displacement)); }
 
 // Calculates a hash using std::hash.
@@ -328,15 +328,6 @@ private:
   uint8* pWriter_;  // Current pointer.
 };
 
-// Translates a Capstone error code to a PatcherStatus.
-static Status TranslateCsError(cs_err capstoneError) {
-  switch (capstoneError) {
-  case CS_ERR_OK:                          return Status::Ok;
-  case CS_ERR_MEM:  case CS_ERR_MEMSETUP:  return Status::FailMemAlloc;
-  default:                                 return Status::FailDisassemble;
-  }
-}
-
 // Capstone disassembler helper class.  Disassembly reveals useful pathways.
 template <cs_arch CsArchitecture, uint32 CsMode>
 class Disassembler {
@@ -379,6 +370,15 @@ public:
   Status GetLastError() const { return TranslateCsError(cs_errno(hDisasm_)); }
 
 private:
+  // Translates a Capstone error code to a PatcherStatus.
+  static Status TranslateCsError(cs_err capstoneError) {
+    switch (capstoneError) {
+    case CS_ERR_OK:                          return Status::Ok;
+    case CS_ERR_MEM:  case CS_ERR_MEMSETUP:  return Status::FailMemAlloc;
+    default:                                 return Status::FailDisassemble;
+    }
+  }
+
   csh         hDisasm_;
   uint32      refCount_;
   std::mutex  lock_;

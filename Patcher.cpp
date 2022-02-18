@@ -1235,7 +1235,7 @@ static bool CreateFunctorThunk(
 
   auto GetNumAlignmentPadders = [numRegisterSizeParams](size_t maxNumRegisterArgs = 0) {
     const size_t numExtraArgs = Min(numRegisterSizeParams, maxNumRegisterArgs);
-    return InvokeFunctorMaxPad - ((InvokeFunctorNumArgs + numExtraArgs - 1) & InvokeFunctorMaxPad);
+    return InvokeFunctorMaxPad - ((InvokeFunctorNumArgs + numExtraArgs - 1) % (InvokeFunctorMaxPad + 1));
   };
 
   // We need to translate from the input calling convention to cdecl or stdcall, whichever closest matches caller/callee
@@ -2383,11 +2383,11 @@ static size_t CreateLowLevelHookTrampoline(
     }
 
     restoreStackPtr ? writer.Pop(StackRegister)                                  // pop esp            (Restore ESP, or)
-      : writer.PopNil((totalReserveSize / RegisterSize) - (UseRedZone ? 0 : 1)); // lea esp, [esp+i8]  (Pop scratch)
+      : writer.PopNil((totalReserveSize / RegisterSize) - (UseRedZone ? 0 : 1)); // lea esp, [esp + N] (Pop scratch)
 
     // If the stack red zone is safe to use, then we can avoid a RSB branch misprediction by using jmp instead of retn.
-    UseRedZone ? writer.Bytes({ 0xFF, 0x64, 0x24, uint8(-int8(RegisterSize)) })  // jmp dword ptr [esp-4]  (Jump)
-               : writer.Byte(0xC3);                                              // retn                   (Return)
+    UseRedZone ? writer.Bytes({ 0xFF, 0x64, 0x24, uint8(-int8(RegisterSize)) })  // jmp dword ptr [esp - 4]  (Jump)
+               : writer.Byte(0xC3);                                              // retn                     (Return)
 
     if (settings.noShortReturnAddr == false) {
       // Initialize the offset LUT lookup instruction we had deferred, now that we know where we're copying the LUT to.

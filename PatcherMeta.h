@@ -112,6 +112,8 @@ namespace Patcher {
 # endif
 # define  PATCHER_REGPARM(n)
 # define  PATCHER_SSEREGPARM
+# define  PATCHER_MSCALL
+# define  PATCHER_UNIXCALL
 #elif PATCHER_GXX
 # define  PATCHER_CDECL       PATCHER_ATTRIBUTE(__cdecl__)
 # define  PATCHER_STDCALL     PATCHER_ATTRIBUTE(__stdcall__)
@@ -121,6 +123,8 @@ namespace Patcher {
 # define  PATCHER_REGCALL     PATCHER_ATTRIBUTE(__regcall__)
 # define  PATCHER_REGPARM(n)  PATCHER_ATTR_PARM(__regparm__, n)
 # define  PATCHER_SSEREGPARM  PATCHER_ATTRIBUTE(__sseregparm__)
+# define  PATCHER_MSCALL      PATCHER_ATTRIBUTE(__ms_abi__)    // Note: Can be combined with other conventions in x86-32
+# define  PATCHER_UNIXCALL    PATCHER_ATTRIBUTE(__sysv_abi__)  // Note: Can be combined with other conventions in x86-32
 
 // Macro that expands to an attribute if it is defined, otherwise expands to nil.
 # define  PATCHER_ATTRIBUTE(attr)        PATCHER_ATTR_IMPL1((__has_attribute(attr), __attribute((attr))))
@@ -132,10 +136,10 @@ namespace Patcher {
 #endif
 
 // Macro that takes a macro which takes (convention, name) as args, and invokes it for each calling convention.
-#define PATCHER_EMIT_CALLING_CONVENTIONS($)  PATCHER_IGNORE_GCC_WARNING("-Wignored-attributes",         \
-  $(PATCHER_CDECL,       Cdecl)     $(PATCHER_STDCALL,    Stdcall)     $(PATCHER_FASTCALL,   Fastcall)  \
-  $(PATCHER_THISCALL,    Thiscall)  $(PATCHER_VECTORCALL, Vectorcall)  $(PATCHER_REGCALL,    Regcall)   \
-  $(PATCHER_REGPARM(1),  Regparm1)  $(PATCHER_REGPARM(2), Regparm2)    $(PATCHER_REGPARM(3), Regparm)   \
+#define PATCHER_EMIT_CALLING_CONVENTIONS($)  PATCHER_IGNORE_GCC_WARNING("-Wignored-attributes",           \
+  $(PATCHER_CDECL,       Cdecl)     $(PATCHER_STDCALL,     Stdcall)     $(PATCHER_FASTCALL,    Fastcall)  \
+  $(PATCHER_THISCALL,    Thiscall)  $(PATCHER_VECTORCALL,  Vectorcall)  $(PATCHER_REGCALL,     Regcall)   \
+  $(PATCHER_REGPARM(1),  Regparm1)  $(PATCHER_REGPARM(2),  Regparm2)    $(PATCHER_REGPARM(3),  Regparm)   \
   $(PATCHER_SSEREGPARM,  SseRegparm))
 
 // Default stack alignment assumed at the beginning of function calls.
@@ -493,17 +497,11 @@ private:
   const T       data_[MaxSize];
   const size_t  size_;
 };
+
 } // Impl
 
 
 namespace Util {
-/// Cast pointer-to-member-function to a standard pointer-to-function.
-/// @note  For virtual PMFs, either an object instance must be provided, or a dummy object instance will attempt to be
-///        created (may be unsafe!).  Class cannot multiply inherit.
-/// @see   PATCHER_MFN_PTR() macro, which is more robust for certain compilers and more reliable for virtual methods.
-template <typename T, typename Pfn>
-auto PmfCast(Pfn T::* pmf, const T* pThis = nullptr) -> typename Impl::FuncTraits<decltype(pmf)>::Pfn;
-
 /// Cast pointer-to-member-variable to offset in bytes.
 template <typename T, typename U, typename = Impl::EnableIf<std::is_function<U>::value == false>>
 size_t PmvCast(U T::* pmv, const T* pThis = nullptr) { return PtrDelta(&pThis->*pmv, pThis); }
@@ -519,8 +517,9 @@ constexpr size_t InvokeFunctorMaxPad     = Max((PATCHER_DEFAULT_STACK_ALIGNMENT 
 /// @internal  Function table for invoking functors with varying # of alignment padders and stack cleanup modes.
 struct InvokeFunctorTable {
   const void* pfnInvokeWithPad[InvokeFunctorMaxPad+1];           ///< Takes [i] padders at top of stack; caller-cleanup.
+#if PATCHER_X86_32
   const void* pfnInvokeWithPadAndCleanup[InvokeFunctorMaxPad+1]; ///< Takes [i] padders at top of stack; callee-cleanup.
-                                                                 ///  Only defined in x86-32 builds.
+#endif
 };
 
 /// @internal  Helper template for getting the InvokeFunctorTable for a given functor type.  Used by FunctionRef.
@@ -542,12 +541,11 @@ struct GetInvokeFunctorTable {
   // E.g. 0-3 padders expands to &Invoke(...), &Invoke(int, ...), &Invoke(int, int, ...), &Invoke(int, int, int, ...)
   template <size_t... Is>
   static constexpr InvokeFunctorTable Get(IndexSequence<Is...>) {
-    return { { ((void*)(&Fn<MakeTypeSequence<int, Is>>::Invoke))...            },
+    return { { ((void*)(&Fn<MakeTypeSequence<int, Is>>::Invoke))...            }
 #if PATCHER_X86_32
-             { ((void*)(&Fn<MakeTypeSequence<int, Is>>::InvokeWithCleanup))... } };
-#else  // x86-64 doesn't have callee-cleanup calling conventions.
-             {                                                                 } };
+            ,{ ((void*)(&Fn<MakeTypeSequence<int, Is>>::InvokeWithCleanup))... } 
 #endif
+           };
   }
 };
 
@@ -647,6 +645,10 @@ void** GetVftable(
 }
 
 // =====================================================================================================================
+/// Cast pointer-to-member-function to a standard pointer-to-function.
+/// @note  For virtual PMFs, either an object instance must be provided, or a dummy object instance will attempt to be
+///        created (may be unsafe!).  Class cannot multiply inherit.
+/// @see   PATCHER_MFN_PTR() macro, which is more robust for certain compilers and more reliable for virtual methods.
 template <typename T, typename Pfn>
 auto PmfCast(
   Pfn   T::*  pmf,

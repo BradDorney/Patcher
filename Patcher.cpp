@@ -1243,7 +1243,7 @@ static bool CreateFunctorThunk(
   // and do the call.  Any expected caller-side cleanup instructions must be written after this.
   auto WriteCall = [&writer, &invokers, functorAddr](size_t numPadders = 0, bool calleeCleanup = false) {
     const void*const pfnInvokeFunctor =
-      (calleeCleanup ? invokers.pfnInvokeWithPadAndCleanup : invokers.pfnInvokeWithPad)[numPadders];
+      (IF_X86_32(calleeCleanup ? invokers.pfnInvokeWithPadAndCleanup :) invokers.pfnInvokeWithPad)[numPadders];
 
     if (IsX86_32) {
       writer.Op(Op1_4{ 0x68, uint32(functorAddr) })                                  // push pFunctor
@@ -2110,9 +2110,9 @@ static size_t CreateLowLevelHookTrampoline(
           const Register reg = it->type;
 
           if (reg < Register::GprLast) {
-            // Ensure this register does not need to be stored by value again later.
-            const auto futureUse =
-              std::find_if(it + 1, stackRegisters.end(), [reg](const RegisterInfo& x) { return (x.type == reg); });
+            // Ensure this register does not need to be stored by value again later before we try to clobber it.
+            const auto futureUse = std::find_if(it + 1, stackRegisters.end(), [reg](const RegisterInfo& x)
+              { return (x.type == reg) && (x.byReference == false); });
             if (futureUse == stackRegisters.end()) {
               spareRegister = reg;
               break;
@@ -2428,9 +2428,18 @@ Status PatchContext::LowLevelHook(
   uint8      offsetLut[MaxOverwriteSize] = { };
   InsnVector insns;
 
-  const Call conv = pfnHookCb.Signature().convention;
-  if ((status_ == Status::Ok) && (conv != Call::Cdecl) && (conv != Call::Default) && (conv != Call::Unknown)) {
-    status_ = Status::FailInvalidCallback;
+  if (status_ == Status::Ok) {
+    // Validate the callback signature and register options.
+    const Call convention = pfnHookCb.Signature().convention;
+    if ((convention != Call::Cdecl) && (convention != Call::Default) && (convention != Call::Unknown)) {
+      status_ = Status::FailInvalidCallback;
+    }
+    else for (const auto& reg : registers) {
+      if (((reg.type != IF_X86_32(Register::Esp) IF_X86_64(Register::Rsp)) || reg.byReference) && (reg.offset != 0)) {
+        status_ = Status::FailInvalidCallback;
+        break;
+      }
+    }
   }
 
   if (status_ == Status::Ok) {

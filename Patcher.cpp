@@ -2531,11 +2531,15 @@ Status PatchContext::EditExports(
     std::map<std::string, uint16> namesToOrdinals;  // Name table must be sorted, so use map rather than unordered_map.
 
     IMAGE_EXPORT_DIRECTORY* pOldExportTable = nullptr;
-    char moduleName[MAX_PATH] = "";  // ** TODO This won't work with large paths
+    char moduleName[MAX_MODULE_NAME32] = "";
 
     if ((pExportDataDir->VirtualAddress == 0) || (pExportDataDir->Size == 0)) {
       // Module has no export table.
-      GetModuleFileNameA(static_cast<HMODULE>(hModule_), &moduleName[0], sizeof(moduleName));  // ** TODO Strip path
+      char modulePath[MAX_PATH] = "";  // ** TODO This won't work with large paths
+      size_t len = GetModuleFileNameA(static_cast<HMODULE>(hModule_), &modulePath[0], sizeof(modulePath));
+      for (; ((len > 0) && (modulePath[len - 1] != '\\') && (modulePath[len - 1] != '/')); --len);
+      strncpy_s(&moduleName[0], sizeof(moduleName), &modulePath[len], _TRUNCATE);
+
       exports.reserve(exportInfos.Length());
     }
     else {

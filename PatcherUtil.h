@@ -42,9 +42,10 @@ enum class PatcherStatus : int32_t {
   FailDeProtectMem    = -7,
   FailLockThreads     = -8,
   FailDisassemble     = -9,
-  FailInstallHook     = -10,
-  FailModuleUnloaded  = -11,
-  FailInvalidModule   = -12,
+  FailAssemble        = -10,
+  FailInstallHook     = -11,
+  FailModuleUnloaded  = -12,
+  FailInvalidModule   = -13,
 };
 
 namespace Patcher {
@@ -55,9 +56,9 @@ namespace Util {
 constexpr size_t SetCapturedTrampoline = 0;
 
 
-///@{ Converts any (non-overloaded) lambda or functor to a FunctionPtr object (of the specified calling convention).
+///@{ Converts any (non-overloaded) lambda or functor to a FunctorRef object (of the specified calling convention).
 ///   This can be passed to PatchContext methods, be used as a callable, and implicitly converts to a function pointer.
-///   If created from a non-empty type, then the returned FunctionPtr needs to be kept alive or referenced by a patch.
+///   If created from a non-empty type, then the returned FunctorRef needs to be kept alive or referenced by a patch.
 #define PATCHER_CREATE_FUNCTOR_INVOKER_DEF(convention, name)  template <typename T>  \
 Impl::FunctorRef<T, Call::name> name##Functor(T&& f) { return Impl::FunctorRef<T, Call::name>(std::forward<T>(f)); }
 template <Call C = Call::Default, typename T = void>

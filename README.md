@@ -14,6 +14,7 @@ Future updates may include full support for other common compilers and ABIs, pat
 
 * C++11-capable MSVC, GCC, Clang, ICC, or GCC-compatible compiler
 * [Capstone](https://www.capstone-engine.org/) (diet builds supported)
+* [Xbyak](https://github.com/herumi/xbyak)
 
 # Usage
 
@@ -101,4 +102,4 @@ For more information, see the Doxygen comments in `Patcher.h` and `PatcherUtil.h
 
 # License
 
-Patcher is licensed under the BSD 3-Clause license.  See `LICENSE` for more information.
+Patcher is licensed under the BSD 3-Clause license.  See `LICENSE` for more information.  Dependencies are distributed under their own licenses.

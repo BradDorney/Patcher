@@ -2303,7 +2303,7 @@ static size_t CreateLowLevelHookTrampoline(
     for (auto it = stackRegisters.rbegin(); it != stackRegisters.rend(); ++it) {
       const Register reg   = it->type;
       const size_t   index = stackRegisters.size() - (it - stackRegisters.rbegin()) - 1;
-      if (it->byReference) {
+      if ((index != regValueIndex[reg]) || it->byReference) {
         // Skip arg references; we only care about the actual values they point to further up the stack.
         writer.PopNil();
       }

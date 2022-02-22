@@ -2250,7 +2250,7 @@ static size_t CreateLowLevelHookTrampoline(
         writer.jb(".skipRelocIntoTrampoline");
         writer.sub(eax, uintptr(pAddress));                           // Subtract old address
         writer.mov(al, byte [eax + 0xBABEFACE]);                      // Offset table lookup
-        pRelocateLutOperand = &writer.GetNext<uintptr*>()[-1];
+        IF_X86_32(pRelocateLutOperand = &writer.GetNext<uint32*>()[-1]);
         writer.add(eax, uintptr(pTrampolineToOld));                   // Add trampoline to old
       }
       IF_X86_64(else {

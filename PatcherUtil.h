@@ -83,8 +83,8 @@ struct LowLevelHookInfo {
   uint32 debugBreakpoint     :  1;  ///< Adds a debug breakpoint to the start of the trampoline code.
   uint32 reserved            : 24;  ///< Reserved for future use.
 
-  uint32 reserveStackSize;  ///< Size in bytes of extra stack space to reserve.  Set this if you intend to modify ESP to
-                            ///  allocate space on the stack (up to a maximum of the specified size).
+  uint32 reserveStackSize;  ///< Size in bytes of extra stack space to reserve.  Set this if you intend to modify the
+                            ///  stack pointer to allocate space (up to a maximum of the specified size).
 };
 
 namespace Impl {

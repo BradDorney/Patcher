@@ -54,14 +54,14 @@ public:
   template <typename U, typename = EnableIf<std::is_same<decltype(std::declval<const U>().data()), const T*>::value>>
   constexpr Span(const U& stlContainer)                  : Span(stlContainer.data(), stlContainer.size()) { }
 
-  constexpr const T* begin()  const { return pData_;           }
-  constexpr const T* cbegin() const { return pData_;           }
-  constexpr const T* end()    const { return pData_ + length_; }
-  constexpr const T* cend()   const { return pData_ + length_; }
+  constexpr const T* begin()  const noexcept { return pData_;           }
+  constexpr const T* cbegin() const noexcept { return pData_;           }
+  constexpr const T* end()    const noexcept { return pData_ + length_; }
+  constexpr const T* cend()   const noexcept { return pData_ + length_; }
 
-  constexpr const T* Data()     const { return pData_; }
-  constexpr operator const T*() const { return pData_; }
-  template <typename I>  constexpr const T& operator[](I index) const { return *(pData_ + static_cast<size_t>(index)); }
+  constexpr const T* Data()     const noexcept { return pData_; }
+  constexpr operator const T*() const noexcept { return pData_; }
+  template <typename I>  constexpr const T& operator[](I index) const noexcept { return *(pData_ + size_t(index)); }
 
   constexpr size_t Length()  const { return length_;        }
   constexpr bool   IsEmpty() const { return (length_ == 0); }
@@ -71,35 +71,35 @@ private:
   size_t    length_;
 };
 
-/// RAII growable array container with a fixed-size initial storage buffer.  POD types only.
+/// RAII growable array container with a fixed-size initial storage buffer.
 template <typename T, size_t InitialSize = 10>
 class SmallVector {
-  static_assert(std::is_trivially_copyable<T>::value, "SmallVector only supports POD types.");
 public:
-  constexpr SmallVector() : localStorage_{}, pData_(&localStorage_[0]), numElements_(0), capacity_(InitialSize) { }
+  SmallVector() : pData_(reinterpret_cast<T*>(&localStorage_[0])), numElements_(0), capacity_(InitialSize) { }
   explicit  SmallVector(size_t size) : numElements_(0), capacity_(Max(InitialSize, size))
-    { pData_ = (size > ArrayLen(localStorage_)) ? static_cast<uint8*>(malloc(size)) : &localStorage_[0]; }
+    { pData_ = (size > ArrayLen(localStorage_)) ? static_cast<T*>(malloc(sizeof(T) * size)) : (T*)(&localStorage_[0]); }
   explicit  SmallVector(Span<T> src);
-  template <size_t N>  SmallVector(const SmallVector<T, N>& src) : SmallVector(Span<T>(src.Data(), src.Size())) { }
+  template <size_t N>  SmallVector(const SmallVector<T, N>& src) : SmallVector(Span<T>(src.data(), src.size())) { }
   template <size_t N>  SmallVector(SmallVector<T, N>&& src);
 
-  ~SmallVector() { if (pData_ != &localStorage_[0]) { free(pData_); } }
+  ~SmallVector()
+    { Clear();  free((static_cast<void*>(pData_) != &localStorage_[0]) ? pData_ : nullptr); }
 
-                  T* begin()        { return pData_;                }
-  constexpr const T* begin()  const { return pData_;                }
-  constexpr const T* cbegin() const { return pData_;                }
-                  T* end()          { return pData_ + numElements_; }
-  constexpr const T* end()    const { return pData_ + numElements_; }
-  constexpr const T* cend()   const { return pData_ + numElements_; }
+                  T* begin()        noexcept { return pData_;                }
+  constexpr const T* begin()  const noexcept { return pData_;                }
+  constexpr const T* cbegin() const noexcept { return pData_;                }
+                  T* end()          noexcept { return pData_ + numElements_; }
+  constexpr const T* end()    const noexcept { return pData_ + numElements_; }
+  constexpr const T* cend()   const noexcept { return pData_ + numElements_; }
 
-  constexpr size_t size()  const { return numElements_;  }
-  constexpr bool   empty() const { return (size() == 0); }
+  constexpr size_t size()  const noexcept { return numElements_;  }
+  constexpr bool   empty() const noexcept { return (size() == 0); }
 
                   T* data()       { return pData_; }
   constexpr const T* data() const { return pData_; }
 
-  template <typename I>                  T& operator[](I index)       { return *(pData_ + static_cast<size_t>(index)); }
-  template <typename I>  constexpr const T& operator[](I index) const { return *(pData_ + static_cast<size_t>(index)); }
+  template <typename I>                  T& operator[](I index)       noexcept { return *(pData_ + size_t(index)); }
+  template <typename I>  constexpr const T& operator[](I index) const noexcept { return *(pData_ + size_t(index)); }
 
   bool Reserve(size_t newCapacity);
   bool Grow(size_t numElements) {
@@ -107,37 +107,28 @@ public:
     return Reserve((totalElements > capacity_) ? Max((totalElements + capacity_), (capacity_ * 2)) : 0);
   }
 
-  bool Push(const T& element) {
-    const bool result = Grow(1);
-    if (result) {
-      pData_[numElements_++] = element;
+  void Clear() {
+    if ((IsPod == false) && (pData_ != nullptr)) {
+      for (size_t i = 0; i < numElements_; pData_[i++].~T());
     }
-    return result;
+    numElements_ = 0;
   }
+
+  bool Push(const T& element) { return Grow(1) && (new(pData_ + (numElements_++)) T(element));            }
+  bool Push(T&&      element) { return Grow(1) && (new(pData_ + (numElements_++)) T(std::move(element))); }
 
   template <typename... Ts>
-  bool Emplace(Ts&&... args) {
-    const bool result = Grow(1);
-    if (result) {
-      pData_[numElements_++] = { std::forward<Ts>(args)... };
-    }
-    return result;
-  }
+  bool Emplace(Ts&&... args) { return Grow(1) && (new(pData_ + (numElements_++)) T(std::forward<Ts>(args)...)); }
 
-  bool Append(Span<T> elements) {
-    const bool result = Grow(elements.Length());
-    if (result) {
-      memcpy(&pData_[numElements_], elements.Data(), elements.Length());
-      numElements_ += elements.Length();
-    }
-    return result;
-  }
+  bool Append(Span<T> elements);
 
 protected:
-  T       localStorage_[InitialSize];
-  T*      pData_;
-  size_t  numElements_;
-  size_t  capacity_;
+  static constexpr bool IsPod = std::is_trivially_copyable<T>::value;
+
+  TypeStorage<T>  localStorage_[InitialSize];
+  T*              pData_;
+  size_t          numElements_;
+  size_t          capacity_;
 };
 
 
@@ -316,7 +307,7 @@ template <typename T, size_t InitialSize>
 SmallVector<T, InitialSize>::SmallVector(
   Span<T> src)
   :
-  pData_(&localStorage_[0]),
+  pData_(reinterpret_cast<T*>(&localStorage_[0])),
   numElements_(src.Length()),
   capacity_(InitialSize)
 {
@@ -324,11 +315,16 @@ SmallVector<T, InitialSize>::SmallVector(
 
   if (src.Length() > ArrayLen(localStorage_)) {
     // Dynamically allocate storage buffer exceeding InitialSize.
-    pData_ = static_cast<T*>(malloc(numElements_));
+    pData_ = static_cast<T*>(malloc(sizeof(T) * numElements_));
   }
 
   if (pData_) {
-    memcpy(pData_, src.Data(), src.Length());
+    if (IsPod) {
+      memcpy(pData_, src.Data(), src.Length());
+    }
+    else for (size_t i = 0; i < src.Length(); ++i) {
+      new(pData_ + i) T(src[i]);
+    }
   }
 }
 
@@ -337,11 +333,11 @@ template <typename T, size_t InitialSize> template <size_t N>
 SmallVector<T, InitialSize>::SmallVector(
   SmallVector<T, N>&& src)
   :
-  pData_(&localStorage_[0]),
+  pData_(reinterpret_cast<T*>(&localStorage_[0])),
   numElements_(src.numElements_),
   capacity_(src.capacity_)
 {
-  if (src.pData_ != &src.localStorage_[0]) {
+  if (static_cast<void*>(src.pData_) != &src.localStorage_[0]) {
     // Take ownership of the dynamic allocation of the ByteArray we're moving from.
     pData_    = src.pData_;
     capacity_ = src.capacity_;
@@ -349,11 +345,17 @@ SmallVector<T, InitialSize>::SmallVector(
   else if (src.pData_ != nullptr) {
     if (numElements_ > ArrayLen(localStorage_)) {
       // Dynamically allocate storage buffer exceeding InitialSize.
-      pData_ = static_cast<T*>(malloc(numElements_));
+      pData_ = static_cast<T*>(malloc(sizeof(T) * numElements_));
     }
 
     if (pData_) {
-      memcpy(pData_, src.pData_, numElements_);
+      if (IsPod) {
+        memcpy(pData_, src.pData_, numElements_);
+      }
+      else for (size_t i = 0; i < numElements_; ++i) {
+        new(pData_ + i) T(std::move(src.pData_[i]));
+        src.pData_[i].~T();
+      }
     }
   }
   else {
@@ -376,19 +378,45 @@ bool SmallVector<T, InitialSize>::Reserve(
 
   if (newCapacity > capacity_) {
     // Dynamically allocate storage buffer.
-    T*const pNewData = static_cast<T*>(malloc(newCapacity));
+    T*const pNewData = static_cast<T*>(malloc(sizeof(T) * newCapacity));
 
     if (pNewData != nullptr) {
-      memcpy(pNewData, pData_, numElements_);
-      if (pData_ != &localStorage_[0]) {
+      if (IsPod) {
+        memcpy(pNewData, pData_, numElements_);
+      }
+      else for (size_t i = 0; i < numElements_; ++i) {
+        new(pNewData + i) T(std::move(pData_[i]));
+        pData_[i].~T();
+      }
+
+      if (static_cast<void*>(pData_) != &localStorage_[0]) {
         free(pData_);
       }
+
       pData_    = pNewData;
       capacity_ = newCapacity;
     }
     else {
       result = false;
     }
+  }
+
+  return result;
+}
+
+// =====================================================================================================================
+template <typename T, size_t InitialSize>
+bool SmallVector<T, InitialSize>::Append(Span<T> elements) {
+  const bool result = Grow(elements.Length());
+
+  if (result) {
+    if (IsPod) {
+      memcpy(&pData_[numElements_], elements.Data(), elements.Length());
+    }
+    else for (size_t i = 0; i < elements.Length(); ++i) {
+      new(pData_ + i) T(elements[i]);
+    }
+    numElements_ += elements.Length();
   }
 
   return result;

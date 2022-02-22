@@ -156,7 +156,7 @@ constexpr uint32 MaxCopiedInstructionSize = uint32(Max(Max(MaxInstructionSize, s
 constexpr uint32 MaxOverwriteSize         = (IsX86_64 ? sizeof(JmpAbs) : sizeof(Jmp32)) + MaxInstructionSize - 1;
 
 // Max size in bytes low-level hook trampoline code is expected to require.
-constexpr uint32 MaxLowLevelHookSize  = Align(IsX86_64 ? 200 : 160, CodeAlignment);
+constexpr uint32 MaxLowLevelHookSize  = Align(IsX86_64 ? 256 : 200, CodeAlignment);
 // Max size in bytes functor thunk code is expected to require.
 constexpr uint32 MaxFunctorThunkSize  = Align(IsX86_64 ? 64  : 32,  CodeAlignment);
 // Number of extra args needed to call FunctionRef::InvokeFunctor().
@@ -2238,7 +2238,7 @@ static size_t CreateLowLevelHookTrampoline(
     // intended code path.
 
     // We will defer initializing the offset LUT lookup operand until we know where the LUT will be placed.
-    uintptr* pRelocateLutOperand = nullptr;
+    X86_SELECTOR(uintptr* pRelocateLutOperand = nullptr, Xbyak::Label labelOffsetLut);
 
     if (settings.noShortReturnAddr == false) {
 #if PATCHER_X86_32
@@ -2258,8 +2258,7 @@ static size_t CreateLowLevelHookTrampoline(
       writer.cmp(rax, rcx);
       writer.jb(".skipRelocIntoTrampoline");
       writer.sub(rax, rcx);                                         // Subtract old address
-      writer.mov(rcx, 0xBABEFACEBABEFACE);                          // Offset table lookup
-      pRelocateLutOperand = &writer.GetNext<uintptr*>()[-1];
+      writer.mov(rcx, labelOffsetLut);                              // Offset table lookup
       writer.mov(al, byte [rax + rcx]);
       writer.mov(rcx, uintptr(pTrampolineToOld));                   // Add trampoline to old
       writer.add(rax, rcx);
@@ -2335,7 +2334,7 @@ static size_t CreateLowLevelHookTrampoline(
     if (settings.noShortReturnAddr == false) {
       writer.align(4, false);
       // Initialize the offset LUT lookup instruction we had deferred, now that we know where we're copying the LUT to.
-      *pRelocateLutOperand = uintptr(writer.getCurr());
+      X86_SELECTOR(*pRelocateLutOperand = uintptr(writer.getCurr()), writer.L(labelOffsetLut));
       // Copy the offset lookup table.
       writer.Memcpy(&offsetLut[0], overwrittenSize);
     }

@@ -303,21 +303,23 @@ public:
   }
 
   void PopNil(int32 count = 1) {
-    // Use lea instead of add to avoid clobbering flags.
-    if ((count <= (INT8_MAX / RegisterSize)) && (count != 0)) {
-      constexpr uint8 SkipPop[] = { IF_X86_64(0x48,) 0x8D, 0x64, 0x24, 0x00 };  // lea esp, [esp + i8]
-      const int8 skipSize = int8(count * RegisterSize);
-      // Combine adjacent skips, otherwise write a new instruction.
-      if ((getSize() < sizeof(SkipPop))                                                        ||
-          (memcmp(&SkipPop[0], &getCurr()[-int32(sizeof(SkipPop))], sizeof(SkipPop) - 1) != 0) ||
-          ((getCurr()[-1] + skipSize) > INT8_MAX))
-      {
-        Value(SkipPop);
+    if (count != 0) {
+      // Use lea instead of add to avoid clobbering flags.
+      if ((count <= (INT8_MAX / RegisterSize))) {
+        constexpr uint8 SkipPop[] = { IF_X86_64(0x48,) 0x8D, 0x64, 0x24, 0x00 };  // lea esp, [esp + i8]
+        const int8 skipSize = int8(count * RegisterSize);
+        // Combine adjacent skips, otherwise write a new instruction.
+        if ((getSize() < sizeof(SkipPop))                                                        ||
+            (memcmp(&SkipPop[0], &getCurr()[-int32(sizeof(SkipPop))], sizeof(SkipPop) - 1) != 0) ||
+            ((getCurr()[-1] + skipSize) > INT8_MAX))
+        {
+          Value(SkipPop);
+        }
+        GetNext()[-1] += skipSize;
       }
-      GetNext()[-1] += skipSize;
-    }
-    else {
-      lea(X86_SELECTOR(esp, rsp), ptr [X86_SELECTOR(esp, rsp) + (count * RegisterSize)]);
+      else {
+        lea(X86_SELECTOR(esp, rsp), ptr [X86_SELECTOR(esp, rsp) + (count * RegisterSize)]);
+      }
     }
   }
 
@@ -1790,7 +1792,7 @@ Status PatchContext::HookCall(
   if (status_ == Status::Ok) {
     if (pInsn[0] == 0xE8) {
       // Call pcrel32
-      pfnOriginal = PtrInc(pAddress, sizeof(Call32) + reinterpret_cast<ptrdiff_t&>(pInsn[1]));
+      pfnOriginal = PtrInc(pAddress, sizeof(Call32) + reinterpret_cast<uint32&>(pInsn[1]));
       Write(pAddress,  Call32{ 0xE8, PcRelPtr(pAddress, sizeof(Call32), pHookFunction) });
     }
     else if ((pInsn[0] == 0xFF) && (((pInsn[1] >= 0x10) && (pInsn[1] <= 0x17)) ||
@@ -2139,12 +2141,12 @@ static size_t CreateLowLevelHookTrampoline(
       writer.push(0);                                           // Push dummy value for pPrevReturnAddr
       writer.push(uint32(uintptr(pfnHookCb.Functor().get())));  // Push pFunctor
     }
-    else {
-      writer.xor_(returnRegister, returnRegister);
-      writer.push(returnRegister);                                     // Push dummy value for pPrevReturnAddr
-      writer.mov(returnRegister, uintptr(pfnHookCb.Functor().get()));
-      writer.push(returnRegister);                                     // Push pFunctor
-    }
+    IF_X86_64(else {
+      writer.xor_(rax, rax);
+      writer.push(rax);                                     // Push dummy value for pPrevReturnAddr
+      writer.mov(rax, uintptr(pfnHookCb.Functor().get()));
+      writer.push(rax);                                     // Push pFunctor
+    })
   }
 
   // MS x64 ABI expects 32 bytes of shadow space be allocated on the stack just before the call.
@@ -2226,11 +2228,11 @@ static size_t CreateLowLevelHookTrampoline(
     if ((settings.noBaseRelocReturn == false) && (moduleRelocDelta != 0)) {
       // Relocate return address
       if (IsX86_32) {
-        writer.add(returnRegister, int32(moduleRelocDelta));
+        writer.add(eax, int32(moduleRelocDelta));
       }
       IF_X86_64(else {
         writer.mov(rcx, moduleRelocDelta);
-        writer.add(returnRegister, rcx);
+        writer.add(rax, rcx);
       })
     }
 
@@ -2241,28 +2243,29 @@ static size_t CreateLowLevelHookTrampoline(
     X86_SELECTOR(uintptr* pRelocateLutOperand = nullptr, Xbyak::Label labelOffsetLut);
 
     if (settings.noShortReturnAddr == false) {
-#if PATCHER_X86_32
-      writer.cmp(eax, PtrInc<uint32>(pAddress, overwrittenSize));   // Test after overwrite
-      writer.jae(".skipRelocIntoTrampoline");
-      writer.cmp(eax, uintptr(pAddress));                           // Test before overwrite
-      writer.jb(".skipRelocIntoTrampoline");
-      writer.sub(eax, uintptr(pAddress));                           // Subtract old address
-      writer.mov(al, byte [eax + 0xBABEFACE]);                      // Offset table lookup
-      pRelocateLutOperand = &writer.GetNext<uintptr*>()[-1];
-      writer.add(eax, uintptr(pTrampolineToOld));                   // Add trampoline to old
-#elif PATCHER_X86_64
-      writer.mov(rcx, PtrInc<uintptr>(pAddress, overwrittenSize));  // Test after overwrite
-      writer.cmp(rax, rcx);
-      writer.jae(".skipRelocIntoTrampoline");
-      writer.mov(rcx, uintptr(pAddress));                           // Test before overwrite
-      writer.cmp(rax, rcx);
-      writer.jb(".skipRelocIntoTrampoline");
-      writer.sub(rax, rcx);                                         // Subtract old address
-      writer.mov(rcx, labelOffsetLut);                              // Offset table lookup
-      writer.mov(al, byte [rax + rcx]);
-      writer.mov(rcx, uintptr(pTrampolineToOld));                   // Add trampoline to old
-      writer.add(rax, rcx);
-#endif
+      if (IsX86_32) {
+        writer.cmp(eax, PtrInc<uint32>(pAddress, overwrittenSize));   // Test after overwrite
+        writer.jae(".skipRelocIntoTrampoline");
+        writer.cmp(eax, uintptr(pAddress));                           // Test before overwrite
+        writer.jb(".skipRelocIntoTrampoline");
+        writer.sub(eax, uintptr(pAddress));                           // Subtract old address
+        writer.mov(al, byte [eax + 0xBABEFACE]);                      // Offset table lookup
+        pRelocateLutOperand = &writer.GetNext<uintptr*>()[-1];
+        writer.add(eax, uintptr(pTrampolineToOld));                   // Add trampoline to old
+      }
+      IF_X86_64(else {
+        writer.mov(rcx, PtrInc<uintptr>(pAddress, overwrittenSize));  // Test after overwrite
+        writer.cmp(rax, rcx);
+        writer.jae(".skipRelocIntoTrampoline");
+        writer.mov(rcx, uintptr(pAddress));                           // Test before overwrite
+        writer.cmp(rax, rcx);
+        writer.jb(".skipRelocIntoTrampoline");
+        writer.sub(rax, rcx);                                         // Subtract old address
+        writer.mov(rcx, labelOffsetLut);                              // Offset table lookup
+        writer.mov(al, byte [rax + rcx]);
+        writer.mov(rcx, uintptr(pTrampolineToOld));                   // Add trampoline to old
+        writer.add(rax, rcx);
+      })
       writer.L(".skipRelocIntoTrampoline");
     }
 

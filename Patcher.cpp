@@ -2244,26 +2244,26 @@ static size_t CreateLowLevelHookTrampoline(
 
     if (settings.noShortReturnAddr == false) {
       if (IsX86_32) {
-        writer.cmp(eax, PtrInc<uint32>(pAddress, overwrittenSize));   // Test after overwrite
+        writer.cmp(eax, uint32(PtrInc<uintptr>(pAddress, overwrittenSize)));  // Test after overwrite
         writer.jae(".skipRelocIntoTrampoline");
-        writer.cmp(eax, uintptr(pAddress));                           // Test before overwrite
+        writer.cmp(eax, uint32(uintptr(pAddress)));                           // Test before overwrite
         writer.jb(".skipRelocIntoTrampoline");
-        writer.sub(eax, uintptr(pAddress));                           // Subtract old address
-        writer.mov(al, byte [eax + 0xBABEFACE]);                      // Offset table lookup
+        writer.sub(eax, uint32(uintptr(pAddress)));                           // Subtract old address
+        writer.mov(al, byte [eax + 0xBABEFACE]);                              // Offset table lookup
         IF_X86_32(pRelocateLutOperand = &writer.GetNext<uint32*>()[-1]);
-        writer.add(eax, uintptr(pTrampolineToOld));                   // Add trampoline to old
+        writer.add(eax, uint32(uintptr(pTrampolineToOld)));                   // Add trampoline to old
       }
       IF_X86_64(else {
-        writer.mov(rcx, PtrInc<uintptr>(pAddress, overwrittenSize));  // Test after overwrite
+        writer.mov(rcx, PtrInc<uintptr>(pAddress, overwrittenSize));          // Test after overwrite
         writer.cmp(rax, rcx);
         writer.jae(".skipRelocIntoTrampoline");
-        writer.mov(rcx, uintptr(pAddress));                           // Test before overwrite
+        writer.mov(rcx, uintptr(pAddress));                                   // Test before overwrite
         writer.cmp(rax, rcx);
         writer.jb(".skipRelocIntoTrampoline");
-        writer.sub(rax, rcx);                                         // Subtract old address
-        writer.mov(rcx, labelOffsetLut);                              // Offset table lookup
+        writer.sub(rax, rcx);                                                 // Subtract old address
+        writer.mov(rcx, labelOffsetLut);                                      // Offset table lookup
         writer.mov(al, byte [rax + rcx]);
-        writer.mov(rcx, uintptr(pTrampolineToOld));                   // Add trampoline to old
+        writer.mov(rcx, uintptr(pTrampolineToOld));                           // Add trampoline to old
         writer.add(rax, rcx);
       })
       writer.L(".skipRelocIntoTrampoline");

@@ -61,7 +61,9 @@ public:
 
   constexpr const T* Data()     const noexcept { return pData_; }
   constexpr operator const T*() const noexcept { return pData_; }
-  template <typename I>  constexpr const T& operator[](I index) const noexcept { return *(pData_ + size_t(index)); }
+
+  template <typename I>
+  constexpr const T& operator[](I index) const noexcept { return *(pData_ + UnderlyingType<I>(index)); }
 
   constexpr size_t Length()  const { return length_;        }
   constexpr bool   IsEmpty() const { return (length_ == 0); }
@@ -95,11 +97,13 @@ public:
   constexpr size_t size()  const noexcept { return numElements_;  }
   constexpr bool   empty() const noexcept { return (size() == 0); }
 
-                  T* data()       { return pData_; }
-  constexpr const T* data() const { return pData_; }
+                  T* data()       noexcept { return pData_; }
+  constexpr const T* data() const noexcept { return pData_; }
 
-  template <typename I>                  T& operator[](I index)       noexcept { return *(pData_ + size_t(index)); }
-  template <typename I>  constexpr const T& operator[](I index) const noexcept { return *(pData_ + size_t(index)); }
+  template <typename I>
+                  T& operator[](I index) noexcept       { return *(pData_ + UnderlyingType<I>(index)); }
+  template <typename I>
+  constexpr const T& operator[](I index) const noexcept { return *(pData_ + UnderlyingType<I>(index)); }
 
   bool Reserve(size_t newCapacity);
   bool Grow(size_t numElements) {

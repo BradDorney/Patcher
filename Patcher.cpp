@@ -198,6 +198,10 @@ template <typename T>  static size_t Hash(const T& src) { return std::hash<T>()(
 static const SYSTEM_INFO& SystemInfo()
   { static SYSTEM_INFO si = []{ SYSTEM_INFO si;  GetSystemInfo(&si);  return si; }();  return si; }
 
+// Gets the program counter from a OS thread context structure.
+constexpr uintptr GetProgramCounter(const CONTEXT& context)
+  { return static_cast<uintptr>(X86_SELECTOR(context.Eip, context.Rip)); }
+
 // Helper functions to append string data (including null terminator) while incrementing a runner pointer.
 static void AppendString(char** ppWriter, const char*       pSrc)
   { const size_t length = (strlen(pSrc) + 1);  strcpy_s(*ppWriter, length, pSrc);        *ppWriter += length; }
@@ -263,7 +267,7 @@ private:
 // Translates a Patcher Register enum value to a Xbyak register object.
 static const Xbyak::Reg& GetXbyakRegister(Register reg) {
   using namespace Xbyak::util;
-  static const XBYAK_CONSTEXPR std::reference_wrapper<const Xbyak::Reg> registers[] =
+  static const std::reference_wrapper<const Xbyak::Reg> registers[] =
     IF_X86_32({ eax, ecx, edx, ebx, esi, edi, ebp, esp })
     IF_X86_64({ rax, rcx, rdx, rbx, rsi, rdi, r8, r9, r10, r11, r12, r13, r14, r15, rbp, rsp });
   return registers[uint32(reg)];
@@ -805,19 +809,6 @@ Status PatchContext::ReleaseModule() {
 }
 
 // =====================================================================================================================
-static constexpr uintptr GetProgramCounter(
-  const CONTEXT& context)
-{
-#if PATCHER_X86_32
-  return static_cast<uintptr>(context.Eip);
-#elif PATCHER_X86_64
-  return static_cast<uintptr>(context.Rip);
-#else
-  return 0;
-#endif
-}
-
-// =====================================================================================================================
 Status PatchContext::LockThreads() {
   g_freezeThreadsLock.lock();
 
@@ -1214,7 +1205,9 @@ static bool CreateFunctorThunk(
       writer.mov(r11, functorAddr);                                      // Push pFunctor
       writer.push(r11);
     })
-    if (numPadders) { writer.SubSp(int32(RegisterSize * numPadders)); }  // sub rsp, i8  (Align)
+    if (numPadders != 0) {
+      writer.SubSp(int32(RegisterSize * numPadders));  // sub rsp, i8  (Align)
+    }
 
     if (calleeCleanup) {
       // Instead of using a call, which would return here, push the old return address to the top of the stack and jump.

@@ -112,7 +112,7 @@ namespace Patcher {
 # endif
 # define  PATCHER_REGPARM(n)
 # define  PATCHER_SSEREGPARM
-# define  PATCHER_MSCALL
+# define  PATCHER_MSCALL      __cdecl
 # define  PATCHER_UNIXCALL
 #elif PATCHER_GXX
 # define  PATCHER_CDECL       PATCHER_ATTRIBUTE(__cdecl__)
@@ -123,8 +123,8 @@ namespace Patcher {
 # define  PATCHER_REGCALL     PATCHER_ATTRIBUTE(__regcall__)
 # define  PATCHER_REGPARM(n)  PATCHER_ATTR_PARM(__regparm__, n)
 # define  PATCHER_SSEREGPARM  PATCHER_ATTRIBUTE(__sseregparm__)
-# define  PATCHER_MSCALL      PATCHER_ATTRIBUTE(__ms_abi__)    // Note: Can be combined with other conventions in x86-32
-# define  PATCHER_UNIXCALL    PATCHER_ATTRIBUTE(__sysv_abi__)  // Note: Can be combined with other conventions in x86-32
+# define  PATCHER_MSCALL      PATCHER_ATTRIBUTE(__ms_abi__)
+# define  PATCHER_UNIXCALL    PATCHER_ATTRIBUTE(__sysv_abi__)
 
 // Macro that expands to an attribute if it is defined, otherwise expands to nil.
 # define  PATCHER_ATTRIBUTE(attr)        PATCHER_ATTR_IMPL1((__has_attribute(attr), __attribute((attr))))
@@ -143,9 +143,12 @@ namespace Patcher {
   $(PATCHER_THISCALL,    Thiscall)  $(PATCHER_VECTORCALL,  Vectorcall)  $(PATCHER_REGCALL,     Regcall)   \
   $(PATCHER_REGPARM(1),  Regparm1)  $(PATCHER_REGPARM(2),  Regparm2)    $(PATCHER_REGPARM(3),  Regparm)   \
   $(PATCHER_SSEREGPARM,  SseRegparm))
+#elif PATCHER_X86_64 && PATCHER_GXX && (PATCHER_CLANG == false)
+# define PATCHER_EMIT_CALLING_CONVENTIONS($)  PATCHER_IGNORE_GCC_WARNING("-Wignored-attributes",          \
+  $(PATCHER_MSCALL,  Mscall)  $(PATCHER_UNIXCALL,    Unixcall))
 #elif PATCHER_X86_64
 # define PATCHER_EMIT_CALLING_CONVENTIONS($)  PATCHER_IGNORE_GCC_WARNING("-Wignored-attributes",          \
-  $(PATCHER_MSCALL,  Mscall)  $(PATCHER_UNIXCALL,  Unixcall)  $(PATCHER_VECTORCALL,  Vectorcall))
+  $(PATCHER_MSCALL,  Mscall)  $(PATCHER_VECTORCALL,  Vectorcall)  $(PATCHER_UNIXCALL,  Unixcall))
 #endif
 
 // Default stack alignment assumed at the beginning of function calls.
@@ -207,6 +210,8 @@ using uintptr = uintptr_t;
 
 namespace Registers { enum class Register : uint8; }  // Forward declaration of Registers::Register enum class.
 
+namespace Impl { struct Dummy { explicit constexpr Dummy() { } }; }  ///< @internal  Empty dummy parameter type.
+
 /// Info about registers requested by LowLevelHook().
 struct RegisterInfo {
   Registers::Register type;         ///< Register type.
@@ -218,25 +223,29 @@ struct RegisterInfo {
 enum class Call : uint32 {
 #define PATCHER_CALLING_CONVENTION_ENUM_DEF(conv, name) name,
 #define PATCHER_DEFAULT_CALLING_CONVENTION_ENUM_DEF(conv, name) std::is_same<void(*)(), void(conv*)()>::value ? name :
+#define PATCHER_MEMBER_CALLING_CONVENTION_ENUM_DEF(conv, name)  \
+  std::is_same<void(Impl::Dummy::*)(), void(conv Impl::Dummy::*)()>::value ? name :
 
   Unknown = 0,
   PATCHER_EMIT_CALLING_CONVENTIONS(PATCHER_CALLING_CONVENTION_ENUM_DEF)
   Count,
 
   Default    = PATCHER_EMIT_CALLING_CONVENTIONS(PATCHER_DEFAULT_CALLING_CONVENTION_ENUM_DEF) Unknown,
+  Membercall = PATCHER_EMIT_CALLING_CONVENTIONS(PATCHER_MEMBER_CALLING_CONVENTION_ENUM_DEF)  Unknown,
 #if PATCHER_X86_32
   AbiStd     = Cdecl,
-  Membercall = IsMsAbi ? Thiscall : IsUnixAbi ? Cdecl    : Unknown,
 #elif PATCHER_X86_64
-  AbiStd     = IsMsAbi ? Mscall   : IsUnixAbi ? Unixcall : Unknown,
-  Membercall = AbiStd,
+  AbiStd     = IsMsAbi ? Mscall : IsUnixAbi ? Unixcall : Unknown,
 #endif
   Variadic   = AbiStd,
 };
 
 namespace Util {
-/// Templated dummy parameter type that can be used to pass a calling convention as a templated function argument.
+///@{ Templated dummy parameter type that can be used to pass a calling convention as a templated function argument.
 template <Call C>  struct AsCall{};
+#define PATCHER_ASCALL_DEF(conv, name)  constexpr auto As##name = AsCall<Call::name>{};
+PATCHER_EMIT_CALLING_CONVENTIONS(PATCHER_ASCALL_DEF);
+///@}
 
 
 ///@{ Pointer arithmetic helpers.
@@ -289,7 +298,13 @@ template <size_t N, typename T>  struct TupleElementImpl<N, T, EnableIf<(N < std
   { using Type = typename std::tuple_element<N, T>::type; };
 
 template <size_t N, typename T>  using TupleElement = typename TupleElementImpl<N, T>::Type;
+
+template <typename T, bool = std::is_enum<T>::value>  struct UnderlyingTypeImpl { using Type = T; };
+template <typename T>  struct UnderlyingTypeImpl<T, true> { using Type = typename std::underlying_type<T>::type; };
+
+template <typename T>  using UnderlyingType = typename UnderlyingTypeImpl<T>::Type;
 ///@}
+
 
 template <typename... Ts>             struct TypeSequence{};                            ///< Parameter pack of types.
 template <typename T, T... Elements>  struct ValueSequence{};                           ///< Parameter pack of values.
@@ -322,9 +337,11 @@ template <size_t Begin, size_t End>   using MakeIndexRange    = MakeSeqRange<siz
 template <typename T, size_t Length>
 using MakeTypeSequence = typename MakeTypeSeqImpl<MakeIndexSequence<Length>, T>::Type;
 
+
 /// @internal  Returns the larger of a or b.
 template <typename T1, typename T2, typename U = CommonType<T1, T2>>
 constexpr U Max(const T1& a, const T2& b) { return (static_cast<U>(a) > static_cast<U>(b)) ? a : b; }
+
 /// @internal  Returns the smaller of a or b.
 template <typename T1, typename T2, typename U = CommonType<T1, T2>>
 constexpr U Min(const T1& a, const T2& b) { return (static_cast<U>(a) < static_cast<U>(b)) ? a : b; }
@@ -332,11 +349,13 @@ constexpr U Min(const T1& a, const T2& b) { return (static_cast<U>(a) < static_c
 /// @internal  Gets the length of an array.
 template <typename T, size_t N>  constexpr uint32 ArrayLen(const T (&src)[N]) { return static_cast<uint32>(N); }
 
+
 ///@{ @internal  Template metafunction used to obtain function call signature information from a callable.
 template <typename T, typename = void>  struct FuncTraitsImpl   :   public FuncTraitsImpl<decltype(&T::operator())>{};
 template <typename T>                   using  FuncTraits       = typename FuncTraitsImpl<Decay<T>>::Type;
 template <typename T>                   using  FuncTraitsNoThis = typename FuncTraits<T>::StripThis;
 ///@}
+
 
 /// @internal   Macro that takes a macro which takes (cvQual, refQual) as args, and invokes it for each combination of
 /// qualifiers.  This does not invoke the macro for the no-modifier permutation.
@@ -345,14 +364,15 @@ template <typename T>                   using  FuncTraitsNoThis = typename FuncT
 
 
 ///@{ @internal  Helper template used in converting non-capturing lambdas (and stateless functors) to function pointers.
-template <typename T, bool Empty>  struct LambdaInvokerImpl{};
-template <typename T>  using LambdaInvoker = LambdaInvokerImpl<decltype(&T::operator()), std::is_empty<T>::value>;
-#define PATCHER_LAMBDA_INVOKER_PMF_DEF(pThisQualifier, ...)  template <typename T, typename R, typename... A, bool E>  \
-struct LambdaInvokerImpl<R(T::*)(A...) pThisQualifier __VA_ARGS__, E> : public LambdaInvokerImpl<R(T::*)(A...), E>{};
+template <typename T, bool Empty, typename = void>  struct LambdaInvokerImpl{};
+template <typename T>  using LambdaInvoker = LambdaInvokerImpl<decltype(&T::operator()), std::is_empty<T>::value, void>;
+#define PATCHER_LAMBDA_INVOKER_PMF_DEF(pThisQual, ...)  template <typename T, typename R, typename... A, bool E>  \
+struct LambdaInvokerImpl<R(T::*)(A...) pThisQual __VA_ARGS__, E, void>                                            \
+  : public LambdaInvokerImpl<R(T::*)(A...), E, void>{};
 PATCHER_EMIT_PMF_QUALIFIERS(PATCHER_LAMBDA_INVOKER_PMF_DEF);
 
 template <typename Lambda, typename Return, typename... Args>
-struct LambdaInvokerImpl<Return(Lambda::*)(Args...), true> {
+struct LambdaInvokerImpl<Return(Lambda::*)(Args...), true, void> {
   static constexpr Lambda* GetInvoker() { return nullptr; }
   template <Call C>  struct As{};
 
@@ -471,8 +491,10 @@ struct RtFuncSig {
 };
 
 ///@{ @internal  FuncTraitsImpl template metafunction used to obtain function call signature information from a callable
-template <typename Pfn, Call C>  using EnableIfConventionExists = Conditional<
-  (Call::Default == C) || (std::is_same<void(*)(), Pfn>::value == false), void, Util::AsCall<C>>;
+template             <typename Pfn, Call C>  using EnableIfConventionExists    = Conditional<
+  (Call::Default    == C) || (std::is_same<void(*)(),    Pfn>::value == false), void, Util::AsCall<C>>;
+template <typename T, typename Pmf, Call C>  using EnableIfConventionExistsPmf = Conditional<
+  (Call::Membercall == C) || (std::is_same<void(T::*)(), Pmf>::value == false), void, Util::AsCall<C>>;
 
 #define PATCHER_FUNC_TRAITS_DEF(conv, name)  template <typename R, typename... A>           \
 struct FuncTraitsImpl<R(conv*)(A...), EnableIfConventionExists<void(conv*)(), Call::name>>  \

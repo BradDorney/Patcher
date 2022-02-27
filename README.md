@@ -45,7 +45,8 @@ patcher.Hook(&SomeFunction, SetCapturedTrampoline, [F = (decltype(&SomeFunction)
 // Note that while Hook(&SomeClass::SomeFunction, ...) works, PATCHER_MFN_PTR() is more robust for virtual functions.
 //
 // In this example, we assume the target function uses the thiscall calling convention, so we use the ThiscallFunctor
-// util to convert the lambda to use thiscall.  There is also StdcallFunctor, FastcallFunctor, and VectorcallFunctor.
+// util to convert the lambda to use thiscall.  There is also StdcallFunctor, FastcallFunctor, and VectorcallFunctor
+// in x86-32; and MscallFunctor, UnixcallFunctor, and VectorcallFunctor in x86-64.
 patcher.Hook(
   PATCHER_MFN_PTR(SomeClass::SomeVirtualFunction),
   ThiscallFunctor([](SomeClass* pThis, int x) { pThis->someField_ -= x; }));

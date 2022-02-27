@@ -206,13 +206,13 @@ public:
   /// Capturing lambdas or non-empty functor objects will become bound to this FunctionRef using the std::function ctor.
   /// @note To hook T::operator() itself, consider constructing a FunctionRef from &T::operator().
   template <
-    typename T, Call C = Call::Cdecl, typename E = typename std::is_empty<T>::type, typename = decltype(&T::operator())>
+    typename T, Call C = Call::AbiStd, typename E = typename std::is_empty<T>::type, typename = decltype(&T::operator())>
   constexpr FunctionRef(T&& functor, Util::AsCall<C> call = {}) : FunctionRef(std::forward<T>(functor), call, E{}) { }
 
   /// Conversion constructor for std::function.
   /// @note std::bind objects must be explicitly wrapped with std::function in order to construct a FunctionRef from it.
   /// @note Conventions that use vector registers (vectorcall, sseregparm, regcall) are currently not supported.
-  template <typename R, typename... A, typename Fn = std::function<R(A...)>, Call C = Call::Cdecl>
+  template <typename R, typename... A, typename Fn = std::function<R(A...)>, Call C = Call::AbiStd>
   FunctionRef(
     std::function<R(A...)> functor, Util::AsCall<C> = {}, GetTargetFunc<decltype(functor)>* pfnGetTarget = nullptr)
     : pfn_(), sig_(FuncSig<R,C,0,A...>{}), pObj_(), pState_(), pfnGetInvokers_(&GetInvokeFunctorTable<Fn, R, A...>::Get)

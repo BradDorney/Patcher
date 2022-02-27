@@ -1270,7 +1270,8 @@ static bool CreateFunctorThunk(
     break;
 
 #elif PATCHER_X86_64
-  case Call::Cdecl: {
+  case Call::Mscall:
+  case Call::Unixcall: {
     // The x64 calling convention passes the first 4 arguments via registers in MS ABI, or the first 6 in Unix ABI.
     const size_t numAlignmentPadders    = GetNumAlignmentPadders(InvokeFunctorNumSkipped);
     const size_t numRegArgs             = Min(numRegisterSizeParams, InvokeFunctorNumSkipped);
@@ -1280,11 +1281,11 @@ static bool CreateFunctorThunk(
     if (numRegisterSizeParams >= 1) {
       // We need to pop the old return address (and the shadow space if MS ABI) before we can push our args.
       writer.pop(r11);                                     // Pop old return address
-      if (IsMsAbi) {
+      if (sig.convention == Call::Mscall) {
         writer.AddSp(int32(RegisterSize * 4));             // add  rsp, 32  (Pop old shadow space)
         PushArgRegisters({ rcx, rdx, r8, r9 });            // Push 1-4 args passed via registers
       }
-      else if (IsUnixAbi) {
+      else {
         PushArgRegisters({ rsi, rdi, rdx, rcx, r8, r9 });  // Push 1-6 args passed via registers
       }
       writer.push(r11);                                    // Push old return address
@@ -1292,7 +1293,7 @@ static bool CreateFunctorThunk(
 
     WriteCall(numAlignmentPadders);
 
-    if (IsMsAbi) {
+    if (sig.convention == Call::Mscall) {
       // In MS ABI, we moved the shadow space, but the original caller will try to pop it, so we need to compensate.
       const auto totalPopSize = uint8(popPadAndInvokeArgSize + ((numRegArgs < 4) ? RegisterSize : 0) + popRegArgSize);
       const auto shadowOffset = uint8((RegisterSize * 3) - popRegArgSize);
@@ -2385,7 +2386,7 @@ Status PatchContext::LowLevelHook(
   if (status_ == Status::Ok) {
     // Validate the callback signature and register options.
     const Call convention = pfnHookCb.Signature().convention;
-    if ((convention != Call::Cdecl) && (convention != Call::Default) && (convention != Call::Unknown)) {
+    if ((convention != Call::AbiStd) && (convention != Call::Default) && (convention != Call::Unknown)) {
       status_ = Status::FailInvalidCallback;
     }
     else for (const auto& reg : registers) {

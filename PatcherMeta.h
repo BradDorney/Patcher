@@ -137,11 +137,16 @@ namespace Patcher {
 #endif
 
 // Macro that takes a macro which takes (convention, name) as args, and invokes it for each calling convention.
-#define PATCHER_EMIT_CALLING_CONVENTIONS($)  PATCHER_IGNORE_GCC_WARNING("-Wignored-attributes",           \
+#if PATCHER_X86_32
+# define PATCHER_EMIT_CALLING_CONVENTIONS($)  PATCHER_IGNORE_GCC_WARNING("-Wignored-attributes",          \
   $(PATCHER_CDECL,       Cdecl)     $(PATCHER_STDCALL,     Stdcall)     $(PATCHER_FASTCALL,    Fastcall)  \
   $(PATCHER_THISCALL,    Thiscall)  $(PATCHER_VECTORCALL,  Vectorcall)  $(PATCHER_REGCALL,     Regcall)   \
   $(PATCHER_REGPARM(1),  Regparm1)  $(PATCHER_REGPARM(2),  Regparm2)    $(PATCHER_REGPARM(3),  Regparm)   \
   $(PATCHER_SSEREGPARM,  SseRegparm))
+#elif PATCHER_X86_64
+# define PATCHER_EMIT_CALLING_CONVENTIONS($)  PATCHER_IGNORE_GCC_WARNING("-Wignored-attributes",          \
+  $(PATCHER_MSCALL,  Mscall)  $(PATCHER_UNIXCALL,  Unixcall)  $(PATCHER_VECTORCALL,  Vectorcall))
+#endif
 
 // Default stack alignment assumed at the beginning of function calls.
 #if defined(PATCHER_DEFAULT_STACK_ALIGNMENT) == false
@@ -219,14 +224,14 @@ enum class Call : uint32 {
   Count,
 
   Default    = PATCHER_EMIT_CALLING_CONVENTIONS(PATCHER_DEFAULT_CALLING_CONVENTION_ENUM_DEF) Unknown,
-#if   PATCHER_MS_ABI
-  Membercall = Thiscall,
-#elif PATCHER_UNIX_ABI
-  Membercall = Cdecl,
-#else
-  Membercall = Unknown,
+#if PATCHER_X86_32
+  AbiStd     = Cdecl,
+  Membercall = IsMsAbi ? Thiscall : IsUnixAbi ? Cdecl    : Unknown,
+#elif PATCHER_X86_64
+  AbiStd     = IsMsAbi ? Mscall   : IsUnixAbi ? Unixcall : Unknown,
+  Membercall = AbiStd,
 #endif
-  Variadic   = Cdecl,
+  Variadic   = AbiStd,
 };
 
 namespace Util {

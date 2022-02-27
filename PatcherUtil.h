@@ -80,8 +80,9 @@ struct LowLevelHookInfo {
   uint32 argsAsStructPtr     :  1;  ///< Args are passed to the callback as a pointer to a struct that contains them.
   uint32 noAlignStackPtr     :  1;  ///< Skip aligning the stack pointer. Faster, but may break float and vector ops.
   uint32 noRestoreFlagsReg   :  1;  ///< Do not save/restore the flags register state, which can be expensive.
+  uint32 forceUseRedZone     :  1;  ///< Force use of the stack red zone. Makes custom return addr faster, but unstable.
   uint32 debugBreakpoint     :  1;  ///< Adds a debug breakpoint to the start of the trampoline code.
-  uint32 reserved            : 24;  ///< Reserved for future use.
+  uint32 reserved            : 23;  ///< Reserved for future use.
 
   uint32 reserveStackSize;  ///< Size in bytes of extra stack space to reserve.  Set this if you intend to modify the
                             ///  stack pointer to allocate space (up to a maximum of the specified size).

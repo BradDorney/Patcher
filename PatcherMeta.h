@@ -129,6 +129,7 @@ namespace Patcher {
 // Macro that expands to an attribute if it is defined, otherwise expands to nil.
 # define  PATCHER_ATTRIBUTE(attr)        PATCHER_ATTR_IMPL1((__has_attribute(attr), __attribute((attr))))
 # define  PATCHER_ATTR_PARM(attr, ...)   PATCHER_ATTR_IMPL1((__has_attribute(attr), __attribute((attr(__VA_ARGS__)))))
+
 # define  PATCHER_ATTR_IMPL1(args)       PATCHER_ATTR_IMPL2 args
 # define  PATCHER_ATTR_IMPL2(has, attr)  PATCHER_ATTR_EXPAND_##has(attr)
 # define  PATCHER_ATTR_EXPAND_1(attr)    attr
@@ -549,6 +550,7 @@ struct GetInvokeFunctorTable {
   }
 };
 
+
 ///@{ @internal  Helper metafunction for implementing register type and by reference deduction for LowLevelHook().
 template <typename    T>  using  GetRegisterInfoTraits =
   Conditional<std::is_function<RemoveCvRefPtr<T>>::value, FuncTraits<T>, FuncTraitsNoThis<T>>;
@@ -560,6 +562,7 @@ template <typename... A>  struct GetRegisterInfo<std::tuple<A...>> {
   static constexpr Arr Info = { { RemoveCvRefPtr<A>::RegisterId, IsRefPtr<A>(), RemoveCvRefPtr<A>::StackOffset }... };
 };
 ///@}
+
 
 ///@{ @internal  Helpers for creating a dummy object instance.  Used as a target for GetVftable() in PmfCast().
 template <typename T, bool = std::is_polymorphic<T>::value>

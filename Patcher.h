@@ -175,7 +175,7 @@ public:
   /// @param [in] info       (Optional) Settings for callback behavior, performance, etc.  Some can be template-deduced.
   ///
   /// @example  LowLevelHook(0x402044,  [](Registers::Eax<int>& rw, Esi<bool> r) { ++rw;  return r ? 0 : 0x402046; })
-  /// @example  LowLevelHook(0x14005200AF,  [=](Registers::Rsp<int64&, 18> stackVar) { stackVar /= someCapturedLocal; })
+  /// @example  LowLevelHook(0x14005200AF,  [=](Registers::Rsp<int64&, 16> stackVar) { stackVar /= someCapturedLocal; })
   /// @example  LowLevelHook(0x542080,  { Registers::Register::Eax, Register::Edx },  [](int64& val) { val = -val; })
   ///
   /// Available registers: [Eax, Ecx, Edx, Ebx, Esi, Edi, Ebp, Esp, Eflags] (x86-32)
@@ -294,16 +294,16 @@ private:
   Allocator*     pAllocator_;       ///< Code allocator instance used by this PatchContext.
   PatcherStatus  status_;           ///< Status of this PatchContext.  If this is an error, most methods become a no-op.
 
-  using DataStorage        = Impl::SmallVector<uint8, 8>;
-  using TrackedAllocVector = Impl::SmallVector<std::pair<void*, size_t>, (IsX86_64 ? 2 : 1)>;
+  using OldDataStorage     = Impl::SmallVector<uint8, 8>;
+  using TrackedAllocVector = Impl::SmallVector<std::pair<void*, size_t>, (IsX86_64 ? 2 : 1)>;      // pAlloc, size
+  using FunctorThunkVector = Impl::SmallVector<std::pair<std::shared_ptr<void>, const void*>, 1>;  // pFunctor, pfnThunk
 
   /// @internal  Struct for storing mappings of patch addresses to infomation required for cleanup and other purposes.
   struct PatchInfo {
-    void*                 pAddress;         ///< Actual patch address (may differ from requested address)
-    DataStorage           oldData;          ///< Old memory copy
-    TrackedAllocVector    trackedAllocs;    ///< Tracked allocations, e.g. trampoline code, far thunk, etc. (optional)
-    std::shared_ptr<void> pFunctorObj;      ///< Pointer to functor object; also owns thunk allocation (optional)
-    const void*           pfnFunctorThunk;  ///< Pointer to functor thunk code allocation (optional)
+    void*               pAddress;       ///< Actual patch address (may differ from requested address)
+    OldDataStorage      oldData;        ///< Old memory copy
+    TrackedAllocVector  trackedAllocs;  ///< Tracked allocations, e.g. trampoline code, far thunk, etc. (optional)
+    FunctorThunkVector  functors;       ///< Pointers to functor objects and their thunk code if used (optional)
   };
 
   /// Patch history, sorted from newest to oldest.

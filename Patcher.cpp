@@ -1377,7 +1377,7 @@ static Status FindHookPatchRegion(
       const auto& insn = (*pInsns)[i];
 
       // Assume int 3 or nop instructions are padders.
-      // ** TODO Check for 2 or more NUL
+      // ** TODO Check for 2 or more NUL?
       if (foundEnd && (insn.bytes[0] != 0xCC) && (insn.bytes[0] != 0x90)) {
         break;
       }
@@ -1413,15 +1413,23 @@ static Status FindHookPatchRegion(
       // we can overwrite the start of the function with jmp8 to the jmp32 written in the padders.
       uint8* pReader = static_cast<uint8*>(pAddress);
 
-      // Padder bytes are typically int 3 (0xCC), nop (0x90), or NUL.
-      // ** TODO Check for 2 or more NUL
-      // ** TODO Check that pReader[-sizeof(Jmp32)] is a valid executable memory address
-      for (int32 i = 1; ((pReader[-i] == 0xCC) || (pReader[-i] == 0x90)); ++i) {
-        if (i >= static_cast<int32>(sizeof(Jmp32))) {
-          *pOverwrittenSize = bestSize;
-          pInsns->resize(bestCount);
-          status = Status::Ok;
-          break;
+      // Query memory page protection information to ensure preceding padders are in valid executable memory.
+      MEMORY_BASIC_INFORMATION memInfo;
+      void*const pLowAddr = PtrDec(pAddress, sizeof(Jmp32));
+
+      if ((VirtualQuery(pLowAddr, &memInfo, sizeof(memInfo)) > offsetof(MEMORY_BASIC_INFORMATION, Protect)) &&
+          (memInfo.State == MEM_COMMIT) &&
+          BitFlagTest(memInfo.Protect, ExecutableProtectFlags))
+      {
+        // Padder bytes are typically int 3 (0xCC), nop (0x90), or NUL.
+        // ** TODO Check for 2 or more NUL?
+        for (int32 i = 1; ((pReader[-i] == 0xCC) || (pReader[-i] == 0x90)); ++i) {
+          if (i >= static_cast<int32>(sizeof(Jmp32))) {
+            *pOverwrittenSize = bestSize;
+            pInsns->resize(bestCount);
+            status = Status::Ok;
+            break;
+          }
         }
       }
     }

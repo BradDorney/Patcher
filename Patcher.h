@@ -213,9 +213,9 @@ public:
   ///@{ Replaces all static, direct pointer references to data or code.  Note that this only affects hardcoded pointers,
   ///   not ones that have already been dynamically assigned at runtime; thus, this should be used as early as possible.
   ///
-  /// @param [in]  pOldMemory  Pointer to the old global we want to replace.
+  /// @param [in]  pOldMemory  Pointer to the old memory we want to replace.
   /// @param [in]  size        Size in bytes of the old global.
-  /// @param [in]  pNewMemory  Pointer to the new global we want to replace all references to pOldGlobal with.
+  /// @param [in]  pNewMemory  Pointer to the new memory we want to replace all references to @ref pOldMemory with.
   /// @param [out] pRefsOut    (Optional) Pointer to a vector to contain all locations that have been patched up.
   ///
   /// @note If the module's .reloc section has been stripped (mainly only seen in some older exe files), this will fail.

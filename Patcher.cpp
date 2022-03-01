@@ -1059,10 +1059,10 @@ void PatchContext::EndDeProtect(
 }
 
 // =====================================================================================================================
-Status PatchContext::ReplaceReferencesToGlobal(
-  TargetPtr            pOldGlobal,
+Status PatchContext::ReplaceStaticReferences(
+  TargetPtr            pOldMemory,
   size_t               size,
-  const void*          pNewGlobal,
+  const void*          pNewMemory,
   std::vector<void*>*  pRefsOut)
 {
   struct RelocInfo {
@@ -1070,10 +1070,10 @@ Status PatchContext::ReplaceReferencesToGlobal(
     uint16  type   :  4;  // IMAGE_REL_BASED_x - HIGHLOW (x86_32) or DIR64 (x86_64)
   };
 
-  if ((status_ == Status::Ok) && (pOldGlobal == nullptr) || (pNewGlobal == nullptr)) {
+  if ((status_ == Status::Ok) && (pOldMemory == nullptr) || (pNewMemory == nullptr)) {
     status_ = Status::FailInvalidPointer;
   }
-  pOldGlobal = MaybeFixTargetPtr(pOldGlobal);
+  pOldMemory = MaybeFixTargetPtr(pOldMemory);
 
   if (size == 0) {
     size = 1;
@@ -1130,11 +1130,11 @@ Status PatchContext::ReplaceReferencesToGlobal(
         }
 
         if ((pAddress != nullptr) && (ptrSize != 0)) {
-          const size_t delta = PtrDelta(pAddress, pOldGlobal);
+          const size_t delta = PtrDelta(pAddress, pOldMemory);
 
-          if ((pAddress >= pOldGlobal) && (delta < size)) {
+          if ((pAddress >= pOldMemory) && (delta < size)) {
             // Found a reference to the global we want to replace.  Patch it.
-            const uint64 newAddress = (reinterpret_cast<uintptr>(pNewGlobal) + delta);
+            const uint64 newAddress = (reinterpret_cast<uintptr>(pNewMemory) + delta);
             if ((newAddress >> (ptrSize * 8)) == 0) {
               Memcpy(ppAddress, &newAddress, ptrSize);
 

@@ -210,21 +210,21 @@ public:
   }
   ///@}
 
-  ///@{ Replaces all static, direct pointer references to a global.  Note that this only affects hardcoded pointers, not
-  ///   ones that have already been dynamically assigned at runtime; therefore this should be used as early as possible.
+  ///@{ Replaces all static, direct pointer references to data or code.  Note that this only affects hardcoded pointers,
+  ///   not ones that have already been dynamically assigned at runtime; thus, this should be used as early as possible.
   ///
-  /// @param [in]  pOldGlobal  Pointer to the old global we want to replace.
+  /// @param [in]  pOldMemory  Pointer to the old global we want to replace.
   /// @param [in]  size        Size in bytes of the old global.
-  /// @param [in]  pNewGlobal  Pointer to the new global we want to replace all references to pOldGlobal with.
+  /// @param [in]  pNewMemory  Pointer to the new global we want to replace all references to pOldGlobal with.
   /// @param [out] pRefsOut    (Optional) Pointer to a vector to contain all locations that have been patched up.
   ///
   /// @note If the module's .reloc section has been stripped (mainly only seen in some older exe files), this will fail.
-  PatcherStatus ReplaceReferencesToGlobal(
-    TargetPtr pOldGlobal, size_t size, const void* pNewGlobal, std::vector<void*>* pRefsOut = nullptr);
+  PatcherStatus ReplaceStaticReferences(
+    TargetPtr pOldMemory, size_t size, const void* pNewMemory, std::vector<void*>* pRefsOut = nullptr);
   template <typename T>
-  PatcherStatus ReplaceReferencesToGlobal(
-    TargetPtr pOldGlobal, const T* pNewGlobal, std::vector<void*>* pRefsOut = nullptr)
-      { return ReplaceReferencesToGlobal(pOldGlobal, sizeof(T), pNewGlobal, pRefsOut); }
+  PatcherStatus ReplaceStaticReferences(
+    TargetPtr pOldMemory, const T* pNewMemory, std::vector<void*>* pRefsOut = nullptr)
+      { return ReplaceStaticReferences(pOldMemory, sizeof(T), pNewMemory, pRefsOut); }
   ///@}
 
   /// Adds or modifies export table entries in the module.  The modified export table will be seen by future modules.

@@ -2,7 +2,7 @@
 
 Patcher is a C++11 memory patching and code hooking library that aims to be lightweight yet powerful. It is built around [Capstone](https://www.capstone-engine.org/), a LLVM-based disassembler that itself is lightweight enough to run on embedded systems. Patcher can be compared to Microsoft's [Detours](https://github.com/microsoft/detours) library, but Patcher possesses some functionality that Detours lacks.
 
-In addition to installing traditional code hooks over whole functions, Patcher is also capable of redirecting specific function call instructions (`HookCall`), and can even insert instruction-level hooks with read/write access to registers and can change control flow (`LowLevelHook`). Patcher can also modify the module's export address table seen by subsequently-loaded importing modules (`EditExports`). Patcher is also able to overwrite arbitrary bytes, and both POD and non-POD typed data. It can also redirect all fixed references to a global variable/object (`ReplaceReferencesToGlobal`), allowing for fixed-size data to be extended.
+In addition to installing traditional code hooks over whole functions, Patcher is also capable of redirecting specific function call instructions (`HookCall`), and can even insert instruction-level hooks with read/write access to registers and can change control flow (`LowLevelHook`). Patcher can also modify the module's export address table seen by subsequently-loaded importing modules (`EditExports`). Patcher is also able to overwrite arbitrary bytes, and both POD and non-POD typed data. It can also redirect all fixed references to a global variable/object/function (`ReplaceStaticReferences`), allowing for uses such as extending fixed-size data.
 
 The interface has a number of conveniences, including: module base relocation is automatically accounted for in target addresses; hook interfaces can take lambdas to help minimize boilerplate in patch code; and reverting any or all patches is simple and is automated via RAII - convenient when using Patcher in a hot-pluggable mod environment.
 
@@ -80,8 +80,8 @@ patcher.Construct<std::vector<int>>(0x5FF740, 10);
 patcher.Assign(0x5FF740, std::vector<int>(20));
 
 // Replace fixed references within the module to a global array with a larger-sized one.
-static int newExtendedGlobal[10] = { };
-patcher.ReplaceReferencesToGlobal(0x608220, sizeof(int[3]), &newExtendedGlobal);
+static int newExtendedGlobalArray[10] = { };
+patcher.ReplaceStaticReferences(0x608220, sizeof(int[3]), &newExtendedGlobalArray);
 
 // Revert a previous patch.
 patcher.Revert(0x5F29AC);

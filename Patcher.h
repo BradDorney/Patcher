@@ -214,7 +214,7 @@ public:
   ///   not ones that have already been dynamically assigned at runtime; thus, this should be used as early as possible.
   ///
   /// @param [in]  pOldMemory  Pointer to the old memory we want to replace.
-  /// @param [in]  size        Size in bytes of the old global.
+  /// @param [in]  size        Size in bytes of the old memory.
   /// @param [in]  pNewMemory  Pointer to the new memory we want to replace all references to @ref pOldMemory with.
   /// @param [out] pRefsOut    (Optional) Pointer to a vector to contain all locations that have been patched up.
   ///

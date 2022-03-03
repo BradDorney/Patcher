@@ -59,11 +59,11 @@ constexpr size_t SetCapturedTrampoline = 0;
 ///@{ Converts any (non-overloaded) lambda or functor to a FunctorRef object (of the specified calling convention).
 ///   This can be passed to PatchContext methods, be used as a callable, and implicitly converts to a function pointer.
 ///   If created from a non-empty type, then the returned FunctorRef needs to be kept alive or referenced by a patch.
-#define PATCHER_CREATE_FUNCTOR_INVOKER_DEF(convention, name)  template <typename T>  \
+#define PATCHER_CREATE_FUNCTOR_INVOKER_DEF(convention, name, ...)  template <typename T>  \
 Impl::FunctorRef<T, Call::name> name##Functor(T&& f) { return Impl::FunctorRef<T, Call::name>(std::forward<T>(f)); }
 template <Call C = Call::Default, typename T = void>
 Impl::FunctorRef<T, C>                Functor(T&& f) { return Impl::FunctorRef<T, C>(std::forward<T>(f));          }
-PATCHER_EMIT_CALLING_CONVENTIONS(PATCHER_CREATE_FUNCTOR_INVOKER_DEF);
+PATCHER_EMIT_CALLS(PATCHER_CREATE_FUNCTOR_INVOKER_DEF);
 ///@}
 } // Util
 

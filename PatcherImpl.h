@@ -101,7 +101,7 @@ public:
   constexpr const T* data() const noexcept { return pData_; }
 
   template <typename I>
-                  T& operator[](I index) noexcept       { return *(pData_ + UnderlyingType<I>(index)); }
+                  T& operator[](I index)       noexcept { return *(pData_ + UnderlyingType<I>(index)); }
   template <typename I>
   constexpr const T& operator[](I index) const noexcept { return *(pData_ + UnderlyingType<I>(index)); }
 

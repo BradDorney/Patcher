@@ -135,7 +135,7 @@ struct CallAbs {
   uint8  adjustRetnPtr[4];  // add  dword ptr [esp], 10  (Adjust return pointer to be after jmp)
   JmpAbs jmp;               //                           (Note: return branch misprediction penalty)
 #else
-    : call{ { 0xFF, 0x15 }, sizeof(Jmp8) }, skipAddressData{ 0xEB, sizeof(address) }, address(address) { }
+    : call{ { 0xFF, 0x15 }, sizeof(Jmp8) }, skipAddressData{ 0xEB, sizeof(uintptr) }, address(address) { }
 
   Op2_4   call;             // call qword ptr [rip + 2]
   Jmp8    skipAddressData;  // jmp  8
@@ -1109,7 +1109,7 @@ Status PatchContext::ReplaceStaticReferences(
       const auto*const pRelocArray = PtrInc<RelocInfo*>(pCurBlock, sizeof(IMAGE_BASE_RELOCATION));
       const size_t     numRelocs   = ((pCurBlock->SizeOfBlock - sizeof(IMAGE_BASE_RELOCATION)) / sizeof(RelocInfo));
 
-      // Iterate over relocations, find references to the global and replace them.
+      // Iterate over relocations, find references to the memory and replace them.
       for (size_t i = 0; ((status_ == Status::Ok) && (i < numRelocs)); ++i) {
         void*const   ppAddress = (static_cast<uint8*>(hModule_) + pCurBlock->VirtualAddress + pRelocArray[i].offset);
         const void*  pAddress  = nullptr;
@@ -1133,7 +1133,7 @@ Status PatchContext::ReplaceStaticReferences(
           const size_t delta = PtrDelta(pAddress, pOldMemory);
 
           if ((pAddress >= pOldMemory) && (delta < size)) {
-            // Found a reference to the global we want to replace.  Patch it.
+            // Found a reference to the item we want to replace.  Patch it.
             const uint64 newAddress = (reinterpret_cast<uintptr>(pNewMemory) + delta);
             if ((newAddress >> (ptrSize * 8)) == 0) {
               Memcpy(ppAddress, &newAddress, ptrSize);
@@ -1206,7 +1206,7 @@ static bool CreateFunctorThunk(
       writer.push(r11);
     })
     if (numPadders != 0) {
-      writer.SubSp(int32(RegisterSize * numPadders));  // sub rsp, i8  (Align)
+      writer.SubSp(int32(RegisterSize * numPadders));                    // sub esp, i8  (Align)
     }
 
     if (calleeCleanup) {
@@ -1904,7 +1904,7 @@ static size_t CreateLowLevelHookTrampoline(
   static constexpr Register ReturnRegister      = X86_SELECTOR(Register::Eax,    Register::Rax);
   static constexpr Register StackRegister       = X86_SELECTOR(Register::Esp,    Register::Rsp);
   static constexpr Register FlagsRegister       = X86_SELECTOR(Register::Eflags, Register::Rflags);
-  static constexpr uint8    StackAlignment      = PATCHER_DEFAULT_STACK_ALIGNMENT;
+  static constexpr uint8    StackAlignment      = uint8(PATCHER_DEFAULT_STACK_ALIGNMENT);
 
   // Fix user-provided options to ignore redundant flags and sanitize inputs.
   if (settings.noCustomReturnAddr) {
@@ -2025,7 +2025,7 @@ static size_t CreateLowLevelHookTrampoline(
     const int32 flagsOffset  = -int32(settings.reserveStackSize + (RegisterSize * 2));
     const uint8 alignDelta   = uint8(-int8(
       (totalStackSize & (StackAlignment - 1)) - StackAlignment)) & (StackAlignment - 1);
-    const uint8 usedScratch  = uint8(RegisterSize * (saveFlags ? 2 : 1));  // For push eax (+ pushf)
+    const uint8 usedScratch  = uint8(RegisterSize * (saveFlags ? 2 : 1));  // For *AX (+ flags)
     const uint8 remScratch   =
       uint8((ScratchSpaceSize > usedScratch) ? (ScratchSpaceSize - usedScratch) : 0);
     const bool  restoreFlags = saveFlags && IsRegisterRequested(FlagsRegister);
@@ -2036,14 +2036,14 @@ static size_t CreateLowLevelHookTrampoline(
     }
 
     writer.push(returnRegister);                   // Save *AX to scratch[0]
-    if (saveFlags)  { writer.pushf(); }            // Save *flags to scratch[1]
+    if (saveFlags)  { writer.pushf(); }            // Save flags to scratch[1]
     if (remScratch) { writer.SubSp(remScratch); }  // Reserve remaining scratch
     writer.mov(returnRegister, stackRegister);
-    if (restoreFlags) { writer.PushFromStack(remScratch); }  // Fast copy flags
-    writer.and_(returnRegister, StackAlignMask);             // Calc aligned SP
-    writer.sub(returnRegister, alignDelta);
-    if (restoreFlags) { writer.popf(); }                     // Restore flags
-    writer.xchg(returnRegister, stackRegister);              // Align SP
+    if (restoreFlags) { writer.PushFromStack(remScratch); }        // Fast copy flags
+    writer.and_(returnRegister, StackAlignMask);                   // Calc aligned SP
+    if (alignDelta)   { writer.sub(returnRegister, alignDelta); }
+    if (restoreFlags) { writer.popf(); }                           // Restore flags
+    writer.xchg(returnRegister, stackRegister);                    // Align SP
     writer.lea(returnRegister, ptr [returnRegister + totalReserveSize]);
     writer.push(returnRegister);                                                                // Save old SP
     if (saveFlags) { writer.push(X86_SELECTOR(dword, qword) [returnRegister + flagsOffset]); }  // Save flags
@@ -2387,7 +2387,7 @@ Status PatchContext::LowLevelHook(
   if (status_ == Status::Ok) {
     // Validate the callback signature and register options.
     const Call convention = pfnHookCb.Signature().convention;
-    if ((convention != Call::AbiStd) && (convention != Call::Default) && (convention != Call::Unknown)) {
+    if ((convention != Call::AbiStd) && (convention != Call::Unknown)) {
       status_ = Status::FailInvalidCallback;
     }
     else for (const auto& reg : registers) {
@@ -2529,10 +2529,8 @@ Status PatchContext::EditExports(
 
     // Overlay our exports we want to inject.
     for (uint16 i = 0, nextIndex = uint16(exports.size()); (status_ == Status::Ok) && (i < exportInfos.Length()); ++i) {
-      while ((exports.size() > nextIndex) && (exports[nextIndex] != nullptr)) {
-        // Fix up next export ordinal, in the case of having added an export by ordinal.
-        ++nextIndex;
-      }
+      // Fix up next export ordinal, in the case of having added an export by ordinal.
+      for (; (exports.size() > nextIndex) && (exports[nextIndex] != nullptr); ++nextIndex);
 
       auto curExport = exportInfos[i];
 
@@ -2643,16 +2641,18 @@ Status PatchContext::EditExports(
         }
       }
 
-      for (const auto& nameOrdinal : namesToOrdinals) {
-        *(pNameTable++)        = static_cast<uint32>(PtrDelta(pStringBuffer, hModule_));
-        *(pNameOrdinalTable++) = nameOrdinal.second;
-        AppendString(&pStringBuffer, nameOrdinal.first);
-      }
-
       const bool previouslyEdited = HasPatched(pExportDataDir);
 
-      // Modify the module's header to point to our new export table.
-      Write(pExportDataDir, IMAGE_DATA_DIRECTORY{ DWORD(PtrDelta(pAllocation, hModule_)), DWORD(allocSize) });
+      if (status_ == Status::Ok) {
+        for (const auto& nameOrdinal : namesToOrdinals) {
+          *(pNameTable++)        = static_cast<uint32>(PtrDelta(pStringBuffer, hModule_));
+          *(pNameOrdinalTable++) = nameOrdinal.second;
+          AppendString(&pStringBuffer, nameOrdinal.first);
+        }
+
+        // Modify the module's header to point to our new export table.
+        Write(pExportDataDir, IMAGE_DATA_DIRECTORY{ DWORD(PtrDelta(pAllocation, hModule_)), DWORD(allocSize) });
+      }
 
       if (status_ == Status::Ok) {
         // Add export table allocation and far thunk info to the history tracker entry for this patch so we can clean it
@@ -2662,13 +2662,13 @@ Status PatchContext::EditExports(
         if (previouslyEdited && (entry.trackedAllocs.empty() == false)) {
           // If we previously had injected exports, we need to clean up the heap allocation for the old table.
           pAllocator_->Free(entry.trackedAllocs[0].first);
+          entry.trackedAllocs[0] = { pAllocation, 0 };
         }
         else {
-          entry.trackedAllocs.Emplace();  // Ensure element 0 exists, which is reserved for the table pointer.
+          entry.trackedAllocs.Emplace(pAllocation, 0);
         }
 
         entry.trackedAllocs.Grow(farThunks.size());
-        entry.trackedAllocs[0] = { pAllocation, 0 };
         for (void* pFarThunk : farThunks) {
           entry.trackedAllocs.Emplace(pFarThunk, FarThunkSize);
         }

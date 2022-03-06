@@ -1193,20 +1193,21 @@ static bool CreateFunctorThunk(
   // We need to translate from the input calling convention to cdecl or stdcall, whichever closest matches caller/callee
   // cleanup behavior of the input.  We must push any register args used by the input, then push the functor obj address
   // and do the call.  Any expected caller-side cleanup instructions must be written after this.
-  auto WriteCall = [&writer, &invokers, functorAddr](size_t numPadders = 0, bool calleeCleanup = false) {
+  auto WriteCall = [&writer, &sig, &invokers, functorAddr](size_t numPadders = 0, bool calleeCleanup = false) {
     const void*const pfnInvokeFunctor =
       (IF_X86_32(calleeCleanup ? invokers.pfnInvokeWithPadAndCleanup :) invokers.pfnInvokeWithPad)[numPadders];
 
     if (IsX86_32) {
-      writer.push(uint32(functorAddr));                                  // Push pFunctor
+      writer.push(uint32(functorAddr));                // Push pFunctor
     }
     IF_X86_64(else if (IsX86_64) {
-      numPadders += (IsMsAbi ? 4 : 0);  // MS x64 ABI expects 32 bytes of shadow space be allocated on the stack.
-      writer.mov(r11, functorAddr);                                      // Push pFunctor
+      numPadders += ((sig.convention == Call::Mscall) ? 4 : 0);  // MS x64 ABI expects 32 bytes of shadow space.
+      writer.mov(r11, functorAddr);                    // Push pFunctor
       writer.push(r11);
     })
+
     if (numPadders != 0) {
-      writer.SubSp(int32(RegisterSize * numPadders));                    // sub esp, i8  (Align)
+      writer.SubSp(int32(RegisterSize * numPadders));  // sub esp, i8  (Align)
     }
 
     if (calleeCleanup) {
@@ -2148,7 +2149,7 @@ static size_t CreateLowLevelHookTrampoline(
   if (isFunctor) {
     // We need to push the first 2 args to FunctionRef::InvokeFunctor().
     if (IsX86_32) {
-      writer.push(dword, 0);                                    // Push dummy value for pPrevReturnAddr
+      writer.push(0);                                           // Push dummy value for pPrevReturnAddr
       writer.push(uint32(uintptr(pfnHookCb.Functor().get())));  // Push pFunctor
     }
     IF_X86_64(else {

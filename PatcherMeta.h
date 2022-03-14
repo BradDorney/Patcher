@@ -225,7 +225,10 @@ using uint32  = uint32_t;
 using uint64  = uint64_t;
 using uintptr = uintptr_t;
 
-namespace Impl { struct Dummy { explicit constexpr Dummy() { } }; }  ///< @internal  Empty dummy parameter type.
+namespace Impl {
+struct Dummy { explicit constexpr Dummy() { } };         ///< @internal  Empty dummy parameter type.  
+template <typename...>  struct DummyT : public Dummy{};  ///< @internal  Empty template-able dummy parameter type.
+}
 
 namespace Registers { enum class Register : uint8; }
 
@@ -312,12 +315,6 @@ template <typename T, size_t N>      using Array          = T[N];
 template <typename T>                using AddPtrIfValue  =
   Conditional<(std::is_reference<T>::value || std::is_pointer<T>::value), T, typename std::add_pointer<T>::type>;
 
-template <size_t N, typename T, typename = void>  struct TupleElementImpl { typedef struct NotFound{} Type; };
-template <size_t N, typename T>  struct TupleElementImpl<N, T, EnableIf<(N < std::tuple_size<T>::value)>>
-  { using Type = typename std::tuple_element<N, T>::type; };
-
-template <size_t N, typename T>  using TupleElement = typename TupleElementImpl<N, T>::Type;
-
 template <typename T, bool = std::is_enum<T>::value>  struct UnderlyingTypeImpl { using Type = T; };
 template <typename T>  struct UnderlyingTypeImpl<T, true> { using Type = typename std::underlying_type<T>::type; };
 
@@ -325,9 +322,19 @@ template <typename T>  using UnderlyingType = typename UnderlyingTypeImpl<T>::Ty
 ///@}
 
 
-template <typename... Ts>             struct TypeSequence{};                            ///< Parameter pack of types.
-template <typename T, T... Elements>  struct ValueSequence{};                           ///< Parameter pack of values.
-template <size_t... Indices>  using IndexSequence = ValueSequence<size_t, Indices...>;  ///< Parameter pack of size_t.
+template <typename T, T... Elements>  struct ValueSequence{};                            ///< Parameter pack of values.
+template <size_t... Indices>  using IndexSequence = ValueSequence<size_t, Indices...>;   ///< Parameter pack of size_t.
+template <typename... Ts>     struct TypeSequence { using Tuple = std::tuple<Ts...>; };  ///< Parameter pack of types.
+
+
+template <size_t N, typename T, typename = void>  struct TupleElementImpl { typedef struct NotFound{} Type; };
+template <size_t N, typename T>  struct TupleElementImpl<N, T, EnableIf<(N < std::tuple_size<T>::value)>>
+  { using Type = typename std::tuple_element<N, T>::type; };
+template <size_t N, typename... Ts>
+struct TupleElementImpl<N, TypeSequence<Ts...>, void> : public TupleElementImpl<N, std::tuple<Ts...>, void>{};
+
+template <size_t N, typename T>  using TupleElement = typename TupleElementImpl<N, T>::Type;
+
 
 ///@{ @internal  Helper metafunctions to generate parameter packs of sequences.
 template <typename SeqA, typename SeqB>      struct ConcatSeqImpl;
@@ -428,10 +435,10 @@ PATCHER_EMIT_CALLS(PATCHER_ADD_CONVENTION_DEF);
 template <typename R, Call Call = Call::Default, bool Variadic = false, typename T = void, typename... A>
 struct FuncSig {
   static constexpr size_t NumParams = std::is_void<T>::value ? 0 : (sizeof...(A) + 1);  ///< Number of function params.
-  using Function = Conditional<NumParams == 0, R(A...), R(T, A...)>;                    ///< Signature w/o convention.
+  using Function = Conditional<NumParams==0, R(A...), R(T, A...)>;                      ///< Signature w/o convention.
   using Pfn      = AddConvention<Function, Call>;                                       ///< Function pointer signature.
   using Return   = R;                                                                   ///< Function return type.
-  using Params   = Conditional<NumParams == 0, std::tuple<A...>, std::tuple<T, A...>>;  ///< Parameters as a tuple.
+  using Params   = Conditional<NumParams==0, TypeSequence<A...>, TypeSequence<T,A...>>; ///< Params as a TypeSequence.
   template <size_t N>  using Param = TupleElement<N, Params>;                           ///< Nth parameter's type.
   static constexpr size_t ParamSizes[]    = { ArgSize<T>(),     ArgSize<A>()...     };  ///< Aligned sizes of params.
   static constexpr bool   ParamIsVector[] = { IsVectorArg<T>(), IsVectorArg<A>()... };  ///< Are params float/vector?
@@ -709,7 +716,7 @@ void** GetVftable(
 template <typename T, typename Pfn>
 auto PmfCast(
   Pfn   T::*  pmf,
-  const T*    pThis
+  const T*    pThis = nullptr
   ) -> typename Impl::FuncTraits<decltype(pmf)>::Pfn
 {
   union {

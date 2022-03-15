@@ -713,9 +713,9 @@ void** GetVftable(
 /// @note  For virtual PMFs, either an object instance must be provided, or a dummy object instance will attempt to be
 ///        created (may be unsafe!).  Class cannot multiply inherit.
 /// @see   PATCHER_MFN_PTR() macro, which is more robust for certain compilers and more reliable for virtual methods.
-template <typename T, typename Pfn>
+template <typename Fn, typename T>
 auto PmfCast(
-  Pfn   T::*  pmf,
+  Fn    T::*  pmf,
   const T*    pThis = nullptr
   ) -> typename Impl::FuncTraits<decltype(pmf)>::Pfn
 {

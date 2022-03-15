@@ -167,8 +167,8 @@ public:
 
   /// Conversion constructor for pointers-to-member-functions.  Never relocated.
   /// @note Consider using the MFN_PTR() macro, which is more robust than PmfCast() which backs this constructor.
-  template <typename T, typename Pfn, typename = EnableIf<std::is_function<Pfn>::value>>
-  TargetPtr(Pfn T::*pmf, const T* pThis = nullptr) : pAddress_((void*)(Util::PmfCast(pmf, pThis))), relocate_() { }
+  template <typename Fn, typename T, typename = EnableIf<std::is_function<Fn>::value>>
+  TargetPtr(Fn T::*pmf, const T* pThis = nullptr) : pAddress_((void*)(Util::PmfCast(pmf, pThis))), relocate_() { }
 
   /// Allow explicit static_cast to any pointer type, similar to void*.
   template <typename T>  explicit constexpr operator T*() const { return static_cast<T*>(pAddress_); }
@@ -204,9 +204,9 @@ public:
   /// Conversion constructor for pointers-to-member-functions.
   /// @param pThis May be provided to help look up the function address, but that does not bind it to this FunctionRef.
   /// @note Consider using the PATCHER_MFN_PTR() macro, which is more robust than PmfCast() backing this constructor.
-  template <typename T, typename Pfn, typename = EnableIf<std::is_function<Pfn>::value>>
-  FunctionRef(Pfn T::*pmf, const T* pThis = nullptr)
-    : pfn_((void*)(Util::PmfCast(pmf, pThis))), sig_(FuncTraits<Pfn T::*>{}), pObj_(), pState_(), pfnGetInvokers_() { }
+  template <typename Fn, typename T, typename = EnableIf<std::is_function<Fn>::value>>
+  FunctionRef(Fn T::*pmf, const T* pThis = nullptr)
+    : pfn_((void*)(Util::PmfCast(pmf, pThis))), sig_(FuncTraits<Fn T::*>{}), pObj_(), pState_(), pfnGetInvokers_() { }
 
   /// Conversion constructor for callable objects.  This works with lambdas, (non-overloaded) functors, etc.
   /// Capturing lambdas or non-empty functor objects will become bound to this FunctionRef using the std::function ctor.

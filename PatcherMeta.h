@@ -616,7 +616,7 @@ struct GetInvokeFunctorTable {
 template <typename    T>  using  GetRegisterInfoTraits =
   Conditional<std::is_function<RemoveCvRefPtr<T>>::value, FuncTraits<T>, FuncTraitsNoThis<T>>;
 template <typename    T>  struct GetRegisterInfo : public GetRegisterInfo<typename GetRegisterInfoTraits<T>::Params>{};
-template <typename... A>  struct GetRegisterInfo<std::tuple<A...>> {
+template <typename... A>  struct GetRegisterInfo<TypeSequence<A...>> {
   template <typename T>
   static constexpr bool IsRefPtr() { return (std::is_pointer<T>::value || std::is_reference<T>::value); }
   using Arr = Conditional<(sizeof...(A) == 0), std::nullptr_t, RegisterInfo[sizeof...(A) + (sizeof...(A) == 0)]>;

@@ -1535,6 +1535,19 @@ static void CopyInstructions(
         pWriter->Value(JccAbs(bytes[0], target));
       }
     }
+    // Call/jump indirect [RIP + offset]
+    else if (IsX86_64 && (bytes[0] == 0xFF) && ((bytes[1] == 0x15) || (bytes[1] == 0x25))) {
+      SetTarget(insn, int32(reinterpret_cast<const Op2_4*>(&bytes[0])->operand));
+
+      if (isNear) {
+        pWriter->Bytes({ 0xFF, bytes[1] });
+        WritePcRel32Operand();
+      }
+      else {
+        void*const derefTarget = *reinterpret_cast<void**>(target);  // ** TODO This isn't mutable-safe
+        (bytes[1] == 0x15) ? pWriter->CallAbs(derefTarget) : pWriter->JmpAbs(derefTarget);
+      }
+    }
     else {
       // Just copy instructions without PC rel operands verbatim.
       pWriter->Memcpy(&bytes[0], insn.size);

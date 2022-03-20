@@ -229,6 +229,9 @@ constexpr bool IsUnixAbi = false;
 
 constexpr size_t RegisterSize = sizeof(void*);  ///< Size in bytes of native registers.
 
+/// Max size in bytes of function results that can be returned by value.
+constexpr size_t MaxReturnByValueSize = (IsX86_32 || IsUnixAbi) ? (RegisterSize * 2) : sizeof(uint64_t);
+
 // Typedefs
 
 using int8    = int8_t;
@@ -442,7 +445,7 @@ template <typename T>  constexpr bool IsVectorArg() { return std::is_floating_po
 template <typename T>
 constexpr bool IsAggregateReturnArg() {
   return (std::is_void<T>::value == false) && (std::is_empty<T>::value == false) &&
-         ((std::is_trivial<T>::value == false) || (SizeOfType<T>() > (RegisterSize * 2)));
+         ((std::is_trivial<T>::value == false) || (SizeOfType<T>() > MaxReturnByValueSize));
 }
 
 ///@{ @internal  AddConvention helper to convert function types to function pointers of other calling conventions.

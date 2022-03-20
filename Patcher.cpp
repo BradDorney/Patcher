@@ -1287,7 +1287,7 @@ static bool CreateFunctorThunk(
 
     WriteCall(numAlignmentPadders);
 
-    if (sig.convention == Call::Mscall) {
+    if (IsMsAbi) {
       // In MS ABI, we moved the shadow space, but the original caller will try to pop it, so we need to compensate.
       const auto totalPopSize = uint8(popPadAndInvokeArgSize + ((numRegArgs < 4) ? RegisterSize : 0) + popRegArgSize);
       const auto shadowOffset = uint8((RegisterSize * 3) - popRegArgSize);

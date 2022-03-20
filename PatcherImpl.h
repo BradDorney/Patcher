@@ -162,8 +162,8 @@ public:
   constexpr TargetPtr(uintptr address, bool relocate = true)  :  address_(address),  relocate_(relocate) { }
 
   /// Conversion constructor for function pointers.  Never relocated.
-  template <typename T, typename = Impl::EnableIf<std::is_function<Impl::RemoveCvRefPtr<T>>::value>>
-  constexpr TargetPtr(T pfn) : pAddress_((void*)(pfn)), relocate_() { }  // C-style cast due to constexpr quirks.
+  template <typename Pfn, typename = Impl::EnableIf<std::is_function<Impl::RemoveCvRefPtr<Pfn>>::value>>
+  constexpr TargetPtr(Pfn pfn) : pAddress_((void*)(pfn)), relocate_() { }  // C-style cast due to constexpr quirks.
 
   /// Conversion constructor for pointers-to-member-functions.  Never relocated.
   /// @note Consider using the MFN_PTR() macro, which is more robust than PmfCast() which backs this constructor.
@@ -197,9 +197,9 @@ public:
   constexpr FunctionRef(const void* pFunction) : pfn_(pFunction), sig_(), pObj_(), pState_(), pfnGetInvokers_() { }
 
   /// Conversion constructor for function pointers.
-  template <typename T, typename = EnableIf<std::is_function<T>::value>>
-  constexpr FunctionRef(T* pfn)  // C-style cast due to constexpr quirks.
-    : pfn_((void*)(pfn)), sig_(FuncTraits<T>{}), pObj_(), pState_(), pfnGetInvokers_() { }
+  template <typename Fn, typename = EnableIf<std::is_function<Fn>::value>>
+  constexpr FunctionRef(Fn* pfn)  // C-style cast due to constexpr quirks.
+    : pfn_((void*)(pfn)), sig_(FuncTraits<Fn>{}), pObj_(), pState_(), pfnGetInvokers_() { }
 
   /// Conversion constructor for pointers-to-member-functions.
   /// @param pThis May be provided to help look up the function address, but that does not bind it to this FunctionRef.
@@ -221,7 +221,8 @@ public:
   template <typename R, typename... A, typename Fn = std::function<R(A...)>, Call C = Call::AbiStd>
   FunctionRef(
     std::function<R(A...)> functor, Util::AsCall<C> = {}, GetTargetFunc<decltype(functor)>* pfnGetTarget = nullptr)
-    : pfn_(), sig_(FuncSig<R,C,0,A...>{}), pObj_(), pState_(), pfnGetInvokers_(&GetInvokeFunctorTable<Fn, R, A...>::Get)
+    : pfn_(), sig_(FuncSig<R, C, false, void, A...>{}), pObj_(), pState_(),
+      pfnGetInvokers_(&GetInvokeFunctorTable<Fn, R, A...>::Get)
   {
     InitFunctorThunk(new Fn(std::move(functor)), [](void* p) { delete static_cast<Fn*>(p); });
     pState_ = ((pfnGetTarget != nullptr) && (pObj_ != nullptr)) ? pfnGetTarget(static_cast<Fn*>(pObj_.get())) : nullptr;

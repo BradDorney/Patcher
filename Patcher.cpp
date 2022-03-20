@@ -318,9 +318,9 @@ public:
   void PopNil(int32 count = 1) {
     if (count != 0) {
       // Use lea instead of add to avoid clobbering flags.
-      if ((count <= (INT8_MAX / RegisterSize))) {
+      const int32 skipSize = (count * RegisterSize);
+      if (skipSize <= INT8_MAX) {
         constexpr uint8 SkipPop[] = { IF_X86_64(0x48,) 0x8D, 0x64, 0x24, 0x00 };  // lea esp, [esp + i8]
-        const int8 skipSize = int8(count * RegisterSize);
         // Combine adjacent skips, otherwise write a new instruction.
         if ((getSize() < sizeof(SkipPop))                                                        ||
             (memcmp(&SkipPop[0], &getCurr()[-int32(sizeof(SkipPop))], sizeof(SkipPop) - 1) != 0) ||
@@ -328,10 +328,10 @@ public:
         {
           Value(SkipPop);
         }
-        GetNext()[-1] += skipSize;
+        GetNext()[-1] += int8(skipSize);
       }
       else {
-        lea(X86_SELECTOR(esp, rsp), ptr [X86_SELECTOR(esp, rsp) + (count * RegisterSize)]);
+        lea(X86_SELECTOR(esp, rsp), ptr [X86_SELECTOR(esp, rsp) + skipSize]);
       }
     }
   }
@@ -1180,10 +1180,13 @@ static bool CreateFunctorThunk(
   const RtFuncSig&         sig         = pfnNewFunction.Signature();
   const InvokeFunctorTable invokers    = pfnNewFunction.InvokerPfnTable();
 
+  // Total number of parameters should be adjusted to include implicit parameters.
+  const size_t numParams = sig.numParams + sig.hasThisPtr + sig.hasReturnPtr;
+
   // ** TODO This should take into account the positions of the parameters, e.g. if (sizeof(param0) > RegisterSize) then
   //         params 1 and 2 would be the ones in registers
   size_t numRegisterSizeParams = 0;  // Number of parameters that can fit in a register (for the original function)
-  for (uint32 i = 0; i < sig.numParams; (sig.pParamSizes[i++] <= RegisterSize) ? ++numRegisterSizeParams : 0);
+  for (uint32 i = 0; i < numParams; (sig.pParamSizes[i++] <= RegisterSize) ? ++numRegisterSizeParams : 0);
 
   auto GetNumAlignmentPadders = [numRegisterSizeParams](size_t maxNumRegisterArgs = 0) {
     const size_t numExtraArgs = Min(numRegisterSizeParams, maxNumRegisterArgs);
@@ -1193,7 +1196,7 @@ static bool CreateFunctorThunk(
   // We need to translate from the input calling convention to cdecl or stdcall, whichever closest matches caller/callee
   // cleanup behavior of the input.  We must push any register args used by the input, then push the functor obj address
   // and do the call.  Any expected caller-side cleanup instructions must be written after this.
-  auto WriteCall = [&writer, &sig, &invokers, functorAddr](size_t numPadders = 0, bool calleeCleanup = false) {
+  auto WriteCall = [&](size_t numPadders = 0, bool calleeCleanup = false) {
     const void*const pfnInvokeFunctor =
       (IF_X86_32(calleeCleanup ? invokers.pfnInvokeWithPadAndCleanup :) invokers.pfnInvokeWithPad)[numPadders];
 
@@ -1201,7 +1204,7 @@ static bool CreateFunctorThunk(
       writer.push(uint32(functorAddr));                // Push pFunctor
     }
     IF_X86_64(else if (IsX86_64) {
-      numPadders += ((sig.convention == Call::Mscall) ? 4 : 0);  // MS x64 ABI expects 32 bytes of shadow space.
+      numPadders += (IsMsAbi ? 4 : 0);  // MS x64 ABI expects 32 bytes of shadow space.
       writer.mov(r11, functorAddr);                    // Push pFunctor
       writer.push(r11);
     })
@@ -1245,10 +1248,14 @@ static bool CreateFunctorThunk(
 
   case Call::Thiscall:
     // MS thiscall puts the first register-sized arg in ECX.  If the arg exists, put it on the stack.
-    if (numRegisterSizeParams >= 1) {
-      writer.pop(eax);   // Pop old return address
-      writer.push(ecx);  // Push 1 arg passed via register
-      writer.push(eax);  // Push old return address
+    // Note that, if the aggregate return pointer param is present, it is always passed on the stack, never in ECX;
+    // and we will need to rearrange the return pointer param to work with pfnInvoke.
+    if (numRegisterSizeParams >= (sig.hasReturnPtr ? 2u : 1u)) {
+      writer.pop(eax);                             // Pop old return address
+      if (sig.hasReturnPtr) { writer.pop(edx);  }  // Pop aggregate return pointer
+      writer.push(ecx);                            // Push 1 arg passed via register
+      if (sig.hasReturnPtr) { writer.push(edx); }  // Push aggregate return pointer
+      writer.push(eax);                            // Push old return address
     }
     WriteCall(GetNumAlignmentPadders(1), true);
     break;

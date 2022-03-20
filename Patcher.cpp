@@ -1180,13 +1180,11 @@ static bool CreateFunctorThunk(
   const RtFuncSig&         sig         = pfnNewFunction.Signature();
   const InvokeFunctorTable invokers    = pfnNewFunction.InvokerPfnTable();
 
-  // Total number of parameters should be adjusted to include implicit parameters.
-  const size_t numParams = sig.numParams + sig.hasThisPtr + sig.hasReturnPtr;
-
   // ** TODO This should take into account the positions of the parameters, e.g. if (sizeof(param0) > RegisterSize) then
   //         params 1 and 2 would be the ones in registers
-  size_t numRegisterSizeParams = 0;  // Number of parameters that can fit in a register (for the original function)
-  for (uint32 i = 0; i < numParams; (sig.pParamSizes[i++] <= RegisterSize) ? ++numRegisterSizeParams : 0);
+  // Number of parameters that can fit in a register (for the original function)
+  size_t numRegisterSizeParams = (sig.hasThisPtr ? 1 : 0) + (sig.hasReturnPtr ? 1 : 0);
+  for (uint32 i = 0; i < sig.numParams; (sig.pParamSizes[i++] <= RegisterSize) ? ++numRegisterSizeParams : 0);
 
   auto GetNumAlignmentPadders = [numRegisterSizeParams](size_t maxNumRegisterArgs = 0) {
     const size_t numExtraArgs = Min(numRegisterSizeParams, maxNumRegisterArgs);

@@ -193,13 +193,13 @@ public:
   ///           this could crash.
   PatcherStatus LowLevelHook(
     TargetPtr pAddress, Span<RegisterInfo> registers, const FunctionRef& pfnHookCb, const LowLevelHookInfo& info = {});
-  ///< Insert a low-level hook with a callback function that takes RegisterArgs or no args.
+
   template <typename T, typename Enable = decltype(FunctionRef(std::declval<T>()))>
   PatcherStatus LowLevelHook(TargetPtr pAddress, T&& pfnHookCb, LowLevelHookInfo info = {}) {
     Impl::DeduceLowLevelHookSettings(info, Impl::FuncTraits<T>{});
     return LowLevelHook(pAddress, Impl::GetRegisterInfo<T>::Info, std::forward<T>(pfnHookCb), info);
   }
-  ///< Insert a low-level hook with a callback function that takes a struct pointer or reference as a single parameter.
+
   // ** TODO use SFINAE to clarify disambiguation between this LowLevelHook overload and the non-templated one
   template <typename T, typename Enable = decltype(FunctionRef(std::declval<T>()))>
   PatcherStatus LowLevelHook(TargetPtr pAddress, Span<Register> registers, T&& pfnHookCb, LowLevelHookInfo info = {}) {

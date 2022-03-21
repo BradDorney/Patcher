@@ -278,34 +278,14 @@ public:
 /// Transparent wrapper around a type that has a Register enum value attached to it, allowing for deducing the desired
 /// register for the arg for LowLevelHook() at compile time.
 template <Registers::Register Id, typename T, uint32 Offset = 0>
-class RegisterArg {
-  using Type     = RemoveRef<T>;
-  using Element  = Conditional<std::is_array<T>::value, RemoveExtents<Type>, RemovePtr<Type>>;
-  using DataType = Conditional<std::is_array<T>::value, AddLvalueRef<Type>,  T>;
-
+class RegisterArg : public ArgWrapper<T> {
   static_assert(std::is_reference<T>::value || std::is_array<T>::value || (sizeof(T) <= RegisterSize),
                 "Type does not fit in register size.");
-
 public:
-  Type& Get()          { return data_; } ///< Explicitly retrieves the underlying data.
-  operator Type&()     { return data_; } ///< Implicit conversion operator to a reference of the underlying type.
-  operator Type&&() && { return data_; } ///< Implicit conversion operator to a rvalue reference of the underlying type.
+  using ArgWrapper<T>::operator=;
 
-  ///@{ In lieu of no "operator.", dereference-like semantics are allowed for all types for struct field access, etc.
-  template <typename U = Element> auto operator->() -> EnableIf<std::is_same<U, Type>::value,     U*> { return &data_; }
-  template <typename U = Element> auto operator->() -> EnableIf<std::is_same<U, Type>::value ==0, U*> { return  data_; }
-  template <typename U = Element> auto operator*()  -> EnableIf<std::is_same<U, Type>::value ==0, U&> { return *data_; }
-  template <typename U = Element> auto operator*()  -> EnableIf<std::is_same<U, Type>::value,     U&> { return  data_; }
-  ///@}
-
-  template <typename U>  Type& operator=(U&&      src) { return (data_ = std::forward<U>(src)); }  ///< Move-assignment.
-  template <typename U>  Type& operator=(const U& src) { return (data_ = src);                  }  ///< Copy-assignment.
-
-  static constexpr Registers::Register RegisterId = Id;  ///< Register associated with this argument.
-  static constexpr uint32 StackOffset = Offset;          ///< (Stack only) Offset associated with this argument.
-
-private:
-  DataType data_;
+  static constexpr Registers::Register RegisterId  = Id;      ///< Register associated with this argument.
+  static constexpr uint32              StackOffset = Offset;  ///< (Stack only) Offset associated with this argument.
 };
 
 

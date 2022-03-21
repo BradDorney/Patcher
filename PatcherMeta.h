@@ -398,6 +398,35 @@ constexpr U Min(const T1& a, const T2& b) { return (static_cast<U>(a) < static_c
 template <typename T, size_t N>  constexpr uint32 ArrayLen(const T (&src)[N]) { return static_cast<uint32>(N); }
 
 
+/// Transparent wrapper around a type, as if it were passed as a function argument.
+template <typename T>
+class ArgWrapper {
+  using Type      = RemoveRef<T>;
+  using Element   = Conditional<std::is_array<T>::value, RemoveExtents<Type>, RemovePtr<Type>>;
+  using Reference = Conditional<std::is_rvalue_reference<T>::value, Type&&, Type&>;
+  using DataType  = Conditional<std::is_array<T>::value, Type&, T>;
+
+public:
+  template <typename U = Type>    ArgWrapper(U&& src) : data_(std::forward<U>(src)) { }  ///< Implicit conversion ctor.
+  template <typename U>  Reference operator=(U&& src) { return (data_ = std::forward<U>(src)); }  ///< Assignment.
+
+  Reference Get()      { return data_; } ///< Explicitly retrieves the underlying data.
+  operator Reference() { return data_; } ///< Implicit conversion operator to a reference of the underlying type.
+
+  template <typename U = Type>  decltype(&std::declval<U>()) operator&() { return &data_; }  ///< Reference operator.
+
+  ///@{ In lieu of no "operator.", dereference-like semantics are allowed for all types for struct field access, etc.
+  template <typename U = Element> auto operator->() -> EnableIf<std::is_same<U, Type>::value,     U*> { return &data_; }
+  template <typename U = Element> auto operator->() -> EnableIf<std::is_same<U, Type>::value ==0, U*> { return  data_; }
+  template <typename U = Element> auto operator*()  -> EnableIf<std::is_same<U, Type>::value ==0, U&> { return *data_; }
+  template <typename U = Element> auto operator*()  -> EnableIf<std::is_same<U, Type>::value,     U&> { return  data_; }
+  ///@}
+
+private:
+  DataType data_;
+};
+
+
 ///@{ @internal  Template metafunction used to obtain function call signature information from a callable.
 template <typename T, typename = void>  struct FuncTraitsImpl   :   public FuncTraitsImpl<decltype(&T::operator())>{};
 template <typename T>                   using  FuncTraits       = typename FuncTraitsImpl<Decay<T>>::Type;
@@ -460,6 +489,13 @@ struct AddConvImpl<R(*)(A..., ...), C> { using Type = R(*)(A..., ...); };
 PATCHER_EMIT_CALLS(PATCHER_ADD_CONVENTION_DEF);
 ///@}
 
+///@{ @internal  GetParams helper to get function parameters from an unqualified function type as a TypeSequence.
+template <typename T>                 struct GetParamsImpl               { using Type = TypeSequence<>;     };
+template <typename R, typename... A>  struct GetParamsImpl<R(A...)>      { using Type = TypeSequence<A...>; };
+template <typename R, typename... A>  struct GetParamsImpl<R(A..., ...)> { using Type = TypeSequence<A...>; };
+template <typename T>  using GetParams = typename GetParamsImpl<T>::Type;
+///@}
+
 ///@{ @internal  MakeVariadic helper to add a "..." parameter to an unqualified function type.
 template <typename T>                 struct MakeVariadicImpl          { using Type = T;            };
 template <typename R, typename... A>  struct MakeVariadicImpl<R(A...)> { using Type = R(A..., ...); };
@@ -467,6 +503,7 @@ template <typename T>  using MakeVariadic = typename MakeVariadicImpl<T>::Type;
 ///@}
 
 ///@{ @internal  Template that defines typed function call signature information for use at compile time.
+// ** TODO Figure out how to round-trip FuncSig <-> Pfn and preserve HasThisPtr/HasReturnPtr info
 template <typename R, Call Call = Call::Default, bool Variadic = false, typename This = void, typename... A>
 struct FuncSig {
   static constexpr bool IsVariadic   = Variadic;                              ///< Is function variadic?
@@ -479,20 +516,21 @@ struct FuncSig {
   static constexpr size_t ParamSizes[Max(NumParams, 1u)]    = { ArgSize<A>()...     };  ///< Aligned sizes of params.
   static constexpr bool   ParamIsVector[Max(NumParams, 1u)] = { IsVectorArg<A>()... };  ///< Are params float/vector?
 
-  using ThisPtr   = AddPtrIfValue<This>;  ///< "this" parameter type.          Only valid if @ref HasThisPtr   is true.
-  using ReturnPtr = AddPtrIfValue<R>;     ///< Return pointer parameter type.  Only valid if @ref HasReturnPtr is true.
+  using ThisPtr   = AddPtrIfValue<This>;  ///< "this" parameter type.
+  using ReturnPtr = AddPtrIfValue<R>;     ///< Return pointer parameter type.
 
   using FnBase_ = Conditional<(HasThisPtr && HasReturnPtr),
     ReturnPtr(ThisPtr, ReturnPtr, A...),  Conditional<HasThisPtr,  R(ThisPtr, A...),  R(A...)>>;
 
-  using Function = Conditional<Variadic, MakeVariadic<FnBase_>, FnBase_>;  ///< Unqualified function signature.
-  using Pfn      = AddConvention<Function, Call>;                          ///< Qualified function pointer signature.
-  using Return   = R;                                                      ///< Function return type.
-  using Params   = TypeSequence<A...>;                                     ///< Non-implicit params as a TypeSequence.
-  template <size_t N>  using Param = TupleElement<N, Params>;              ///< Nth parameter's type.
+  using Function  = Conditional<Variadic, MakeVariadic<FnBase_>, FnBase_>;  ///< Unqualified function signature.
+  using Pfn       = AddConvention<Function, Call>;                          ///< Qualified function pointer signature.
+  using Return    = R;                                                      ///< Function return type.
+  using Params    = TypeSequence<A...>;                                     ///< Non-implicit params as a TypeSequence.
+  using AllParams = GetParams<Function>;                                    ///< All params including implicit ones.
+  template <size_t N>  using Param = TupleElement<N, Params>;               ///< Nth parameter's type.
 
   /// Returns a FuncSig with the "this" (first) parameter removed.
-  using StripThis = Conditional<(Call != Call::Unknown), FuncSig<R, Call::Unknown, Variadic, void, A...>, FuncSig>;
+  using StripThis = Conditional<HasThisPtr, FuncSig<R, Call::Unknown, Variadic, void, A...>, FuncSig>;
 };
 ///@}
 

@@ -59,14 +59,19 @@ public:
   constexpr const T* end()    const noexcept { return pData_ + length_; }
   constexpr const T* cend()   const noexcept { return pData_ + length_; }
 
-  constexpr const T* Data()     const noexcept { return pData_; }
+  size_t size()  const noexcept { return length_;       }
+  bool   empty() const noexcept { return (size() == 0); }
+
+  constexpr const T* data()     const noexcept { return pData_; }
   constexpr operator const T*() const noexcept { return pData_; }
 
   template <typename I>
   constexpr const T& operator[](I index) const noexcept { return *(pData_ + UnderlyingType<I>(index)); }
 
-  constexpr size_t Length()  const { return length_;        }
-  constexpr bool   IsEmpty() const { return (length_ == 0); }
+  // ** TODO Remove these
+  constexpr const T* Data()    const noexcept { return pData_;         }
+  constexpr size_t   Length()  const noexcept { return length_;        }
+  constexpr bool     IsEmpty() const noexcept { return (length_ == 0); }
 
 private:
   const T*  pData_;
@@ -78,34 +83,41 @@ template <typename T, size_t InitialSize = 10>
 class SmallVector {
 public:
   SmallVector() : pData_(reinterpret_cast<T*>(&localStorage_[0])), numElements_(0), capacity_(InitialSize) { }
-  explicit  SmallVector(size_t size) : numElements_(0), capacity_(Max(InitialSize, size))
+
+  explicit SmallVector(size_t size) : numElements_(0), capacity_(Max(InitialSize, size))
     { pData_ = (size > ArrayLen(localStorage_)) ? static_cast<T*>(malloc(sizeof(T) * size)) : (T*)(&localStorage_[0]); }
+
   template <typename U = T, typename = decltype(T(std::declval<U>()))>
-  explicit  SmallVector(Span<U> src);
-  template <size_t N>  SmallVector(const SmallVector<T, N>& src) : SmallVector(Span<T>(src.data(), src.size())) { }
+  explicit SmallVector(Span<U> src);
+
+  template <typename U = T, typename = decltype(T(std::declval<U>()))>
+  explicit SmallVector(std::initializer_list<U> src) : SmallVector(Span<U>(src)) { }
+
   template <size_t N>  SmallVector(SmallVector<T, N>&& src);
+
+  template <typename U = T, size_t N>
+  SmallVector(const SmallVector<U, N>& src) : SmallVector(Span<U>(src.data(), src.size())) { }
 
   ~SmallVector()
     { Clear();  free((static_cast<void*>(pData_) != &localStorage_[0]) ? pData_ : nullptr); }
 
-                  T* begin()        noexcept { return pData_;                }
-  constexpr const T* begin()  const noexcept { return pData_;                }
-  constexpr const T* cbegin() const noexcept { return pData_;                }
-                  T* end()          noexcept { return pData_ + numElements_; }
-  constexpr const T* end()    const noexcept { return pData_ + numElements_; }
-  constexpr const T* cend()   const noexcept { return pData_ + numElements_; }
+  T* begin()        noexcept { return pData_;                }
+  T* begin()  const noexcept { return pData_;                }
+  T* cbegin() const noexcept { return pData_;                }
+  T* end()          noexcept { return pData_ + numElements_; }
+  T* end()    const noexcept { return pData_ + numElements_; }
+  T* cend()   const noexcept { return pData_ + numElements_; }
 
-  constexpr size_t size()  const noexcept { return numElements_;  }
-  constexpr bool   empty() const noexcept { return (size() == 0); }
+  size_t size()  const noexcept { return numElements_;  }
+  bool   empty() const noexcept { return (size() == 0); }
 
-                  T* data()           noexcept { return pData_; }
-  constexpr const T* data()     const noexcept { return pData_; }
-  constexpr operator const T*() const noexcept { return pData_; }
+        T* data()           noexcept { return pData_; }
+  const T* data()     const noexcept { return pData_; }
+  operator const T*() const noexcept { return pData_; }
 
   template <typename I>
-                  T& operator[](I index)       noexcept { return *(pData_ + UnderlyingType<I>(index)); }
-  template <typename I>
-  constexpr const T& operator[](I index) const noexcept { return *(pData_ + UnderlyingType<I>(index)); }
+                   const T& operator[](I index) const noexcept { return *(pData_ + UnderlyingType<I>(index)); }
+  template <typename I>  T& operator[](I index)       noexcept { return *(pData_ + UnderlyingType<I>(index)); }
 
   bool Reserve(size_t newCapacity);
   bool Grow(size_t numElements) {
@@ -124,7 +136,7 @@ public:
   bool Push(T&&      element) { return Grow(1) && (new(pData_ + (numElements_++)) T(std::move(element))); }
 
   template <typename... Ts>
-  bool Emplace(Ts&&... args) { return Grow(1) && (new(pData_ + (numElements_++)) T(std::forward<Ts>(args)...)); }
+  bool Emplace(Ts&&... args)  { return Grow(1) && (new(pData_ + (numElements_++)) T(std::forward<Ts>(args)...)); }
 
   template <typename U = T, typename = decltype(T(std::declval<U>()))>
   bool Append(Span<U> elements);
@@ -159,14 +171,17 @@ public:
   constexpr TargetPtr(void* pAddress = nullptr, bool relocate = false) : pAddress_(pAddress), relocate_(relocate) { }
 
   /// Conversion constructor for raw uint addresses.  Defaults to relocated.
-  constexpr TargetPtr(uintptr address, bool relocate = true)  :  address_(address),  relocate_(relocate) { }
+  constexpr TargetPtr(uintptr address, bool relocate = true) : address_(address), relocate_(relocate) { }
 
   /// Conversion constructor for function pointers.  Never relocated.
   template <typename Pfn, typename = Impl::EnableIf<std::is_function<Impl::RemoveCvRefPtr<Pfn>>::value>>
   constexpr TargetPtr(Pfn pfn) : pAddress_((void*)(pfn)), relocate_() { }  // C-style cast due to constexpr quirks.
 
   /// Conversion constructor for pointers-to-member-functions.  Never relocated.
-  /// @note Consider using the MFN_PTR() macro, which is more robust than PmfCast() which backs this constructor.
+  ///
+  /// @param pThis  (Optional) Used to help look up the function address.
+  /// 
+  /// @note Consider using the PATCHER_MFN_PTR() macro, which is more robust than PmfCast() backing this constructor.
   template <typename Fn, typename T, typename = EnableIf<std::is_function<Fn>::value>>
   TargetPtr(Fn T::*pmf, const T* pThis = nullptr) : pAddress_((void*)(Util::PmfCast(pmf, pThis))), relocate_() { }
 
@@ -194,51 +209,59 @@ public:
   template <typename StlFunction> using GetTargetFunc = void*(StlFunction* pStlFunction);  ///< Returns stdfunc.target()
 
   /// Conversion constructor for void pointers.  Used when referencing e.g. JIT-compiled code.
-  constexpr FunctionRef(const void* pFunction) : pfn_(pFunction), sig_(), pObj_(), pState_(), pfnGetInvokers_() { }
+  constexpr FunctionRef(const void* pFunc = nullptr) : pfn_(pFunc), sig_(), pObj_(), pState_(), pfnInvoke_() { }
 
   /// Conversion constructor for function pointers.
   template <typename Fn, typename = EnableIf<std::is_function<Fn>::value>>
   constexpr FunctionRef(Fn* pfn)  // C-style cast due to constexpr quirks.
-    : pfn_((void*)(pfn)), sig_(FuncTraits<Fn>{}), pObj_(), pState_(), pfnGetInvokers_() { }
+    : pfn_((void*)(pfn)), sig_(FuncTraits<Fn>{}), pObj_(), pState_(), pfnInvoke_() { }
 
   /// Conversion constructor for pointers-to-member-functions.
-  /// @param pThis May be provided to help look up the function address, but that does not bind it to this FunctionRef.
+  ///
+  /// @param pThis  (Optional) Used to help look up the function address, without binding it to this FunctionRef.
+  /// 
   /// @note Consider using the PATCHER_MFN_PTR() macro, which is more robust than PmfCast() backing this constructor.
   template <typename Fn, typename T, typename = EnableIf<std::is_function<Fn>::value>>
   FunctionRef(Fn T::*pmf, const T* pThis = nullptr)
-    : pfn_((void*)(Util::PmfCast(pmf, pThis))), sig_(FuncTraits<Fn T::*>{}), pObj_(), pState_(), pfnGetInvokers_() { }
+    : pfn_((void*)(Util::PmfCast(pmf, pThis))), sig_(FuncTraits<Fn T::*>{}), pObj_(), pState_(), pfnInvoke_() { }
 
   /// Conversion constructor for callable objects.  This works with lambdas, (non-overloaded) functors, etc.
-  /// Capturing lambdas or non-empty functor objects will become bound to this FunctionRef using the std::function ctor.
+  /// Capturing lambdas or non-empty functor objects will become bound to this FunctionRef via std::function.
+  /// 
+  /// @param call  (Optional) Calling convention to use (specify e.g. AsCdecl, AsStdcall, AsThiscall, etc.)
+  /// 
   /// @note To hook T::operator() itself, consider constructing a FunctionRef from &T::operator().
   template <
     typename T, Call C = Call::AbiStd, typename E = typename std::is_empty<T>::type, typename = decltype(&T::operator())>
   constexpr FunctionRef(T&& functor, Util::AsCall<C> call = {}) : FunctionRef(std::forward<T>(functor), call, E{}) { }
 
-  /// Conversion constructor for std::function.
-  /// @note std::bind objects must be explicitly wrapped with std::function in order to construct a FunctionRef from it.
-  /// @note Conventions that use vector registers (vectorcall, sseregparm, regcall) are currently not supported.
+  /// Conversion constructor for std::function.  Used for any non-empty callable objects, such as capturing lambdas.
+  /// The std::function object becomes bound to this FunctionRef.
+  /// 
+  /// @param call          (Optional) Calling convention to use (specify e.g. AsCdecl, AsStdcall, AsThiscall, etc.)
+  /// @param pfnGetTarget  (Optional) Function of the form [](Fn* pObj) -> void* { return pObj->target<T>(); }
+  /// 
+  /// @note std::bind objects must be explicitly wrapped with std::function in order to create a FunctionRef from one.
   template <typename R, typename... A, typename Fn = std::function<R(A...)>, Call C = Call::AbiStd>
   FunctionRef(
     std::function<R(A...)> functor, Util::AsCall<C> = {}, GetTargetFunc<decltype(functor)>* pfnGetTarget = nullptr)
     : pfn_(), sig_(FuncSig<R, C, false, void, A...>{}), pObj_(), pState_(),
-      pfnGetInvokers_(&GetInvokeFunctorTable<Fn, R, A...>::Get)
+      pfnInvoke_(GetFunctorInvoker<Fn, R, A...>::template Get<C>())
   {
     InitFunctorThunk(new Fn(std::move(functor)), [](void* p) { delete static_cast<Fn*>(p); });
     pState_ = ((pfnGetTarget != nullptr) && (pObj_ != nullptr)) ? pfnGetTarget(static_cast<Fn*>(pObj_.get())) : nullptr;
   }
 
-  constexpr operator       const void*() const { return pfn_;    }    ///< Implicit pointer conversion, yielding Pfn().
-  constexpr const void*            Pfn() const { return pfn_;    }    ///< Gets a pointer to the underlying function.
-  constexpr const RtFuncSig& Signature() const { return sig_;    }    ///< Gets function call signature information.
-  std::shared_ptr<void>        Functor() const { return pObj_;   }    ///< Gets the functor obj to call with, if any.
-  constexpr void*         FunctorState() const { return pState_; }    ///< Gets the functor obj internal state data.
-  constexpr auto       InvokerPfnTable() const -> InvokeFunctorTable  ///< Gets the internal functor obj invoker table.
-    { return pfnGetInvokers_ ? pfnGetInvokers_() : InvokeFunctorTable{}; }
+  constexpr operator        const void*() const { return pfn_;       } ///< Implicit pointer conversion, yielding Pfn().
+  constexpr const void*             Pfn() const { return pfn_;       } ///< Gets a pointer to the underlying function.
+  constexpr const DynFuncSig& Signature() const { return sig_;       } ///< Gets function call signature information.
+  std::shared_ptr<void>         Functor() const { return pObj_;      } ///< Gets the functor obj to call with, if any.
+  constexpr void*          FunctorState() const { return pState_;    } ///< Gets the functor obj internal state data.
+  constexpr const void*         Invoker() const { return pfnInvoke_; } ///< Gets the internal functor invoker function.
+    
 
 private:
   template <typename T>  using StlFunctionForFunctor = std::function<typename FuncTraitsNoThis<T>::Function>;
-  using PfnGetInvokerTable = InvokeFunctorTable(*)();
 
   /// Conversion constructor for stateless functors and non-capturing lambdas.
   template <typename T, Call C, typename = decltype(&T::operator())>
@@ -252,11 +275,11 @@ private:
   /// Initializes the thunk for calling InvokeFunctor() with @ref pObj_ (state-bound functor or capturing lambda).
   void InitFunctorThunk(void* pFunctorObj, void(*pfnDeleteFunctor)(void*));
 
-  const void*           pfn_;             ///< Unqualified pointer to the underlying function.
-  RtFuncSig             sig_;             ///< Function call signature information about pfn_, if known at compile time.
-  std::shared_ptr<void> pObj_;            ///< (State-bound functors) The std::function object bound to pfn_.
-  void*                 pState_;          ///< (State-bound functors) Pointer to the state managed by pObj_.
-  PfnGetInvokerTable    pfnGetInvokers_;  ///< (State-bound functors) Pointer to the InvokeFunctorTable getter function.
+  const void*           pfn_;        ///< Unqualified pointer to the underlying function.
+  DynFuncSig            sig_;        ///< Function call signature information about pfn_, if known at compile time.
+  std::shared_ptr<void> pObj_;       ///< (State-bound functors) The std::function object bound to pfn_.
+  void*                 pState_;     ///< (State-bound functors) Pointer to the state managed by pObj_.
+  const void*           pfnInvoke_;  ///< (State-bound functors) Pointer to the InvokeFunctorTable getter function.
 };
 
 /// Template subclass of FunctionRef that can be implicitly converted to a plain function pointer and used as a callable
@@ -282,11 +305,12 @@ class RegisterArg : public ArgWrapper<T> {
   static_assert(std::is_reference<T>::value || std::is_array<T>::value || (sizeof(T) <= RegisterSize),
                 "Type does not fit in register size.");
 public:
-  using ArgWrapper<T>::operator=;
+  using ArgWrapper<T>::operator=;  ///< Allow assignment.  Construction is disallowed to avoid type ambiguity errors.
 
   static constexpr Registers::Register RegisterId  = Id;      ///< Register associated with this argument.
   static constexpr uint32              StackOffset = Offset;  ///< (Stack only) Offset associated with this argument.
 };
+
 
 
 // =====================================================================================================================

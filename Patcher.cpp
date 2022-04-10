@@ -47,10 +47,6 @@
 #include "imported/capstone/include/capstone.h"
 #include "Patcher.h"
 
-#if PATCHER_MSVC
-# include <intrin.h>
-#endif
-
 namespace Patcher {
 
 using namespace Impl;
@@ -159,8 +155,6 @@ constexpr uint32 MaxOverwriteSize         = (IsX86_64 ? sizeof(JmpAbs) : sizeof(
 constexpr uint32 MaxLowLevelHookSize  = Align(IsX86_64 ? 256 : 200, CodeAlignment);
 // Max size in bytes functor thunk code is expected to require.
 constexpr uint32 MaxFunctorThunkSize  = Align(IsX86_64 ? 64  : 32,  CodeAlignment);
-// Number of extra args needed to call FunctionRef::InvokeFunctor().
-constexpr uint32 InvokeFunctorNumArgs = 2;
 // Max size in bytes far jump thunk code is expected to require.
 constexpr uint32 FarThunkSize         = Align(uint32(Max(sizeof(JmpAbs), MaxFunctorThunkSize)), CodeAlignment);
 
@@ -176,15 +170,14 @@ constexpr uint32 ReadOnlyProtectFlags   = (PAGE_READONLY | PAGE_EXECUTE_READ | P
 // Returns true if any flags are set in mask.
 template <typename T1, typename T2>  constexpr bool BitFlagTest(T1 mask, T2 flags) { return (mask & flags) != 0; }
 
-// Aligns a pointer to the given power of 2 alignment.
+// Aligns a pointer to the given power-of-two alignment.
 static void*       PtrAlign(void*       p, size_t align)
   { return       reinterpret_cast<void*>(Align(reinterpret_cast<uintptr>(p), align)); }
 static const void* PtrAlign(const void* p, size_t align)
   { return reinterpret_cast<const void*>(Align(reinterpret_cast<uintptr>(p), align)); }
 
-// Returns true if value is at least aligned to the given power of 2 alignment.
-template <typename T>
-constexpr bool IsAligned(T value, size_t align) { return ((value & static_cast<T>(align - 1)) == 0); }
+// Returns true if value is a power-of-two.
+template <typename T>  constexpr bool IsPow2(T value) { return (value != 0) && ((value & (value - 1)) == 0); }
 
 static bool IsPtrAligned(const void* ptr, size_t align) { return IsAligned(reinterpret_cast<uintptr>(ptr), align); }
 
@@ -283,10 +276,10 @@ public:
   template <typename T>  void Value(const T& value) { Memcpy(&value, sizeof(value)); }
   void Bytes(Span<uint8> bytes) { Memcpy(bytes.Data(), bytes.Length()); }
 
-  void Loop32(uint8 opcode, int32 displacement)   { Value(Patcher::Loop32{opcode, displacement});      }
-  void CallAbs(const void* pAddress)              { Value(Patcher::CallAbs{uintptr(pAddress)});        }
-  void JmpAbs(const void*  pAddress)              { Value(Patcher::JmpAbs{uintptr(pAddress)});         }
-  void JccAbs(uint8 opcode, const void* pAddress) { Value(Patcher::JccAbs{opcode, uintptr(pAddress)}); }
+  void Loop32(uint8 opcode, int32 displacement)                { Value(Patcher::Loop32{opcode, displacement});      }
+  template <typename T>  void CallAbs(T pAddress)              { Value(Patcher::CallAbs{uintptr(pAddress)});        }
+  template <typename T>  void JmpAbs(T  pAddress)              { Value(Patcher::JmpAbs{uintptr(pAddress)});         }
+  template <typename T>  void JccAbs(uint8 opcode, T pAddress) { Value(Patcher::JccAbs{opcode, uintptr(pAddress)}); }
 
   using CodeGenerator::push;
   using CodeGenerator::pop;
@@ -407,6 +400,8 @@ static Disassembler<CS_ARCH_X86, IsX86_64 ? CS_MODE_64 : CS_MODE_32>  g_disasm;
 
 static std::mutex  g_freezeThreadsLock;
 
+
+static_assert(IsPow2(PATCHER_DEFAULT_STACK_ALIGNMENT), "Default stack alignment must be a power-of-two.");
 
 // =====================================================================================================================
 // Helper function to get the base load address of the module containing pAddress.
@@ -955,7 +950,7 @@ Status PatchContext::AdvanceThreads(
 }
 
 // =====================================================================================================================
-// ** TODO This needs to be able to handle saving and restoring non-POD data (from Assign() or Construct())
+// ** TODO This needs to be able to correctly handle saving and restoring non-POD data (from Assign() or Construct())
 Status PatchContext::Touch(
   TargetPtr  pAddress,
   size_t     size)
@@ -1165,153 +1160,56 @@ Status PatchContext::ReplaceStaticReferences(
 
 // =====================================================================================================================
 // Writes the code for a functor thunk.  Note that this function does not flush the instruction cache.
-// Thunk translates from the function's calling convention to cdecl so it can call FunctionRef::InvokeFunctor().
 static bool CreateFunctorThunk(
   void*              pMemory,
   const FunctionRef& pfnNewFunction)
 {
   using namespace Xbyak::util;
-  static constexpr uint8 PopSize = RegisterSize * (InvokeFunctorNumArgs - 1);
 
   Assembler writer(MaxFunctorThunkSize, pMemory);
   bool result = (pMemory != nullptr);
 
-  const uintptr            functorAddr = reinterpret_cast<uintptr>(pfnNewFunction.Functor().get());
-  const RtFuncSig&         sig         = pfnNewFunction.Signature();
-  const InvokeFunctorTable invokers    = pfnNewFunction.InvokerPfnTable();
+  const DynFuncSig&  sig              = pfnNewFunction.Signature();
+  const auto&        callTraits       = GetCallTraits(sig.convention);
+  const uintptr      functorObjAddr   = reinterpret_cast<uintptr>(pfnNewFunction.Functor().get());
+  const void*const   pfnInvokeFunctor = pfnNewFunction.Invoker();
 
-  // ** TODO This should take into account the positions of the parameters, e.g. if (sizeof(param0) > RegisterSize) then
-  //         params 1 and 2 would be the ones in registers
-  // Number of parameters that can fit in a register (for the original function)
-  size_t numRegisterSizeParams = (sig.hasThisPtr ? 1 : 0) + (sig.hasReturnPtr ? 1 : 0);
-  for (uint32 i = 0; i < sig.numParams; (sig.pParamSizes[i++] <= RegisterSize) ? ++numRegisterSizeParams : 0);
+  // ** TODO Copy arg registers into shadow space in debug builds (maybe add PATCHER_HOME_PARAMS ?= _DEBUG)
+  const bool    calleeCleanup = callTraits.flags & CallTraits::CalleeCleanup;
+  const size_t  numPadders    =
+    InvokeFunctorNumPadders + ((callTraits.flags & CallTraits::ShadowSpace) ? callTraits.numArgSgprs : 0);
 
-  auto GetNumAlignmentPadders = [numRegisterSizeParams](size_t maxNumRegisterArgs = 0) {
-    const size_t numExtraArgs = Min(numRegisterSizeParams, maxNumRegisterArgs);
-    return InvokeFunctorMaxPad - ((InvokeFunctorNumArgs + numExtraArgs - 1) % (InvokeFunctorMaxPad + 1));
-  };
+  // Push the "hidden" args for pfnInvokeFunctor onto the stack.
+  if (IsX86_32) {
+    writer.push(uint32(functorObjAddr));
+  }
+  IF_X86_64(else if (IsX86_64) {
+    writer.mov(r11, functorObjAddr);
+    writer.push(r11);
+  })
 
-  // We need to translate from the input calling convention to cdecl or stdcall, whichever closest matches caller/callee
-  // cleanup behavior of the input.  We must push any register args used by the input, then push the functor obj address
-  // and do the call.  Any expected caller-side cleanup instructions must be written after this.
-  auto WriteCall = [&](size_t numPadders = 0, bool calleeCleanup = false) {
-    const void*const pfnInvokeFunctor =
-      (IF_X86_32(calleeCleanup ? invokers.pfnInvokeWithPadAndCleanup :) invokers.pfnInvokeWithPad)[numPadders];
-
-    if (IsX86_32) {
-      writer.push(uint32(functorAddr));                // Push pFunctor
-    }
-    IF_X86_64(else if (IsX86_64) {
-      numPadders += (IsMsAbi ? 4 : 0);  // MS x64 ABI expects 32 bytes of shadow space.
-      writer.mov(r11, functorAddr);                    // Push pFunctor
-      writer.push(r11);
-    })
-
-    if (numPadders != 0) {
-      writer.SubSp(int32(RegisterSize * numPadders));  // sub esp, i8  (Align)
-    }
-
-    if (calleeCleanup) {
-      // Instead of using a call, which would return here, push the old return address to the top of the stack and jump.
-      assert(IsX86_32);
-      writer.push(dword [esp + uint32(RegisterSize * (numPadders + 1))]);
-      writer.jmp(pfnInvokeFunctor);
-    }
-    IF_X86_64(else if (writer.IsFarDisplacement(sizeof(Call32), pfnInvokeFunctor)) {
-      writer.mov(r11, uintptr(pfnInvokeFunctor));
-      writer.call(r11);
-    })
-    else {
-      writer.call(pfnInvokeFunctor);
-    }
-  };
-
-  // Push args, that were originally passed via registers, to the stack.
-  auto PushArgRegisters = [&writer, numRegisterSizeParams](Span<std::reference_wrapper<const Xbyak::Reg>> registers)
-    { for (size_t i = Min(numRegisterSizeParams, registers.Length()); i > 0; writer.push(registers[--i])); };
-
-  switch (sig.convention) {
-#if PATCHER_X86_32
-  case Call::Cdecl: {
-    const size_t numAlignmentPadders = GetNumAlignmentPadders();
-    WriteCall(numAlignmentPadders);
-    writer.add(esp, (numAlignmentPadders * RegisterSize) + PopSize);  // Cleanup our args
-    writer.ret();                                                     // Return
-    break;
+  if (numPadders != 0) {
+    writer.SubSp(int32(RegisterSize * numPadders));  // sub esp, i8  (Align, and allocate shadow space if needed)
   }
 
-  case Call::Stdcall:
-    WriteCall(GetNumAlignmentPadders(), true);
-    break;
-
-  case Call::Thiscall:
-    // MS thiscall puts the first register-sized arg in ECX.  If the arg exists, put it on the stack.
-    // Note that, if the aggregate return pointer param is present, it is always passed on the stack, never in ECX;
-    // and we will need to rearrange the return pointer param to work with pfnInvoke.
-    if (numRegisterSizeParams >= (sig.hasReturnPtr ? 2u : 1u)) {
-      writer.pop(eax);                             // Pop old return address
-      if (sig.hasReturnPtr) { writer.pop(edx);  }  // Pop aggregate return pointer
-      writer.push(ecx);                            // Push 1 arg passed via register
-      if (sig.hasReturnPtr) { writer.push(edx); }  // Push aggregate return pointer
-      writer.push(eax);                            // Push old return address
-    }
-    WriteCall(GetNumAlignmentPadders(1), true);
-    break;
-
-  case Call::Fastcall:
-    // MS fastcall puts the first 2 register-sized args in ECX and EDX.  If the args exist, put them on the stack.
-    if (numRegisterSizeParams >= 1) {
-      writer.pop(eax);                 // Pop old return address
-      PushArgRegisters({ ecx, edx });  // Push 1-2 args passed via registers
-      writer.push(eax);                // Push old return address
-    }
-    WriteCall(GetNumAlignmentPadders(2), true);
-    break;
-
-#elif PATCHER_X86_64
-  case Call::Mscall:
-  case Call::Unixcall: {
-    // The x64 calling convention passes the first 4 arguments via registers in MS ABI, or the first 6 in Unix ABI.
-    const size_t numAlignmentPadders    = GetNumAlignmentPadders(InvokeFunctorNumSkipped);
-    const size_t numRegArgs             = Min(numRegisterSizeParams, InvokeFunctorNumSkipped);
-    const uint8  popPadAndInvokeArgSize = uint8((numAlignmentPadders * RegisterSize) + PopSize);
-    const uint8  popRegArgSize          = uint8(numRegArgs * RegisterSize);
-
-    if (numRegisterSizeParams >= 1) {
-      // We need to pop the old return address (and the shadow space if MS ABI) before we can push our args.
-      writer.pop(r11);                                     // Pop old return address
-      if (sig.convention == Call::Mscall) {
-        writer.AddSp(int32(RegisterSize * 4));             // add  rsp, 32  (Pop old shadow space)
-        PushArgRegisters({ rcx, rdx, r8, r9 });            // Push 1-4 args passed via registers
-      }
-      else {
-        PushArgRegisters({ rsi, rdi, rdx, rcx, r8, r9 });  // Push 1-6 args passed via registers
-      }
-      writer.push(r11);                                    // Push old return address
-    }
-
-    WriteCall(numAlignmentPadders);
-
-    if (IsMsAbi) {
-      // In MS ABI, we moved the shadow space, but the original caller will try to pop it, so we need to compensate.
-      const auto totalPopSize = uint8(popPadAndInvokeArgSize + ((numRegArgs < 4) ? RegisterSize : 0) + popRegArgSize);
-      const auto shadowOffset = uint8((RegisterSize * 3) - popRegArgSize);
-      writer.AddSp(int32(totalPopSize));                           // Cleanup our args  (add rsp, i8)
-      if (numRegArgs < 4) { writer.PushFromStack(shadowOffset); }  // Push old return address
-      writer.ret();                                                // Return
-    }
-    else {
-      writer.AddSp(int32(popPadAndInvokeArgSize));  // Cleanup our args
-      writer.ret(popRegArgSize);                    // Return and finish cleanup
-    }
-    break;
+  if (calleeCleanup) {
+    // Instead of using a call, which would return here, push the old return address to the top of the stack and jump.
+    writer.PushFromStack(uint32(RegisterSize * (numPadders + 1)));  // push dword ptr [esp + n]
   }
-#endif
 
-  default:
-    // Unknown or unsupported calling convention.
-    result = false;
-    break;
+  IF_X86_64(if (writer.IsFarDisplacement(sizeof(Call32), pfnInvokeFunctor)) {
+    writer.mov(r11, uintptr(pfnInvokeFunctor));  // R11 is the only callee-saved register not used by function args.
+    calleeCleanup ? writer.jmp(r11)              : writer.call(r11);
+  }
+  else) {
+    calleeCleanup ? writer.jmp(pfnInvokeFunctor) : writer.call(pfnInvokeFunctor);
+  }
+
+  if (calleeCleanup == false) {
+    // add esp, i8  (Cleanup our args, aggregate return pointer if needed, and shadow space if needed)
+    const uint32 popReturnPtr = (sig.hasReturnPtr && (callTraits.flags & CallTraits::CalleePopReturnPtr)) ? 1 : 0;
+    writer.AddSp(int32((numPadders + InvokeFunctorNumArgs + popReturnPtr - 1) * RegisterSize));
+    writer.ret();
   }
 
   if (result) {
@@ -1332,7 +1230,7 @@ void FunctionRef::InitFunctorThunk(
   void*  pFunctorObj,
   void (*pfnDeleteFunctor)(void*))
 {
-  auto*const pAllocator = Allocator::GetInstance(pfnGetInvokers_);
+  auto*const pAllocator = Allocator::GetInstance(pfnInvoke_);
   pAllocator->Acquire();
   void* pMemory = (pFunctorObj != nullptr) ? pAllocator->Alloc(MaxFunctorThunkSize, CodeAlignment) : nullptr;
 
@@ -1485,6 +1383,7 @@ static void CopyInstructions(
 
     // Store mapping of the original instruction to the offset of the new instruction we're writing.
     offsetLut[curOldOffset] = static_cast<uint8>(PtrDelta(pWriter->GetNext(), pBegin));
+    assert((curOldOffset + insn.size) <= UINT8_MAX);
     curOldOffset += insn.size;
 
     // Instructions which use program counter-relative operands must be changed to 32-bit or absolute form and fixed up.
@@ -1497,7 +1396,7 @@ static void CopyInstructions(
         WritePcRel32Operand();
       }
       else {
-        pWriter->Value(CallAbs(target));
+        pWriter->CallAbs(target);
       }
     }
     // Jump pcrel8/pcrel32
@@ -1509,7 +1408,7 @@ static void CopyInstructions(
         WritePcRel32Operand();
       }
       else {
-        pWriter->Value(JmpAbs(target));
+        pWriter->JmpAbs(target);
       }
     }
     // Conditional jump pcrel8/pcrel32
@@ -1523,7 +1422,7 @@ static void CopyInstructions(
         WritePcRel32Operand();
       }
       else {
-        pWriter->Value(JccAbs((bytes[0] == 0x0F) ? (bytes[1] - 0x10) : bytes[0], target));
+        pWriter->JccAbs((bytes[0] == 0x0F) ? (bytes[1] - 0x10) : bytes[0], target);
       }
     }
     // Loop, jump if ECX == 0 pcrel8
@@ -1534,10 +1433,10 @@ static void CopyInstructions(
         if (isInternal) {
           internalPcRel32Relocs.emplace_back(&pWriter->GetNext<Loop32*>()->ifTrue.operand, int32(offset));
         }
-        pWriter->Value(Loop32(bytes[0], pWriter->GetPcRelPtr<int32>(sizeof(Loop32), reinterpret_cast<void*>(target))));
+        pWriter->Loop32(bytes[0], pWriter->GetPcRelPtr<int32>(sizeof(Loop32), reinterpret_cast<void*>(target)));
       }
       else {
-        pWriter->Value(JccAbs(bytes[0], target));
+        pWriter->JccAbs(bytes[0], target);
       }
     }
     // Call/jump indirect [RIP + offset]
@@ -1603,7 +1502,7 @@ static Status CreateTrampoline(
 
     // Complete the trampoline by writing a jmp instruction to the original function.
     const ptrdiff_t jmpDelta = writer.GetPcRelPtr(sizeof(Jmp32), PtrInc(pAddress, overwrittenSize));
-    IsFarDisplacement(jmpDelta) ? writer.Value(JmpAbs(PtrInc<uintptr>(pAddress, overwrittenSize)))
+    IsFarDisplacement(jmpDelta) ? writer.JmpAbs(PtrInc(pAddress, overwrittenSize))
                                 : writer.Value(Jmp32{ 0xE9, static_cast<int32>(jmpDelta) });
 
     // Fill in any left over bytes with int 3 (breakpoint) padders.
@@ -1628,7 +1527,7 @@ static Status CreateTrampoline(
 }
 
 // =====================================================================================================================
-// Writes code for a far (absolute) jump thunk.
+// Writes code for a far (absolute) jump thunk.  If this is a far thunk to a functor thunk, then we will inline it.
 static Status CreateFarThunk(
   void*               pFarThunk,
   const FunctionRef&  pfnNewFunction)
@@ -1722,7 +1621,7 @@ Status PatchContext::Hook(
 
     if (isFar && (overwrittenSize >= sizeof(JmpAbs))) {
       // There is enough space to write a JmpAbs at pAddress.
-      writer.Value(JmpAbs(reinterpret_cast<uintptr>(pHookFunction)));
+      writer.JmpAbs((pHookFunction));
     }
     else if (overwrittenSize >= sizeof(Jmp32)) {
       // There is enough space to write a Jmp32 at pAddress.
@@ -1807,7 +1706,7 @@ Status PatchContext::HookCall(
     pFarThunk = pAllocator_->Alloc(FarThunkSize, CodeAlignment);
 
     if (pFarThunk != nullptr) {
-      status_ = CreateFarThunk(pFarThunk, pfnNewFunction);
+      status_       = CreateFarThunk(pFarThunk, pfnNewFunction);
       pHookFunction = pFarThunk;
     }
     else {
@@ -1925,6 +1824,9 @@ static size_t CreateLowLevelHookTrampoline(
   static constexpr Register FlagsRegister       = X86_SELECTOR(Register::Eflags, Register::Rflags);
   static constexpr uint8    StackAlignment      = uint8(PATCHER_DEFAULT_STACK_ALIGNMENT);
 
+  const auto&  callTraits  = GetCallTraits(Call::AbiStd);
+  const uint32 shadowSpace = (callTraits.flags & CallTraits::ShadowSpace) ? callTraits.numArgSgprs : 0;
+
   // Fix user-provided options to ignore redundant flags and sanitize inputs.
   if (settings.noCustomReturnAddr) {
     settings.noBaseRelocReturn   = 0;
@@ -2014,7 +1916,7 @@ static size_t CreateLowLevelHookTrampoline(
   const bool useRedZone = (settings.forceUseRedZone || (PATCHER_STACK_RED_ZONE_SIZE >= RegisterSize));
 
   // The x64 calling convention passes the first 4 arguments via registers in MS ABI, or the first 6 in Unix ABI.
-  const size_t numPassedViaRegisters = (IsX86_32 || isFunctor) ? 0 :
+  const size_t numPassedViaRegisters = IsX86_32 ? 0 :
     Min((settings.argsAsStructPtr ? 1 : registers.Length()), ArrayLen(ArgRegisters));
 
   // Scratch space reserved on the stack first that can be used to store temporary data, which is mainly used to avoid
@@ -2033,11 +1935,10 @@ static size_t CreateLowLevelHookTrampoline(
     // Ensure the stack address upon reaching the upcoming call instruction is aligned to ABI requirements.
     // This always pushes the original stack pointer (and flags register if needed) to the stack after aligning.
     // Generating this code isn't necessary if stack alignment <= register size (i.e. MSVC x86-32).
-    const size_t totalStackSize = RegisterSize *
-      (stackSlots.size()
-        - numPassedViaRegisters                     // Passed via registers
-        + ((IsX86_64 && IsMsAbi) ? 4 : 0)           // Shadow space (MS x86-64 ABI)
-        + (isFunctor ? InvokeFunctorNumArgs : 0));  // InvokeFunctor() args
+    const size_t totalStackSize = RegisterSize * (stackSlots.size()
+                                                - numPassedViaRegisters
+                                                + shadowSpace
+                                                + (isFunctor ? (InvokeFunctorNumArgs + shadowSpace) : 0));
 
     static constexpr uint32 StackAlignMask = uint32(-int32(StackAlignment));
     const int32 eaxOffset    = -int32(settings.reserveStackSize + (RegisterSize * 1));
@@ -2099,7 +2000,7 @@ static size_t CreateLowLevelHookTrampoline(
 
       // If fromOrigin, push (*(sp + originOffset) + addend).  Otherwise, push (sp + addend).
       if (fromOrigin) {
-        writer.mov(scratchRegister, ptr [stackRegister + originOffset]);
+        writer.mov(scratchRegister, ptr [stackRegister   + originOffset]);
         writer.lea(scratchRegister, ptr [scratchRegister + addend]);
       }
       else {
@@ -2124,7 +2025,7 @@ static size_t CreateLowLevelHookTrampoline(
     const Register reg   = it->type;
     const size_t   index = (it - stackSlots.begin());
 
-    // See if there's an already-stored register we can use.  This assumes that index only monotonically increases.
+    // See if there's an already-stored register we can use.
     if (spareRegister == Register::Count) {
       for (auto it = stackSlots.begin(); it != (stackSlots.begin() + index); ++it) {
         const Register reg = it->type;
@@ -2160,48 +2061,42 @@ static size_t CreateLowLevelHookTrampoline(
   //         xchg/push+pop as needed.
   for (size_t i = 0; i < numPassedViaRegisters; writer.pop(ArgRegisters[i++]), stackSlots.pop_back());
 
-  void*const pTrampolineToOld = PtrInc(pLowLevelHook, MaxLowLevelHookSize);
+  const uintptr    functorObjAddr   = uintptr(pfnHookCb.Functor().get());
+  const void*const pHookFunction    = isFunctor ? pfnHookCb.Invoker() : pfnHookCb.Pfn();
+  void*const       pTrampolineToOld = PtrInc(pLowLevelHook, MaxLowLevelHookSize);
 
   // Write the call instruction to our hook callback function.
   // If return value == nullptr, or custom return destinations aren't allowed, we can take a simpler path.
   if (isFunctor) {
-    // We need to push the first 2 args to FunctionRef::InvokeFunctor().
+    // We need to push the extra args to FunctionRef::InvokeFunctor().
+    // Allocate uninitialized stack space to fill in for where pPrevReturnAddr and old shadow space would normally go.
+    writer.SubSp(int32(RegisterSize * (InvokeFunctorNumArgs + shadowSpace - 1)));
+
     if (IsX86_32) {
-      writer.push(0);                                           // Push dummy value for pPrevReturnAddr
-      writer.push(uint32(uintptr(pfnHookCb.Functor().get())));  // Push pFunctor
+      writer.push(uint32(functorObjAddr));  // Push pFunctorObj
     }
     IF_X86_64(else {
-      writer.xor_(rax, rax);
-      writer.push(rax);                                     // Push dummy value for pPrevReturnAddr
-      writer.mov(rax, uintptr(pfnHookCb.Functor().get()));
-      writer.push(rax);                                     // Push pFunctor
+      writer.mov(rax, functorObjAddr);
+      writer.push(rax);                     // Push pFunctorObj
     })
   }
 
   // MS x64 ABI expects 32 bytes of shadow space be allocated on the stack just before the call.
-  if (IsX86_64 && IsMsAbi) {
-    writer.SubSp(int32(RegisterSize * 4));
+  if (shadowSpace != 0) {
+    writer.SubSp(int32(RegisterSize * shadowSpace));
   }
 
-  {
-    const void* pHookFunction = isFunctor ? pfnHookCb.InvokerPfnTable().pfnInvokeWithPad[0] : pfnHookCb.Pfn();
-    if (writer.IsFarDisplacement(sizeof(Call32), pHookFunction)) {
-      writer.mov(returnRegister, uintptr(pHookFunction));
-      writer.call(returnRegister);
-    }
-    else {
-      writer.call(pHookFunction);
-    }
+  if (writer.IsFarDisplacement(sizeof(Call32), pHookFunction)) {
+    writer.mov(returnRegister, uintptr(pHookFunction));
+    writer.call(returnRegister);
+  }
+  else {
+    writer.call(pHookFunction);
   }
 
   // Epilog begins here.
   // Pop the shadow space if MS x64 ABI, and then the InvokeFunctor() args if we passed them.
-  if (IsX86_64 && IsMsAbi) {
-    writer.PopNil(4);
-  }
-  if (isFunctor) {
-    writer.PopNil(InvokeFunctorNumArgs);
-  }
+  writer.AddSp(int32(RegisterSize * ((isFunctor ? (InvokeFunctorNumArgs + shadowSpace) : 0) + shadowSpace)));
 
   if ((settings.noCustomReturnAddr || settings.noNullReturnDefault) == false) {
     writer.test(returnRegister, returnRegister);  // Test if returned address is nullptr

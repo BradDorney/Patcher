@@ -56,6 +56,14 @@ namespace Util {
 constexpr size_t SetCapturedTrampoline = 0;
 
 
+///@{ Helpers to obtain a pointer to a particular function overload.
+/// @example  GetOverload<void(int)>(&Fn); GetOverload<bool()>(&Class::Fn); GetOverload<float __vectorcall(float)>(&Fn);
+///           GetOverload<int() const>(&Class::Fn);
+template <typename Fn>              constexpr Fn*     GetOverload(Fn*     pfn) { return pfn; }
+template <typename Fn, typename T>  constexpr Fn T::* GetOverload(Fn T::* pmf) { return pmf; }
+///@}
+
+
 ///@{ Converts any (non-overloaded) lambda or functor to a FunctorRef object (of the specified calling convention).
 ///   This can be passed to PatchContext methods, be used as a callable, and implicitly converts to a function pointer.
 ///   If created from a non-empty type, then the returned FunctorRef needs to be kept alive or referenced by a patch.
@@ -85,7 +93,7 @@ struct LowLevelHookInfo {
   uint32 reserved            : 23;  ///< Reserved for future use.
 
   uint32 reserveStackSize;  ///< Size in bytes of extra stack space to reserve.  Set this if you intend to modify the
-                            ///  stack pointer to allocate space (up to a maximum of the specified size).
+                            ///  stack pointer to allocate space, up to a maximum of this size.
 };
 
 namespace Impl {

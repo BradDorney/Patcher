@@ -295,7 +295,7 @@ private:
   PatcherStatus  status_;           ///< Status of this PatchContext.  If this is an error, most methods become a no-op.
 
   using OldDataStorage     = Impl::SmallVector<uint8, 8>;
-  using TrackedAllocVector = Impl::SmallVector<std::pair<void*, size_t>, (IsX86_64 ? 2 : 1)>;      // pAlloc, size
+  using TrackedAllocVector = Impl::SmallVector<std::pair<void*, size_t>, (IsX86_64 ? 2 : 1)>;      // pAlloc, sizeIfCode
   using FunctorThunkVector = Impl::SmallVector<std::pair<std::shared_ptr<void>, const void*>, 1>;  // pFunctor, pfnThunk
 
   /// @internal  Struct for storing mappings of patch addresses to infomation required for cleanup and other purposes.

@@ -1166,18 +1166,18 @@ static bool CreateFunctorThunk(
 {
   using namespace Xbyak::util;
 
-  Assembler writer(MaxFunctorThunkSize, pMemory);
-  bool result = (pMemory != nullptr);
-
   const DynFuncSig&  sig              = pfnNewFunction.Signature();
   const auto&        callTraits       = GetCallTraits(sig.convention);
   const uintptr      functorObjAddr   = reinterpret_cast<uintptr>(pfnNewFunction.Functor().get());
   const void*const   pfnInvokeFunctor = pfnNewFunction.Invoker();
 
+  Assembler writer(MaxFunctorThunkSize, pMemory);
+  bool result = (pMemory != nullptr) && callTraits.supported;
+
   // ** TODO Copy arg registers into shadow space in debug builds (maybe add PATCHER_HOME_PARAMS ?= _DEBUG)
   const bool    calleeCleanup = callTraits.flags & CallTraits::CalleeCleanup;
-  const size_t  numPadders    =
-    InvokeFunctorNumPadders + ((callTraits.flags & CallTraits::ShadowSpace) ? callTraits.numArgSgprs : 0);
+  const size_t  numPadders    = GetInvokeFunctorNumPadders(sig.stackAlignment) +
+    ((callTraits.flags & CallTraits::ShadowSpace) ? callTraits.numArgSgprs : 0);
 
   // Push the "hidden" args for pfnInvokeFunctor onto the stack.
   if (IsX86_32) {
@@ -1189,7 +1189,7 @@ static bool CreateFunctorThunk(
   })
 
   if (numPadders != 0) {
-    writer.SubSp(int32(RegisterSize * numPadders));  // sub esp, i8  (Align, and allocate shadow space if needed)
+    writer.SubSp(int32(RegisterSize * numPadders));  // sub esp, i8  (Align stack, and allocate shadow space if needed)
   }
 
   if (calleeCleanup) {
@@ -2079,6 +2079,12 @@ static size_t CreateLowLevelHookTrampoline(
       writer.mov(rax, functorObjAddr);
       writer.push(rax);                     // Push pFunctorObj
     })
+
+    // Allocate uninitialized stack space for where InvokeFunctor alignment padding would normally go.
+    const size_t numPadders = GetInvokeFunctorNumPadders(pfnHookCb.Signature().stackAlignment);
+    if (numPadders > 0) {
+      writer.SubSp(int32(RegisterSize * numPadders));
+    }
   }
 
   // MS x64 ABI expects 32 bytes of shadow space be allocated on the stack just before the call.

@@ -30,6 +30,7 @@
 #include <initializer_list>
 #include <functional>
 #include <memory>
+#include <string>
 
 #include <cassert>
 
@@ -85,7 +86,7 @@ public:
   SmallVector() : pData_(reinterpret_cast<T*>(&localStorage_[0])), numElements_(0), capacity_(InitialSize) { }
 
   explicit SmallVector(size_t size) : numElements_(0), capacity_(Max(InitialSize, size))
-    { pData_ = (size > ArrayLen(localStorage_)) ? static_cast<T*>(malloc(sizeof(T) * size)) : (T*)(&localStorage_[0]); }
+    { pData_ = (size > InitialSize) ? static_cast<T*>(malloc(sizeof(T) * size)) : (T*)(&localStorage_[0]); }
 
   template <typename U = T, typename = decltype(T(std::declval<U>()))>
   explicit SmallVector(Span<U> src);
@@ -142,12 +143,13 @@ public:
   bool Append(Span<U> elements);
 
 protected:
+  using LocalStorageType = Conditional<(InitialSize != 0), Array<TypeStorage<T>, Max(InitialSize, 1)>, TypeStorage<T>*>;
   static constexpr bool IsPod = std::is_trivially_copyable<T>::value;
 
-  TypeStorage<T>  localStorage_[InitialSize];
-  T*              pData_;
-  size_t          numElements_;
-  size_t          capacity_;
+  LocalStorageType  localStorage_;
+  T*                pData_;
+  size_t            numElements_;
+  size_t            capacity_;
 };
 
 /// Type erasure wrapper for field offset arguments passed to PatchContext.
@@ -322,7 +324,7 @@ SmallVector<T, InitialSize>::SmallVector(
   numElements_(src.Length()),
   capacity_(Max(InitialSize, numElements_))
 {
-  if (src.Length() > ArrayLen(localStorage_)) {
+  if (src.Length() > InitialSize) {
     // Dynamically allocate storage buffer exceeding InitialSize.
     pData_ = static_cast<T*>(malloc(sizeof(T) * numElements_));
   }
@@ -352,7 +354,7 @@ SmallVector<T, InitialSize>::SmallVector(
     capacity_ = src.capacity_;
   }
   else if (src.pData_ != nullptr) {
-    if (numElements_ > ArrayLen(localStorage_)) {
+    if (numElements_ > InitialSize) {
       // Dynamically allocate storage buffer exceeding InitialSize.
       pData_ = static_cast<T*>(malloc(sizeof(T) * numElements_));
     }

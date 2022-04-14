@@ -407,6 +407,11 @@ template <typename T = size_t>         constexpr bool Any()                { ret
 template <typename T, typename... Ts>  constexpr bool Any(T a, Ts... next) { return a || Any<T>(next...); }
 ///@}
 
+///@{ @internal  Returns true if all of the values are truthy, otherwise false.
+template <typename T = size_t>         constexpr bool All()                { return false;                }
+template <typename T, typename... Ts>  constexpr bool All(T a, Ts... next) { return a && All<T>(next...); }
+///@}
+
 ///@{ @internal  Type traits convenience aliases.
 #if __cpp_lib_is_aggregate
 template <typename T>
@@ -419,7 +424,7 @@ template <typename T>  constexpr bool IsPod() { return std::is_trivial<T>::value
 #endif
 
 #if __cpp_lib_has_unique_object_representations
-template <typename T>
+template <typename T>  ///< Requires C++17.  True if T is POD and does not contain alignment padders or floating-points.
 constexpr bool IsUniquePod() { return IsPod<T>() && std::has_unique_object_representations<T>::value; }
 #else
 template <typename T>  constexpr bool IsUniquePod() { return IsPod<T>(); }
@@ -458,10 +463,17 @@ template <typename T>  using UnderlyingType = typename UnderlyingTypeImpl<T>::Ty
 template <typename T1, typename T2, typename U = CommonType<T1, T2>>
 constexpr U Max(const T1& a, const T2& b) { return (static_cast<U>(a) > static_cast<U>(b)) ? a : b; }
 
+/// @internal  Returns the largest of all the items.
+template <typename T1, typename T2, typename U = CommonType<T1, T2>, typename... Ts>
+constexpr U Max(const T1& a, const T2& b, const Ts&... rest) { return Max(Max(a, b), rest...); }
+
 /// @internal  Returns the smaller of a or b.
 template <typename T1, typename T2, typename U = CommonType<T1, T2>>
 constexpr U Min(const T1& a, const T2& b) { return (static_cast<U>(a) < static_cast<U>(b)) ? a : b; }
-///@}
+
+/// @internal  Returns the smallest of all the items.
+template <typename T1, typename T2, typename U = CommonType<T1, T2>, typename... Ts>
+constexpr U Min(const T1& a, const T2& b, const Ts&... rest) { return Min(Min(a, b), rest...); }
 
 
 template <typename T, T... Elements>  struct ValueSequence{};                           ///< Parameter pack of values.
@@ -485,7 +497,7 @@ struct ConstValue { static constexpr T Value = Value_;  constexpr operator T() c
 
 struct NotFound{};  ///< @internal  Empty tag type returned for out-of-bounds TupleElement.
 
-///@{ @internal  TupleElement helper to get the Nth element of a std::tuple, TypeSequence, or ValueSequence.
+///@{ @internal  TupleElement, gets the Nth element of a std::tuple, TypeSequence, or ValueSequence (as a ConstValue).
 template <size_t N, typename T, typename Enable = void>  struct TupleElementImpl { using Type = NotFound; };
 template <size_t N, typename T>                          using  TupleElement = typename TupleElementImpl<N, T>::Type;
 
@@ -543,7 +555,7 @@ template <size_t Begin, size_t End>  using MakeIndexRange    = MakeSeqRange<size
 template <typename T, size_t Length>
 using MakeTypeSequence = typename MakeTypeSeqImpl<MakeIndexSequence<Length>, T>::Type;
 
-///@{ @internal  SliceSeq helper metafunction to obtain a subsequence from a sequence.
+///@{ @internal  SliceSeq/SeqElements helper metafunctions to obtain a subsequence from a sequence.
 template <typename Seq, typename Is>  struct SliceSeqImpl;
 
 template <typename... Seq, size_t... Is>
@@ -563,7 +575,7 @@ using SliceSeq = typename SliceSeqImpl<T, MakeIndexRange<Min(Begin, SeqSize(T{})
 template <typename Seq, typename Is>  using SeqElements = typename SliceSeqImpl<Seq, Is>::Type;
 ///@}
 
-///@{ @internal  FilterSeq helper metafunction to obtain a subsequence from Seq filtered by Conditions.
+///@{ @internal  FilterSeq/FilterFalseSeq helper metafunctions to obtain a subsequence from Seq filtered by Conditions.
 template <template<class, class> class Filter, typename Seq, typename Conditions>
 using FilterHelper = SeqElements<Seq, typename Filter<MakeIndexSequence<SeqSize(Seq{})>, Conditions>::Type>;
 
@@ -593,33 +605,33 @@ struct Less {
   constexpr int32 operator()(ConstValue<T, A>, ConstValue<T, B>) const { return operator()(A, B); }
 };
 
-/// @internal  Functor that does a proxy comparison using a reference key sequence.  For use with SeqSort.
+/// @internal  Template functor that does a proxy comparison using a reference key sequence.  For use with SeqSort.
 template <typename Seq, typename Compare = Less>
 struct KeySeqCompare {
   template <size_t A, size_t B>  constexpr int32 operator()(ConstValue<size_t, A>, ConstValue<size_t, B>) const
-  { return Compare{}(TupleElement<A, Seq>{}, TupleElement<B, Seq>{}); }
+    { return Compare{}(TupleElement<A, Seq>{}, TupleElement<B, Seq>{}); }
 };
 
 ///@{ @internal  SeqBinSearch helper metafunction to do a binary search over a ValueSequence at compile time.
 ///   Returns the index of the element if found, otherwise returns ~0 if not found.
 ///   Sequence must be sorted in ascending order.
 template <typename Seq, typename Key, typename Enable = void>
-struct SeqBinSearchImpl { using Type = ConstValue<size_t, ~0u>; };
+struct SeqBinSearchImpl { using Type = ConstValue<size_t, ~0u>; };  // Key not found.
 
 template <typename T, T Key, T... Seq>
 struct SeqBinSearchImpl<ValueSequence<T, Seq...>, ConstValue<T, Key>, EnableIf<(SeqMedian<T, Seq...>::Value == Key)>>
-  { using Type = ConstValue<size_t, (sizeof...(Seq) / 2)>; };
+  { using Type = ConstValue<size_t, (sizeof...(Seq) / 2)>; };       // Key found.  Return its element index.
 
 template <typename T, T Key, T... Seq>
 struct SeqBinSearchImpl<ValueSequence<T, Seq...>, ConstValue<T, Key>, EnableIf<(SeqMedian<T, Seq...>::Value >  Key)>> {
   using LowerHalf = SliceSeq<ValueSequence<T, Seq...>, 0, (sizeof...(Seq) / 2)>;
-  using Type      = typename SeqBinSearchImpl<LowerHalf, ConstValue<T, Key>>::Type;
+  using Type      = typename SeqBinSearchImpl<LowerHalf, ConstValue<T, Key>>::Type;  // Recurse down lower half.
 };
 
 template <typename T, T Key, T... Seq>
 struct SeqBinSearchImpl<ValueSequence<T, Seq...>, ConstValue<T, Key>, EnableIf<(SeqMedian<T, Seq...>::Value <  Key)>> {
   using UpperHalf = SliceSeq<ValueSequence<T, Seq...>, ((sizeof...(Seq) / 2) + 1)>;  // +1 to exclude middle element
-  using Type      = typename SeqBinSearchImpl<UpperHalf, ConstValue<T, Key>>::Type;
+  using Type      = typename SeqBinSearchImpl<UpperHalf, ConstValue<T, Key>>::Type;  // Recurse down upper half.
 };
 
 template <typename T, T Key, T... Seq>
@@ -644,7 +656,7 @@ struct SpliceSeqImpl<ValueSequence<T, Seq...>, ValueSequence<T, Exclude...>> {
 };
 ///@}
 
-///@{ @internal  Helper metafunction to sort a sequence.
+///@{ @internal  SeqSort helper metafunction to sort a ValueSequence.
 template <typename Seq, typename Compare>         struct SeqSortImpl;
 template <typename Seq, typename Compare = Less>  using  SeqSort = typename SeqSortImpl<Seq, Compare>::Type;
 
@@ -654,21 +666,21 @@ using SeqMergeSort = typename SeqMergeSortImpl<SeqA, SeqB, Compare>::Type;
 
 template <typename T, typename Compare>
 struct SeqMergeSortImpl<ValueSequence<T>, ValueSequence<T>, Compare, void>
-  { using Type = ValueSequence<T>; };
+  { using Type = ValueSequence<T>; };           // Terminate upon reaching the end of both subsequences.
 
 template <typename T, typename Compare, T... SeqA>
 struct SeqMergeSortImpl<ValueSequence<T, SeqA...>, ValueSequence<T>, Compare, void>
-  { using Type = ValueSequence<T, SeqA...>; };
+  { using Type = ValueSequence<T, SeqA...>; };  // Terminate upon reaching the end of SeqB.
 
 template <typename T, typename Compare, T... SeqB>
 struct SeqMergeSortImpl<ValueSequence<T>, ValueSequence<T, SeqB...>, Compare, void>
-  { using Type = ValueSequence<T, SeqB...>; };
+  { using Type = ValueSequence<T, SeqB...>; };  // Terminate upon reaching the end of SeqA.
 
 template <typename T, typename Compare, T A, T B, T... SeqA, T... SeqB>
 struct SeqMergeSortImpl<ValueSequence<T, A, SeqA...>, ValueSequence<T, B, SeqB...>, Compare,
   EnableIf<(Compare{}(ConstValue<T, A>{}, ConstValue<T, B>{}) <= 0)>>
 {
-  using Type =
+  using Type =  // Pop front of SeqA into the sorted sequence, and then continue.
     ConcatSeq<ValueSequence<T, A>, SeqMergeSort<ValueSequence<T, SeqA...>, ValueSequence<T, B, SeqB...>, Compare>>;
 };
 
@@ -676,17 +688,17 @@ template <typename T, typename Compare, T A, T B, T... SeqA, T... SeqB>
 struct SeqMergeSortImpl<ValueSequence<T, A, SeqA...>, ValueSequence<T, B, SeqB...>, Compare,
   EnableIf<(Compare{}(ConstValue<T, A>{}, ConstValue<T, B>{}) > 0)>>
 {
-  using Type =
+  using Type =  // Pop front of SeqB into the sorted sequence, and then continue.
     ConcatSeq<ValueSequence<T, B>, SeqMergeSort<ValueSequence<T, A, SeqA...>, ValueSequence<T, SeqB...>, Compare>>;
 };
 
-template <typename T, typename Compare>
+template <typename T, typename Compare>             // Terminate upon reaching an empty slice.
 struct SeqSortImpl<ValueSequence<T>, Compare> { using Type = ValueSequence<T>; };
 
-template <typename T, typename Compare, T Element>
+template <typename T, typename Compare, T Element>  // Terminate upon reaching a singleton slice.
 struct SeqSortImpl<ValueSequence<T, Element>, Compare> { using Type = ValueSequence<T, Element>; };
 
-template <typename T, typename Compare, T... Seq>
+template <typename T, typename Compare, T... Seq>   // Recursively slice sequence in half and merge sort.
 struct SeqSortImpl<ValueSequence<T, Seq...>, Compare> {
   using LowerHalf = SliceSeq<ValueSequence<T, Seq...>, 0, (sizeof...(Seq) / 2)>;
   using UpperHalf = SliceSeq<ValueSequence<T, Seq...>,    (sizeof...(Seq) / 2)>;
@@ -747,6 +759,10 @@ constexpr bool IsArgByRef() {
 template <typename T, Call C = Call::Default>  constexpr size_t ArgSize()
   { return IsArgByRef<T, C>() ? RegisterSize : Util::Align(SizeOfType<EffectiveArgType<T>>(), RegisterSize); }
 
+/// @internal  Gets the overall stack alignment required for a function's argument types.
+template <typename... Args>  constexpr size_t GetStackAlignment()
+  { return Max(RegisterSize, PATCHER_DEFAULT_STACK_ALIGNMENT, alignof(EffectiveArgType<Args>)...); }
+
 /// @internal  Type sequence containing all intrinsic vector types.
 using IntrinsicVectorTypes = TypeSequence<
 #if PATCHER_X86
@@ -775,7 +791,6 @@ template <typename T>  constexpr bool IsVectorArg() { return IsVectorArg<T>(Intr
 ///@}
 
 /// @internal  Returns true if T would be returned via aggregate-return pointer (a hidden parameter).
-// ** TODO Support intrinsic vector types
 template <typename T, Call C = Call::Default>
 constexpr bool IsAggregateReturnArg() {
   return (std::is_void<T>::value == false) && (std::is_empty<T>::value == false) &&
@@ -891,16 +906,17 @@ struct FuncSig {
   static constexpr size_t NumParams  = sizeof...(A);  ///< Number of non-implicit function params.
   static constexpr auto   Convention = Call;          ///< Calling convention.
 
-  static constexpr size_t ReturnSize                        = SizeOfType<R>();         ///< Size of return type.
-  static constexpr size_t ParamSizes[Max(NumParams, 1u)]    = { ArgSize<A>()...     }; ///< Aligned sizes of params.
-  static constexpr bool   ParamIsVector[Max(NumParams, 1u)] = { IsVectorArg<A>()... }; ///< Are params float/vector?
-  static constexpr size_t TotalParamSize                    = Sum(ArgSize<A>()...);    ///< Total aligned size of params
+  static constexpr size_t ReturnSize                        = SizeOfType<R>();           ///< Size of return type.
+  static constexpr size_t ParamSizes[Max(NumParams, 1u)]    = { ArgSize<A>()...     };   ///< Aligned sizes of params.
+  static constexpr bool   ParamIsVector[Max(NumParams, 1u)] = { IsVectorArg<A>()... };   ///< Are params float/vector?
+  static constexpr size_t TotalParamSize                    = Sum(ArgSize<A>()...);      ///< Total aligned params size.
+  static constexpr size_t StackAlignment                    = GetStackAlignment<A...>(); ///< Stack alignment for args.
 
   using ThisPtr   = AddPtrIfValue<This>;  ///< "this" qualified parameter type.
   using ReturnPtr = AddPtrIfValue<R>;     ///< Return pointer parameter type.
 
-  using FnBase_ = Conditional<(HasThisPtr && HasReturnPtr),
-    ReturnPtr(ThisPtr, ReturnTag<R>&, A...),  Conditional<HasThisPtr,  R(ThisPtr, A...),  R(A...)>>;
+  using FnBase_ = Conditional<(HasThisPtr && HasReturnPtr),  ReturnPtr(ThisPtr, ReturnTag<R>&, A...),
+                  Conditional<HasThisPtr,                    R(ThisPtr, A...),  R(A...)>>;
 
   using Function  = Conditional<Variadic, MakeVariadic<FnBase_>, FnBase_>;   ///< Unqualified function signature.
   using Pfn       = AddConvention<Function, Call>;                           ///< Qualified function pointer signature.
@@ -929,6 +945,7 @@ struct DynFuncSig {
       pParamSizes(&decltype(x)::ParamSizes[0]),
       pParamIsVector(&decltype(x)::ParamIsVector[0]),
       totalParamSize(decltype(x)::TotalParamSize),
+      stackAlignment(decltype(x)::StackAlignment),
       hasThisPtr(decltype(x)::HasThisPtr),
       hasReturnPtr(decltype(x)::HasReturnPtr),
       isVariadic(V),
@@ -936,7 +953,7 @@ struct DynFuncSig {
 
   /// Default constructor with unspecified call signature information.
   constexpr DynFuncSig()
-    : convention(), returnSize(), numParams(), pParamSizes(), pParamIsVector(), totalParamSize(),
+    : convention(), returnSize(), numParams(), pParamSizes(), pParamIsVector(), totalParamSize(), stackAlignment(),
       hasThisPtr(), hasReturnPtr(), isVariadic(), reserved() { }
 
   Call           convention;      ///< Function calling convention.
@@ -945,10 +962,11 @@ struct DynFuncSig {
   const size_t*  pParamSizes;     ///< Aligned size in bytes of each parameter.
   const bool*    pParamIsVector;  ///< Specifies whether each parameter is floating-point/intrinsic vector type.
   size_t         totalParamSize;  ///< Total size in bytes of all @ref numParams parameters and alignment padding.
+  size_t         stackAlignment;  ///< Stack alignment requirement upon entering the function.
 
   uint32 hasThisPtr   :  1;  ///< "this" parameter is present.
   uint32 hasReturnPtr :  1;  ///< Return value is handled by aggregate-return.
-  uint32 isVariadic   :  1;  ///< Specifies whether this is a variadic function.
+  uint32 isVariadic   :  1;  ///< Function takes a dynamic variable number of arguments.
   uint32 reserved     : 29;  ///< Reserved for future use.
 };
 
@@ -1018,12 +1036,11 @@ PATCHER_EMIT_CALLS(PATCHER_LAMBDA_PTR_DEF);
 
 namespace Impl {
 /// @internal  Number of extra args needed to call FunctionRef::InvokeFunctor().
-constexpr size_t InvokeFunctorNumArgs    = 2;
-/// @internal  Max number of alignment padders that a function call might require.
-// ** TODO __m256 vector type args require 32-bit stack alignment, __m512 requires 64-bit alignment
-constexpr size_t InvokeFunctorMaxPad     = Max((PATCHER_DEFAULT_STACK_ALIGNMENT / RegisterSize), 1) - 1;
-/// @internal  Number of alignment padders that must be passed to an InvokeFunctor() variant before the extra args.
-constexpr size_t InvokeFunctorNumPadders = InvokeFunctorMaxPad - ((InvokeFunctorNumArgs-1) % (InvokeFunctorMaxPad+1));
+constexpr size_t InvokeFunctorNumArgs = 2;
+
+/// @internal  Calculate # of alignment padders that must be passed to an InvokeFunctor() variant before the extra args.
+constexpr size_t GetInvokeFunctorNumPadders(size_t stackAlignment = PATCHER_DEFAULT_STACK_ALIGNMENT)
+  { return ((stackAlignment / RegisterSize) - 1) - ((InvokeFunctorNumArgs - 1) % (stackAlignment / RegisterSize)); }
 
 ///@{ @internal  Helper metafunction that produces a BoolSequence for whether args should be placed in registers or not.
 ///
@@ -1045,7 +1062,7 @@ struct InvokeFunctorSgprMapper {
 
   static constexpr size_t NumNeeded = (std::is_empty<Arg>::value ? ~0 : (ArgSize<Arg, C>() / RegisterSize));
   static constexpr size_t Available = ((Flags & CallTraits::AnyTypeGprSplit) ||
-    ((IsBasicType || IsSplittablePod) && (Flags & CallTraits::PodTypeGprSplit))) ? Remaining : Min(Remaining, 1);
+    ((IsBasicType || IsSplittablePod) && (Flags & CallTraits::PodTypeGprSplit))) ? Remaining : 1;
 
   static constexpr bool PlaceInSgpr = (NumNeeded <= Available) && (IsVectorArg<Arg>() == false) && (IsBasicType ||
     (Flags & CallTraits::AnyTypesInGprs) || (IsUniquePod<Arg>() && (Flags & CallTraits::PodTypesInGprs)));
@@ -1064,21 +1081,22 @@ struct InvokeFunctorSgprMapper<C, 0, Arg, Args...> { using Type = BoolSequence<f
 template <Call C, typename R, typename... Args>
 struct InvokeFunctorArgMapper {
   static constexpr size_t NumSgprs       = GetCallTraits(C).numArgSgprs;
+  // ** TODO Does NumUserSgprs take into account this ptr correctly, especially when (NumSgprs == 1) && IsAggregateRetn?
   static constexpr size_t NumUserSgprs   = (NumSgprs == 0) ? 0 : (NumSgprs - (IsAggregateReturnArg<R, C>() ? 1 : 0));
   static constexpr bool   HasShadowSpace = GetCallTraits(C).flags & CallTraits::ShadowSpace;
 
-  using ArgIndexes        = MakeIndexSequence<sizeof...(Args)>;
-  using SgprArgIndexes    = FilterSeq<ArgIndexes, typename InvokeFunctorSgprMapper<C, NumUserSgprs, Args...>::Type>;
-  using NonSgprArgIndexes = SpliceSeq<ArgIndexes, SgprArgIndexes>;
+  using Indexes           = MakeIndexSequence<sizeof...(Args)>;
+  using SgprArgIndexes    = FilterSeq<Indexes, typename InvokeFunctorSgprMapper<C, NumUserSgprs, Args...>::Type>;
+  using NonSgprArgIndexes = SpliceSeq<Indexes, SgprArgIndexes>;
+  using ArgSwizzle        = ConcatSeq<SgprArgIndexes, NonSgprArgIndexes>;
 
-  static constexpr size_t NumRegisterPadders =
+  static constexpr size_t NumUnusedSgprs =
     (NumUserSgprs > SeqSize(SgprArgIndexes{})) ? (NumUserSgprs - SeqSize(SgprArgIndexes{})) : 0;
 
-  using ArgSwizzle  = ConcatSeq<SgprArgIndexes, NonSgprArgIndexes>;
   using ArgOrder    = SeqSort<ArgSwizzle, KeySeqCompare<ArgSwizzle>>;
   using SgprArgs    = SeqElements<TypeSequence<Args...>, SgprArgIndexes>;
-  using Padders     = MakeTypeSequence<int, (NumRegisterPadders + InvokeFunctorNumPadders)>;
-  using ShadowSpace = MakeTypeSequence<int, (HasShadowSpace ? NumSgprs : 0)>;
+  using Padders     = MakeTypeSequence<int, NumUnusedSgprs + GetInvokeFunctorNumPadders(GetStackAlignment<Args...>())>;
+  using ShadowSpace = MakeTypeSequence<int, HasShadowSpace ? NumSgprs : 0>;
   using OtherArgs   = SeqElements<TypeSequence<Args...>, NonSgprArgIndexes>;
 };
 

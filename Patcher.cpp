@@ -1852,8 +1852,8 @@ static size_t CreateLowLevelHookTrampoline(
   for (uint32 i = 0; i < uint32(Register::Count); regValueIndexData[i++] = UINT_MAX);
   const Span<uint32> regValueIndex(regValueIndexData);
 
-  auto AddRegisterToStack = [&stackSlots, &regValueIndexData, &regValueIndex](RegisterInfo reg) {
-    if ((reg.byReference == false) && (reg.offset == 0) && (regValueIndex[reg.type] == UINT_MAX)) {
+  auto AddRegisterToStack = [&stackSlots, &regValueIndexData, &regValueIndex](RegisterInfo reg, bool restore = true) {
+    if (restore && (reg.byReference == false) && (reg.offset == 0) && (regValueIndex[reg.type] == UINT_MAX)) {
       regValueIndexData[uint32(reg.type)] = uint32(stackSlots.size());
     }
     stackSlots.push_back(reg);
@@ -1885,7 +1885,7 @@ static size_t CreateLowLevelHookTrampoline(
     AddRegisterToStack({ FlagsRegister });
   }
   for (const Register reg : VolatileRegisters) {
-    if (IsRegisterRequested(reg) == false) {
+    if (IsRegisterRequested(reg, (settings.argsAsStructPtr == false)) == false) {
       AddRegisterToStack({ reg });
     }
   }
@@ -1900,11 +1900,11 @@ static size_t CreateLowLevelHookTrampoline(
     }
 
     // Push the function args the user-provided callback will actually see now.
-    for (size_t i = registers.Length(); i > 0; AddRegisterToStack(registers[--i]));
+    for (size_t i = registers.Length(); i > 0; AddRegisterToStack(registers[--i], settings.argsAsStructPtr));
 
     if (settings.argsAsStructPtr) {
       // Pushing SP last is equivalent of pushing a pointer to everything before it on the stack.
-      AddRegisterToStack({ StackRegister });
+      AddRegisterToStack({ StackRegister }, false);
     }
   }
 

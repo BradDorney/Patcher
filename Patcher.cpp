@@ -1880,7 +1880,8 @@ static size_t CreateLowLevelHookTrampoline(
     AddRegisterToStack({ StackRegister });
   }
   if ((settings.noRestoreFlagsReg == false) &&
-      ((IsRegisterRequested(FlagsRegister) == false) || (settings.noAlignStackPtr == false)))
+      ((IsRegisterRequested(FlagsRegister, (settings.argsAsStructPtr == false)) == false) ||
+       (settings.noAlignStackPtr == false)))
   {
     AddRegisterToStack({ FlagsRegister });
   }

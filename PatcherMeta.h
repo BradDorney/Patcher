@@ -402,7 +402,7 @@ template <typename T = size_t>         constexpr T Sum()                { return
 template <typename T, typename... Ts>  constexpr T Sum(T a, Ts... next) { return a + Sum<T>(next...); }
 ///@}
 
-///@{ @internal  Returns true if any one of the values are truthy, otherwise false.
+///@{ @internal  Returns true if any one of the values is truthy, otherwise false.
 template <typename T = size_t>         constexpr bool Any()                { return false;                }
 template <typename T, typename... Ts>  constexpr bool Any(T a, Ts... next) { return a || Any<T>(next...); }
 ///@}
@@ -1232,6 +1232,11 @@ struct DummyFactory<T, true> {
 } // Impl
 
 namespace Util {
+// =====================================================================================================================
+/// Cast any non-reference type to another type.  Similar to reinterpret_cast, but works with e.g. pointer-to-members.
+template <typename T, typename U>
+T UnsafeCast(U&& src) { const union { U in;  T out; } cast = { std::forward<U>(src) };  return cast.out; }
+
 // =====================================================================================================================
 /// Cast pointer-to-member-variable to offset in bytes.
 template <typename T, typename U, typename = Impl::EnableIf<std::is_function<U>::value == false>>

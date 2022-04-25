@@ -39,7 +39,7 @@ static bool(*pfnOldFunction)(int) = nullptr;
 patcher.Hook(&SomeFunction, [](int x) -> bool { return pfnOldFunction(x+1); }, &pfnOldFunction);
 
 // Insert a code hook similarly as above, but using a lambda capture to hold the original function pointer.
-patcher.Hook(&SomeFunction, SetCapturedTrampoline, [F = (decltype(&SomeFunction))0](int x) -> bool { return F(x+1); });
+patcher.Hook(&SomeFunction, SetCapturedTrampoline, [F = &SomeFunction](int x) -> bool { return F(x + 1); });
 
 // Hook a class virtual function using the PATCHER_MFN_PTR() macro to get its address.
 // Note that while Hook(&SomeClass::SomeFunction, ...) works, PATCHER_MFN_PTR() is more robust for virtual functions.

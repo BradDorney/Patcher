@@ -118,7 +118,7 @@ public:
   ///
   ///    @example  Hook(&Function,   &NewFunction)
   ///    @example  Hook(0x439AB0,    0x439AF2,                      &global_pfnOriginal)
-  ///    @example  Hook(&Fn,         Util::SetCapturedTrampoline,   [F = (decltype(&Fn))0](int a) { return F(a * 2); })
+  ///    @example  Hook(&Fn,         Util::SetCapturedTrampoline,   [F = &Fn](int a) { return F(a * 2); })
   ///    @example  Hook(&StdcallFn,  &Functor::member_pfnOriginal,  Util::StdcallFunctor(Functor{}))
   /// ** @example  Hook(&Class::Fn,  &HookClass::Fn,                &HookClass::static_pfnOriginal)
   /// ** @example  Hook(&Class::Fn,  Util::ThiscallFunctor([](Class* pThis, int a) { return pThis->b - a; }))

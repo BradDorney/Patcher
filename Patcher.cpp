@@ -695,7 +695,7 @@ Status PatchContext::WriteNop(
   const uint32 oldAttr = BeginDeProtect(pAddress, size);
 
   if (status_ == Status::Ok) {
-    Assembler(pAddress).nop(size);
+    Assembler(size, pAddress).nop(size);
     EndDeProtect(pAddress, size, oldAttr);
   }
 
@@ -1243,6 +1243,9 @@ void FunctionRef::InitFunctorThunk(
       pfn_ = pMemory;
       FlushInstructionCache(GetCurrentProcess(), pMemory, MaxFunctorThunkSize);
     }
+  }
+  else {
+    pAllocator->Release();
   }
 }
 

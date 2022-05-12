@@ -649,10 +649,10 @@ template <typename Seq, typename Exclude>  using  SpliceSeq = typename SpliceSeq
 
 template <typename T, T... Seq, T... Exclude>
 struct SpliceSeqImpl<ValueSequence<T, Seq...>, ValueSequence<T, Exclude...>> {
-  template <T I>
-  static constexpr bool IsExcluded() { return SeqBinSearch(ValueSequence<T, Exclude...>{}, ConstValue<T, I>{}) != ~0u; }
+  template <typename U, U I>  static constexpr bool IsExcluded()
+    { return SeqBinSearch(ValueSequence<T, Exclude...>{}, ConstValue<U, I>{}) != ~0u; }
 
-  using Type = FilterFalseSeq<ValueSequence<T, Seq...>, BoolSequence<IsExcluded<Seq>()...>>;
+  using Type = FilterFalseSeq<ValueSequence<T, Seq...>, BoolSequence<IsExcluded<T, Seq>()...>>;
 };
 ///@}
 

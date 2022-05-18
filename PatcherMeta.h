@@ -166,7 +166,11 @@
 # define  PATCHER_THISCALL    PATCHER_ATTRIBUTE(__thiscall__)
 # define  PATCHER_VECTORCALL  PATCHER_ATTRIBUTE(__vectorcall__)
 # define  PATCHER_REGCALL     PATCHER_ATTRIBUTE(__regcall__)
+#if !defined(PATCHER_CLANG)
 # define  PATCHER_REGPARM(n)  PATCHER_ATTR_PARM(__regparm__, n)
+#else  // ** TODO Fix Clang build errors with regparm in TokenizeFunctionQualifiers
+# define  PATCHER_REGPARM(n)
+#endif
 # define  PATCHER_SSEREGPARM  PATCHER_ATTRIBUTE(__sseregparm__)
 # define  PATCHER_MSCALL      PATCHER_ATTRIBUTE(__ms_abi__)
 # define  PATCHER_UNIXCALL    PATCHER_ATTRIBUTE(__sysv_abi__)
@@ -649,8 +653,8 @@ template <typename Seq, typename Exclude>  using  SpliceSeq = typename SpliceSeq
 
 template <typename T, T... Seq, T... Exclude>
 struct SpliceSeqImpl<ValueSequence<T, Seq...>, ValueSequence<T, Exclude...>> {
-  template <typename U, U I>  static constexpr bool IsExcluded()
-    { return SeqBinSearch(ValueSequence<T, Exclude...>{}, ConstValue<U, I>{}) != ~0u; }
+  template <typename U, U I>  // Note: We cannot just declare I as type T due to a MSVC 2017 build error.
+  static constexpr bool IsExcluded() { return SeqBinSearch(ValueSequence<T, Exclude...>{}, ConstValue<U, I>{}) != ~0u; }
 
   using Type = FilterFalseSeq<ValueSequence<T, Seq...>, BoolSequence<IsExcluded<T, Seq>()...>>;
 };

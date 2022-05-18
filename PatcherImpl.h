@@ -260,7 +260,6 @@ public:
   std::shared_ptr<void>         Functor() const { return pObj_;      } ///< Gets the functor obj to call with, if any.
   constexpr void*          FunctorState() const { return pState_;    } ///< Gets the functor obj internal state data.
   constexpr const void*         Invoker() const { return pfnInvoke_; } ///< Gets the internal functor invoker function.
-    
 
 private:
   template <typename T>  using StlFunctionForFunctor = std::function<typename FuncTraitsNoThis<T>::Function>;
@@ -272,7 +271,7 @@ private:
   /// Conversion constructor for state-bound functors and capturing lambdas.
   template <typename T, Call C, typename = decltype(&T::operator()), typename Fn = StlFunctionForFunctor<T>>
   FunctionRef(T&& functor, Util::AsCall<C> call, std::false_type)
-    : FunctionRef(Fn(std::forward<T>(functor)), call, [](Fn* pObj) -> void* { return pObj->target<T>(); }) { }
+    : FunctionRef(Fn(std::forward<T>(functor)), call, [](Fn* pObj) -> void* { return pObj->template target<T>(); }) { }
 
   /// Initializes the thunk for calling InvokeFunctor() with @ref pObj_ (state-bound functor or capturing lambda).
   void InitFunctorThunk(void* pFunctorObj, void(*pfnDeleteFunctor)(void*));

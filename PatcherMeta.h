@@ -166,13 +166,8 @@
 # define  PATCHER_THISCALL    PATCHER_ATTRIBUTE(__thiscall__)
 # define  PATCHER_VECTORCALL  PATCHER_ATTRIBUTE(__vectorcall__)
 # define  PATCHER_REGCALL     PATCHER_ATTRIBUTE(__regcall__)
-# if !defined(PATCHER_CLANG)
-#  define PATCHER_REGPARM(n)  PATCHER_ATTR_PARM(__regparm__, n)
-#  define PATCHER_SSEREGPARM  PATCHER_ATTRIBUTE(__sseregparm__)
-# else  // ** TODO Fix Clang build errors with regparm/sseregparm in TokenizeFunctionQualifiers
-#  define PATCHER_REGPARM(n)
-#  define PATCHER_SSEREGPARM
-# endif
+# define  PATCHER_REGPARM(n)  PATCHER_ATTR_PARM(__regparm__, n)
+# define  PATCHER_SSEREGPARM  PATCHER_ATTRIBUTE(__sseregparm__)
 # define  PATCHER_MSCALL      PATCHER_ATTRIBUTE(__ms_abi__)
 # define  PATCHER_UNIXCALL    PATCHER_ATTRIBUTE(__sysv_abi__)
 

@@ -276,11 +276,12 @@ private:
   /// Initializes the thunk for calling InvokeFunctor() with @ref pObj_ (state-bound functor or capturing lambda).
   void InitFunctorThunk(void* pFunctorObj, void(*pfnDeleteFunctor)(void*));
 
-  const void*           pfn_;        ///< Unqualified pointer to the underlying function.
-  DynFuncSig            sig_;        ///< Function call signature information about pfn_, if known at compile time.
+  const void*  pfn_;  ///< Unqualified pointer to the underlying function.
+  DynFuncSig   sig_;  ///< Function call signature information about pfn_, if known at compile time.
+
   std::shared_ptr<void> pObj_;       ///< (State-bound functors) The std::function object bound to pfn_.
   void*                 pState_;     ///< (State-bound functors) Pointer to the state managed by pObj_.
-  const void*           pfnInvoke_;  ///< (State-bound functors) Pointer to the InvokeFunctorTable getter function.
+  const void*           pfnInvoke_;  ///< (State-bound functors) Pointer to the invoker function used by the thunk.
 };
 
 /// Template subclass of FunctionRef that can be implicitly converted to a plain function pointer and used as a callable

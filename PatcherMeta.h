@@ -166,12 +166,13 @@
 # define  PATCHER_THISCALL    PATCHER_ATTRIBUTE(__thiscall__)
 # define  PATCHER_VECTORCALL  PATCHER_ATTRIBUTE(__vectorcall__)
 # define  PATCHER_REGCALL     PATCHER_ATTRIBUTE(__regcall__)
-#if !defined(PATCHER_CLANG)
-# define  PATCHER_REGPARM(n)  PATCHER_ATTR_PARM(__regparm__, n)
-#else  // ** TODO Fix Clang build errors with regparm in TokenizeFunctionQualifiers
-# define  PATCHER_REGPARM(n)
-#endif
-# define  PATCHER_SSEREGPARM  PATCHER_ATTRIBUTE(__sseregparm__)
+# if !defined(PATCHER_CLANG)
+#  define PATCHER_REGPARM(n)  PATCHER_ATTR_PARM(__regparm__, n)
+#  define PATCHER_SSEREGPARM  PATCHER_ATTRIBUTE(__sseregparm__)
+# else  // ** TODO Fix Clang build errors with regparm/sseregparm in TokenizeFunctionQualifiers
+#  define PATCHER_REGPARM(n)
+#  define PATCHER_SSEREGPARM
+# endif
 # define  PATCHER_MSCALL      PATCHER_ATTRIBUTE(__ms_abi__)
 # define  PATCHER_UNIXCALL    PATCHER_ATTRIBUTE(__sysv_abi__)
 
@@ -280,8 +281,8 @@ struct Dummy { explicit constexpr Dummy() { } };  ///< @internal  Empty dummy pa
 /// @internal  Returns true if the specified macro is defined to empty. (Cannot be used in preprocessor #if statements.)
 #define PATCHER_IS_EMPTY(...)       PATCHER_IS_EMPTY_IMPL(__VA_ARGS__)
 #define PATCHER_IS_EMPTY_IMPL(...)  Patcher::Impl::IsMacroEmptyImpl(#__VA_ARGS__)
-constexpr bool IsMacroEmptyImpl()            { return true;  }
-constexpr bool IsMacroEmptyImpl(const char*) { return false; }
+constexpr bool IsMacroEmptyImpl()              { return true;                           }
+constexpr bool IsMacroEmptyImpl(const char* p) { return (p == nullptr) || (*p == '\0'); }
 }
 
 /// Enum specifying a function's calling convention.

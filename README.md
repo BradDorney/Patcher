@@ -2,23 +2,44 @@
 
 Patcher is a C++11 memory patching and code hooking library that aims to be lightweight yet powerful. It is built around [Capstone](https://www.capstone-engine.org/), a LLVM-based disassembler that itself is lightweight enough to run on embedded systems. Patcher can be compared to Microsoft's [Detours](https://github.com/microsoft/detours) library, but Patcher possesses some functionality that Detours lacks.
 
-In addition to installing traditional code hooks over whole functions, Patcher is also capable of redirecting specific function call instructions (`HookCall`), and can even insert instruction-level hooks with read/write access to registers and can change control flow (`LowLevelHook`). Patcher can also modify the module's export address table seen by subsequently-loaded importing modules (`EditExports`). Patcher is also able to overwrite arbitrary bytes, and both POD and non-POD typed data. It can also redirect all fixed references to a global variable/object/function (`ReplaceStaticReferences`), allowing for uses such as extending fixed-size data.
+Patcher's features include:
+* Insert whole function hooks, with the ability to call the original function, similar to Detours's hook capability (`Hook`)
+* Redirect specific function call instructions (`HookCall`)
+* Insert instruction-level hooks, with read/write access to registers and the ability to change control flow (`LowLevelHook`)
+* Edit the module's exports, redirecting them for subsequently-loaded importing modules (`EditExports`)
+* Redirect all fixed references to a global variable/object/function (`ReplaceStaticReferences`)
+* Overwrite and later restore arbitrary bytes, and both POD and non-POD typed data (`Write`, `WriteBytes`, `WriteNop`)
+* Convert capturing lambdas and functors to plain function pointers of any calling convention (`CdeclFunctor`, `StdcallFunctor`, etc.)
 
-The interface has a number of conveniences, including: module base relocation is automatically accounted for in target addresses; hook interfaces can take lambdas to help minimize boilerplate in patch code; and reverting any or all patches is simple and is automated via RAII - convenient when using Patcher in a hot-pluggable mod environment.
+The interface has a number of conveniences, including:
+* Hook interfaces can take lambdas and functors to help minimize boilerplate in patch code.
+* Target addresses can be passed as raw integers or as any pointer type.
+  * Module base relocation is automatically accounted for in target addresses that are passed as integers.
+* Reverting any or all patches is simple and is automated via RAII - convenient when using Patcher in a hot-pluggable mod environment.
 
 Currently, only x86 (32 and 64-bit), MSVC, and Windows are supported; there is experimental support for Clang/GCC/ICC in MS ABI mode. `LowLevelHook` currently only supports standard registers.
 
-Future updates may include full support for other common compilers and ABIs, patching imports, patching \*nix binaries, extended registers in `LowLevelHook`, and possibly ARM.
+Future updates may include Python bindings, full support for other common compilers and ABIs, patching imports, patching \*nix binaries, extended registers in `LowLevelHook`, and possibly ARM.
 
 # Requirements
 
+* Windows XP or newer
 * C++11-capable MSVC, GCC, Clang, ICC, or GCC-compatible compiler
 * [Capstone](https://www.capstone-engine.org/) (diet builds supported)
+
+# Included dependencies
+
 * [Xbyak](https://github.com/herumi/xbyak)
 
 # Usage
 
-Patcher's interface is based around `PatchContext` RAII objects. Typically, you would declare `PatchContexts` as function-level statics or globals, so that cleanup automatically happens on exit. Multiple `PatchContexts` can be used to group together related patches and toggle them separate from each other. Each `PatchContext` is associated with one module, but a module can have many `PatchContexts`. Return status after each operation is tracked within the `PatchContext` object; if an error occurs, all subsequent operations become no-ops until all patches have been reverted.
+Patcher's interface is based around `PatchContext` RAII objects.
+* Typically, you would declare `PatchContexts` as function-level statics or globals, so that cleanup automatically happens on exit.
+* Multiple `PatchContexts` can be used to group together related patches and toggle them separate from each other.
+* Each `PatchContext` is associated with one module, but a module can have as many `PatchContexts` as desired.
+* Return status after each operation is tracked within the `PatchContext` instance.
+  * If an error occurs, all subsequent operations become no-ops until all patches have been reverted.
+  * This means that there is no need to check the status after each operation.
 
 Examples of commonly-used interfaces:
 

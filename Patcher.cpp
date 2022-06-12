@@ -290,12 +290,14 @@ public:
 
   // Xbyak bug workarounds for broken add/sub rsp, and push/pop qword ptr [rsp + N]
   void AddSp(int32 value) {  // add (esp/rsp), value
-    if (value == int8(value)) { Bytes({ IF_X86_64(0x48,) 0x83, 0xC4, uint8(value) });  }
-    else                      { Bytes({ IF_X86_64(0x48,) 0xC3, 0xC4 });  Value(value); }
+    if      (value == 0)           {                                                        }
+    else if (value == int8(value)) { Bytes({ IF_X86_64(0x48,) 0x83, 0xC4, uint8(value) });  }
+    else                           { Bytes({ IF_X86_64(0x48,) 0xC3, 0xC4 });  Value(value); }
   }
   void SubSp(int32 value) {  // sub (esp/rsp), value
-    if (value == int8(value)) { Bytes({ IF_X86_64(0x48,) 0x83, 0xEC, uint8(value) });  }
-    else                      { Bytes({ IF_X86_64(0x48,) 0xC3, 0xEC });  Value(value); }
+    if      (value == 0)           {                                                        }
+    else if (value == int8(value)) { Bytes({ IF_X86_64(0x48,) 0x83, 0xEC, uint8(value) });  }
+    else                           { Bytes({ IF_X86_64(0x48,) 0xC3, 0xEC });  Value(value); }
   }
   void PushFromStack(int32 offset = 0) {  // push (dword/qword) ptr [(esp/rsp) + offset]
     if      (offset == 0)            { Bytes({ 0xFF, 0x34, 0x24 });                 }
@@ -1791,18 +1793,55 @@ Status PatchContext::HookCall(
 }
 
 // =====================================================================================================================
-// Helper function to generate low-level hook trampoline code.
-static size_t CreateLowLevelHookTrampoline(
-  void*               pLowLevelHook,
-  Span<RegisterInfo>  registers,
-  const void*         pAddress,
-  const FunctionRef&  pfnHookCb,
-  ptrdiff_t           moduleRelocDelta,
-  const uint8         (&offsetLut)[MaxOverwriteSize],
-  uint8               overwrittenSize,
-  LowLevelHookInfo    settings)
-{
-  using namespace Xbyak::util;
+// Helper class for assembling a LowLevelHook trampoline.
+class LowLevelHookBuilder : public Assembler {
+public:
+  LowLevelHookBuilder(
+    void* pLowLevelHook, Span<RegisterInfo> registers, const void* pAddress, const FunctionRef& pfnHookCb,
+    ptrdiff_t moduleRelocDelta, const uint8 (&offsetLut)[MaxOverwriteSize], uint8 overwrittenSize,
+    const LowLevelHookInfo& settings)
+    :
+    Assembler(MaxLowLevelHookSize, pLowLevelHook),
+    pLowLevelHook_(pLowLevelHook), registers_(registers), pAddress_(pAddress), pfnHookCb_(&pfnHookCb),
+    moduleRelocDelta_(moduleRelocDelta), pOffsetLut_(&offsetLut[0]), overwrittenSize_(overwrittenSize),
+    settings_(settings), requestedRegMask_(0), requestedByRefMask_(0), spareRegister_(Register::Count),
+    totalStackReserveSize_(0) { Init(); }
+
+  size_t BuildTrampoline();
+
+private:
+  void Init();
+  void SetupStackLayout();
+
+  void AlignAndReserveStackSpace();
+  void PassArgs();
+  void CallUserFunction();
+  void DefaultReturnEpilog();
+  void CustomReturnEpilog();
+
+  void AddRegisterToStack(RegisterInfo reg, bool restore = true) {
+    if (restore && (reg.byReference == false) && (reg.offset == 0) && (RegValueIndex(reg.type) == UINT_MAX)) {
+      RegValueIndex(reg.type) = uint32(stackSlots_.size());
+    }
+    stackSlots_.push_back(reg);
+  };
+
+  bool IsRegisterRequested(Register reg, bool byRef = false) const
+    { return BitFlagTest(byRef ? requestedByRefMask_ : requestedRegMask_, 1u << uint32(reg)); };
+
+  size_t NumPassedViaRegisters() const
+    { return IsX86_32 ? 0 : Min((settings_.argsAsStructPtr ? 1 : registers_.size()), ArrayLen(ArgRegisters)); }
+    
+  void* GetTrampolineToOld() const { return PtrInc(pLowLevelHook_, MaxLowLevelHookSize); }
+
+  bool IsFunctor()   const { return (pfnHookCb_->Functor() != nullptr);     }
+  bool SavingFlags() const { return (settings_.noRestoreFlagsReg == false); }
+  bool UseRedZone()  const { return (settings_.forceUseRedZone || (PATCHER_STACK_RED_ZONE_SIZE >= RegisterSize)); }
+
+  uint32& RegValueIndex(Register reg) { return regValueIndex_[size_t(reg)]; }
+
+  void PushAdjustedStackReg(size_t index, uint32 addend, bool fromOrigin = false);
+
 #if PATCHER_X86_32
   static constexpr Register VolatileRegisters[] = { Register::Ecx, Register::Edx, Register::Eax };
   static constexpr Register ArgRegisters[]      = { Register::Count };
@@ -1820,226 +1859,247 @@ static size_t CreateLowLevelHookTrampoline(
     { Register::Rdi, Register::Rsi, Register::Rdx, Register::Rcx, Register::R8, Register::R9 };
 # endif
 #endif
-  const  auto&              returnRegister      = X86_SELECTOR(eax, rax);
-  const  auto&              stackRegister       = X86_SELECTOR(esp, rsp);
+  static constexpr auto&    returnRegister      = Xbyak::util::X86_SELECTOR(eax, rax);
+  static constexpr auto&    stackRegister       = Xbyak::util::X86_SELECTOR(esp, rsp);
   static constexpr Register ReturnRegister      = X86_SELECTOR(Register::Eax,    Register::Rax);
   static constexpr Register StackRegister       = X86_SELECTOR(Register::Esp,    Register::Rsp);
   static constexpr Register FlagsRegister       = X86_SELECTOR(Register::Eflags, Register::Rflags);
   static constexpr uint8    StackAlignment      = uint8(PATCHER_DEFAULT_STACK_ALIGNMENT);
+  static constexpr uint8    ScratchSpaceSize    = uint8(RegisterSize * 2);
 
-  const auto&  callTraits  = GetCallTraits(Call::AbiStd);
-  const uint32 shadowSpace = (callTraits.flags & CallTraits::ShadowSpace) ? callTraits.numArgSgprs : 0;
+  static constexpr auto&  AbiTraits   = GetCallTraits(Call::AbiStd);
+  static constexpr uint32 ShadowSpace = (AbiTraits.flags & CallTraits::ShadowSpace) ? AbiTraits.numArgSgprs : 0;
+
+  void*               pLowLevelHook_;
+  Span<RegisterInfo>  registers_;
+  const void*         pAddress_;
+  const FunctionRef*  pfnHookCb_;
+  ptrdiff_t           moduleRelocDelta_;
+  const uint8*        pOffsetLut_;
+  uint8               overwrittenSize_;
+  LowLevelHookInfo    settings_;
+
+  uint32    requestedRegMask_;
+  uint32    requestedByRefMask_;
+  Register  spareRegister_;
+  uint8     totalStackReserveSize_;
+
+  std::vector<RegisterInfo> stackSlots_;
+  uint32 regValueIndex_[uint32(Register::Count)];  // Stack slot indexes of register values (UINT_MAX if not present).
+};
+
+// =====================================================================================================================
+size_t LowLevelHookBuilder::BuildTrampoline() {
+  if (settings_.debugBreakpoint) {
+    int3();
+  }
+
+  AlignAndReserveStackSpace();
+  PassArgs();
+  CallUserFunction();
+  DefaultReturnEpilog();
+  CustomReturnEpilog();
+
+  const size_t size = PtrDelta(getCurr(), pLowLevelHook_);
+  assert(size <= MaxLowLevelHookSize);
+
+  // Fill in unused bytes with int 3 padders.
+  if (size < MaxLowLevelHookSize) {
+    Memset(0xCC, (MaxLowLevelHookSize - size));
+  }
+
+  FlushInstructionCache(GetCurrentProcess(), pLowLevelHook_, size);
+  return size;
+}
+
+// =====================================================================================================================
+void LowLevelHookBuilder::Init() {
+  for (auto& index : regValueIndex_) {
+    index = UINT_MAX;
+  }
 
   // Fix user-provided options to ignore redundant flags and sanitize inputs.
-  if (settings.noCustomReturnAddr) {
-    settings.noBaseRelocReturn   = 0;
-    settings.noShortReturnAddr   = 0;
-    settings.noNullReturnDefault = 0;
+  if (settings_.noCustomReturnAddr) {
+    settings_.noBaseRelocReturn   = 0;
+    settings_.noShortReturnAddr   = 0;
+    settings_.noNullReturnDefault = 0;
   }
   if (StackAlignment <= RegisterSize) {
-    settings.noAlignStackPtr = 1;
+    settings_.noAlignStackPtr = 1;
   }
-  settings.reserveStackSize = Align(settings.reserveStackSize, RegisterSize);
+  settings_.reserveStackSize = Align(settings_.reserveStackSize, RegisterSize);
 
   uint32 numByRef = 0;
-  for (const auto& reg : registers) {
+  for (const auto& reg : registers_) {
+    assert(reg.type < Register::Count);
     if (reg.byReference) {
       ++numByRef;
     }
-  }
-
-  std::vector<RegisterInfo> stackSlots;  // Registers, in order they are pushed to the stack in (RTL).
-  stackSlots.reserve(registers.Length() + ArrayLen(VolatileRegisters) + numByRef + 2);  // +2 for SP and flags
-
-  uint32 regValueIndexData[uint32(Register::Count)]; // Stack slot indexes of register values (UINT_MAX if not present).
-  for (uint32 i = 0; i < uint32(Register::Count); regValueIndexData[i++] = UINT_MAX);
-  const Span<uint32> regValueIndex(regValueIndexData);
-
-  auto AddRegisterToStack = [&stackSlots, &regValueIndexData, &regValueIndex](RegisterInfo reg, bool restore = true) {
-    if (restore && (reg.byReference == false) && (reg.offset == 0) && (regValueIndex[reg.type] == UINT_MAX)) {
-      regValueIndexData[uint32(reg.type)] = uint32(stackSlots.size());
-    }
-    stackSlots.push_back(reg);
-  };
-
-  // Registers that the ABI considers volatile between function calls must be pushed to the stack unconditionally.
-  // Find which ones haven't been explicitly requested, and have them be pushed to the stack before everything else.
-  uint32 requestedRegMask   = 0;
-  uint32 requestedByRefMask = 0;
-  if (registers.IsEmpty() == false) {
-    for (uint32 i = 0; i < registers.Length(); ++i) {
-      assert(registers[i].type < Register::Count);
-      if (registers[i].offset == 0) {
-        requestedRegMask   |= (1u << uint32(registers[i].type));
-        requestedByRefMask |= registers[i].byReference ? (1u << uint32(registers[i].type)) : 0;
-      }
+    if (reg.offset == 0) {
+      requestedRegMask_   |= (1u << uint32(reg.type));
+      requestedByRefMask_ |= reg.byReference ? (1u << uint32(reg.type)) : 0;
     }
   }
-  auto IsRegisterRequested = [&requestedRegMask, &requestedByRefMask](Register reg, bool byRef = false)
-    { return BitFlagTest(byRef ? requestedByRefMask : requestedRegMask, 1u << uint32(reg)); };
 
-  if (settings.noAlignStackPtr == false) {
+  stackSlots_.reserve(registers_.size() + ArrayLen(VolatileRegisters) + numByRef + 2);  // +2 for SP and flags
+  SetupStackLayout();
+}
+
+// =====================================================================================================================
+void LowLevelHookBuilder::SetupStackLayout() {
+  if (settings_.noAlignStackPtr == false) {
     // If we are aligning the stack pointer, then the original stack register address is the first thing we must push.
     AddRegisterToStack({ StackRegister });
   }
-  if ((settings.noRestoreFlagsReg == false) &&
-      ((IsRegisterRequested(FlagsRegister, (settings.argsAsStructPtr == false)) == false) ||
-       (settings.noAlignStackPtr == false)))
-  {
+
+  const bool flagsNotRequested = (IsRegisterRequested(FlagsRegister, (settings_.argsAsStructPtr == false)) == false);
+  if ((settings_.noRestoreFlagsReg == false) && (flagsNotRequested || (settings_.noAlignStackPtr == false))) {
     AddRegisterToStack({ FlagsRegister });
   }
+
   for (const Register reg : VolatileRegisters) {
-    if (IsRegisterRequested(reg, (settings.argsAsStructPtr == false)) == false) {
+    if (IsRegisterRequested(reg, (settings_.argsAsStructPtr == false)) == false) {
       AddRegisterToStack({ reg });
     }
   }
 
-  if (registers.IsEmpty() == false) {
+  if (registers_.empty() == false) {
     // Registers by reference must be pushed prior to function args;  references to them are pushed alongside the args.
-    for (auto reg : registers) {
-      if (reg.byReference && (regValueIndex[reg.type] == UINT_MAX)) {
+    for (auto reg : registers_) {
+      if (reg.byReference && (RegValueIndex(reg.type) == UINT_MAX)) {
         reg.byReference = false;
         AddRegisterToStack(reg);
       }
     }
 
     // Push the function args the user-provided callback will actually see now.
-    for (size_t i = registers.Length(); i > 0; AddRegisterToStack(registers[--i], settings.argsAsStructPtr));
+    for (size_t i = registers_.Length(); i > 0; AddRegisterToStack(registers_[--i], settings_.argsAsStructPtr));
 
-    if (settings.argsAsStructPtr) {
+    if (settings_.argsAsStructPtr) {
       // Pushing SP last is equivalent of pushing a pointer to everything before it on the stack.
       AddRegisterToStack({ StackRegister }, false);
     }
   }
 
-  // Write the low-level hook trampoline code.
-  Assembler writer(MaxLowLevelHookSize, pLowLevelHook);
-
-  const bool isFunctor  = (pfnHookCb.Functor() != nullptr);
-  const bool saveFlags  = (settings.noRestoreFlagsReg == false);
-  const bool useRedZone = (settings.forceUseRedZone || (PATCHER_STACK_RED_ZONE_SIZE >= RegisterSize));
-
-  // The x64 calling convention passes the first 4 arguments via registers in MS ABI, or the first 6 in Unix ABI.
-  const size_t numPassedViaRegisters = IsX86_32 ? 0 :
-    Min((settings.argsAsStructPtr ? 1 : registers.Length()), ArrayLen(ArgRegisters));
-
   // Scratch space reserved on the stack first that can be used to store temporary data, which is mainly used to avoid
   // issues where we could otherwise reference invalidated stack memory.
-  static constexpr uint8 ScratchSpaceSize = uint8(RegisterSize * 2);
-  const bool   noNeedScratchSpace = (settings.noAlignStackPtr && settings.noCustomReturnAddr &&
-    ((IsRegisterRequested(StackRegister) == false) || (regValueIndex[StackRegister] == 0)));
-  const uint32 totalReserveSize   = settings.reserveStackSize + (noNeedScratchSpace ? 0 : ScratchSpaceSize);
+  const bool noNeedScratchSpace = (settings_.noAlignStackPtr && settings_.noCustomReturnAddr &&
+    ((IsRegisterRequested(StackRegister) == false) || (RegValueIndex(StackRegister) == 0)));
+  totalStackReserveSize_ = settings_.reserveStackSize + (noNeedScratchSpace ? 0 : ScratchSpaceSize);
+}
 
-  // Prolog begins here.
-  if (settings.debugBreakpoint) {
-    writer.int3();
+// =====================================================================================================================
+void LowLevelHookBuilder::PushAdjustedStackReg(
+  size_t index,
+  uint32 addend,
+  bool   fromOrigin)
+{
+  assert((fromOrigin == false) || (settings_.noAlignStackPtr == false));  // fromOrigin requires aligned stack mode.
+  addend += (fromOrigin == false) ? uint32(RegisterSize * index) : 0;
+
+  if ((addend == 0) && (fromOrigin == false)) {
+    push(stackRegister);
   }
+  else {
+    // Offset to origin SP, i.e. the first thing pushed to the stack in aligned-stack mode.  Since we can't
+    // statically calculate the stack alignment offset in that mode, we need to reference the copy of the old value.
+    const int32 originOffset    = int32(RegisterSize * (index - ((spareRegister_ != Register::Count) ? 1 : -1)));
+    const auto& scratchRegister =
+      (spareRegister_ != Register::Count) ? GetXbyakRegister(spareRegister_) : returnRegister;
 
-  if (settings.noAlignStackPtr == false) {
+    if (spareRegister_ == Register::Count) {
+      // There is no available register, so we need to save and later restore a scratch register.
+      lea(stackRegister, ptr [stackRegister - RegisterSize]);  // Reserve space
+      push(scratchRegister);
+      addend += (fromOrigin == false) ? (RegisterSize * 2) : 0;
+    }
+
+    // If fromOrigin, push (*(sp + originOffset) + addend).  Otherwise, push (sp + addend).
+    if (fromOrigin) {
+      mov(scratchRegister, ptr [stackRegister   + originOffset]);
+      lea(scratchRegister, ptr [scratchRegister + addend]);
+    }
+    else {
+      lea(scratchRegister, ptr [stackRegister + addend]);
+    }
+
+    if (spareRegister_ != Register::Count) {
+      push(scratchRegister);
+    }
+    else {
+      mov(ptr [stackRegister + RegisterSize], scratchRegister);
+      pop(scratchRegister);
+    }
+  }
+}
+
+// =====================================================================================================================
+void LowLevelHookBuilder::AlignAndReserveStackSpace() {
+  if (settings_.noAlignStackPtr == false) {
     // Ensure the stack address upon reaching the upcoming call instruction is aligned to ABI requirements.
     // This always pushes the original stack pointer (and flags register if needed) to the stack after aligning.
     // Generating this code isn't necessary if stack alignment <= register size (i.e. MSVC x86-32).
-    const size_t totalStackSize = RegisterSize * (stackSlots.size()
-                                                - numPassedViaRegisters
-                                                + shadowSpace
-                                                + (isFunctor ? (InvokeFunctorNumArgs + shadowSpace) : 0));
+    const size_t totalStackSize = RegisterSize * (stackSlots_.size()
+                                                - NumPassedViaRegisters()
+                                                + ShadowSpace
+                                                + (IsFunctor() ? (InvokeFunctorNumArgs + ShadowSpace) : 0));
 
     static constexpr uint32 StackAlignMask = uint32(-int32(StackAlignment));
-    const int32 eaxOffset    = -int32(settings.reserveStackSize + (RegisterSize * 1));
-    const int32 flagsOffset  = -int32(settings.reserveStackSize + (RegisterSize * 2));
+    const int32 eaxOffset    = -int32(settings_.reserveStackSize + (RegisterSize * 1));
+    const int32 flagsOffset  = -int32(settings_.reserveStackSize + (RegisterSize * 2));
     const uint8 alignDelta   = uint8(-int8(
       (totalStackSize & (StackAlignment - 1)) - StackAlignment)) & (StackAlignment - 1);
-    const uint8 usedScratch  = uint8(RegisterSize * (saveFlags ? 2 : 1));  // For *AX (+ flags)
+    const uint8 usedScratch  = uint8(RegisterSize * (SavingFlags() ? 2 : 1));  // For *AX (+ flags)
     const uint8 remScratch   =
       uint8((ScratchSpaceSize > usedScratch) ? (ScratchSpaceSize - usedScratch) : 0);
-    const bool  restoreFlags = saveFlags && IsRegisterRequested(FlagsRegister);
+    const bool  restoreFlags = SavingFlags() && IsRegisterRequested(FlagsRegister);
 
-    if (settings.reserveStackSize != 0) {
+    if (settings_.reserveStackSize != 0) {
       // Reserve user-requested stack space.
-      writer.lea(stackRegister, ptr [stackRegister - settings.reserveStackSize]);
+      lea(stackRegister, ptr [stackRegister - settings_.reserveStackSize]);
     }
 
-    writer.push(returnRegister);                   // Save *AX to scratch[0]
-    if (saveFlags)  { writer.pushf(); }            // Save flags to scratch[1]
-    if (remScratch) { writer.SubSp(remScratch); }  // Reserve remaining scratch
-    writer.mov(returnRegister, stackRegister);
-    if (restoreFlags) { writer.PushFromStack(remScratch); }        // Fast copy flags
-    writer.and_(returnRegister, StackAlignMask);                   // Calc aligned SP
-    if (alignDelta)   { writer.sub(returnRegister, alignDelta); }
-    if (restoreFlags) { writer.popf(); }                           // Restore flags
-    writer.xchg(returnRegister, stackRegister);                    // Align SP
-    writer.lea(returnRegister, ptr [returnRegister + totalReserveSize]);
-    writer.push(returnRegister);                                                                // Save old SP
-    if (saveFlags) { writer.push(X86_SELECTOR(dword, qword) [returnRegister + flagsOffset]); }  // Save flags
-    writer.mov(returnRegister, ptr [returnRegister + eaxOffset]);                               // Restore *AX
+    push(returnRegister);                                                                   // Save *AX to scratch[0]
+    if (SavingFlags()) { pushf(); }                                                         // Save flags to scratch[1]
+    if (remScratch)    { SubSp(remScratch); }                                               // Reserve remaining scratch
+    mov(returnRegister, stackRegister);
+    if (restoreFlags)  { PushFromStack(remScratch); }                                       // Fast copy flags
+    and_(returnRegister, StackAlignMask);                                                   // Calc aligned SP
+    if (alignDelta)    { sub(returnRegister, alignDelta); }
+    if (restoreFlags)  { popf(); }                                                          // Restore flags
+    xchg(returnRegister, stackRegister);                                                    // Align SP
+    lea(returnRegister, ptr [returnRegister + totalStackReserveSize_]);
+    push(returnRegister);                                                                   // Save old SP
+    if (SavingFlags()) { push(X86_SELECTOR(dword, qword) [returnRegister + flagsOffset]); } // Save flags
+    mov(returnRegister, ptr [returnRegister + eaxOffset]);                                  // Restore *AX
   }
-  else if (totalReserveSize != 0) {
+  else if (totalStackReserveSize_ != 0) {
     // Reserve user-requested stack space and our scratch space.
-    writer.lea(stackRegister, ptr [stackRegister - totalReserveSize]);
+    lea(stackRegister, ptr [stackRegister - totalStackReserveSize_]);
   }
+}
 
-  // Pushes the current stack pointer, possibly adjusted by some offset, to the top of the stack.  Iff we generated the
-  // stack align code above, passing fromOrigin = true pushes the old pre-aligned stack pointer instead of current SP.
-  Register spareRegister = Register::Count;
-  auto PushAdjustedStackReg = [&](size_t index, uint32 addend, bool fromOrigin = false) {
-    assert((fromOrigin == false) || (settings.noAlignStackPtr == false));  // fromOrigin requires aligned stack mode.
-    addend += (fromOrigin == false) ? uint32(RegisterSize * index) : 0;
-
-    if ((addend == 0) && (fromOrigin == false)) {
-      writer.push(stackRegister);
-    }
-    else {
-      // Offset to origin SP, i.e. the first thing pushed to the stack in aligned-stack mode.  Since we can't
-      // statically calculate the stack alignment offset in that mode, we need to reference the copy of the old value.
-      const int32 originOffset    = int32(RegisterSize * (index - ((spareRegister != Register::Count) ? 1 : -1)));
-      const auto& scratchRegister =
-        (spareRegister != Register::Count) ? GetXbyakRegister(spareRegister) : returnRegister;
-
-      if (spareRegister == Register::Count) {
-        // There is no available register, so we need to save and later restore a scratch register.
-        writer.lea(stackRegister, ptr [stackRegister - RegisterSize]);  // Reserve space
-        writer.push(scratchRegister);
-        addend += (fromOrigin == false) ? (RegisterSize * 2) : 0;
-      }
-
-      // If fromOrigin, push (*(sp + originOffset) + addend).  Otherwise, push (sp + addend).
-      if (fromOrigin) {
-        writer.mov(scratchRegister, ptr [stackRegister   + originOffset]);
-        writer.lea(scratchRegister, ptr [scratchRegister + addend]);
-      }
-      else {
-        writer.lea(scratchRegister, ptr [stackRegister + addend]);
-      }
-
-      if (spareRegister != Register::Count) {
-        writer.push(scratchRegister);
-      }
-      else {
-        writer.mov(ptr [stackRegister + RegisterSize], scratchRegister);
-        writer.pop(scratchRegister);
-      }
-    }
-  };
-
+// =====================================================================================================================
+void LowLevelHookBuilder::PassArgs() {
   // Push required registers to the stack in RTL order, per the cdecl calling convention.
   // In stack align mode, the SP is assumed to have been pushed first already (followed by flags if needed).
-  const size_t numAlreadyPushed    = (settings.noAlignStackPtr ? 0 : (settings.noRestoreFlagsReg ? 1 : 2));
+  const size_t numAlreadyPushed    = (settings_.noAlignStackPtr ? 0 : (settings_.noRestoreFlagsReg ? 1 : 2));
   uint8        numReferencesPushed = 0;
-  for (auto it = stackSlots.begin() + numAlreadyPushed; it != stackSlots.end(); ++it) {
+  for (auto it = stackSlots_.begin() + numAlreadyPushed; it != stackSlots_.end(); ++it) {
     const Register reg   = it->type;
-    const size_t   index = (it - stackSlots.begin());
+    const size_t   index = (it - stackSlots_.begin());
 
     // See if there's an already-stored register we can use.
-    if (spareRegister == Register::Count) {
-      for (auto it = stackSlots.begin(); it != (stackSlots.begin() + index); ++it) {
+    if (spareRegister_ == Register::Count) {
+      for (auto it = stackSlots_.begin(); it != (stackSlots_.begin() + index); ++it) {
         const Register reg = it->type;
 
         if (reg < Register::GprLast) {
           // Ensure this register does not need to be stored by value again later before we try to clobber it.
-          const auto futureUse = std::find_if(it + 1, stackSlots.end(), [reg](const RegisterInfo& x)
+          const auto futureUse = std::find_if(it + 1, stackSlots_.end(), [reg](const RegisterInfo& x)
             { return (x.type == reg) && (x.byReference == false); });
-          if (futureUse == stackSlots.end()) {
-            spareRegister = reg;
+          if (futureUse == stackSlots_.end()) {
+            spareRegister_ = reg;
             break;
           }
         }
@@ -2048,14 +2108,14 @@ static size_t CreateLowLevelHookTrampoline(
 
     if (it->byReference) {
       // Register by reference.
-      PushAdjustedStackReg(index, uint32(RegisterSize * -(int32(regValueIndex[reg]) + 1)), false);
+      PushAdjustedStackReg(index, uint32(RegisterSize * -(int32(RegValueIndex(reg)) + 1)), false);
     }
     else if (reg == StackRegister) {
-      settings.noAlignStackPtr ? PushAdjustedStackReg(index, it->offset + totalReserveSize)
-                               : PushAdjustedStackReg(index, it->offset, true);
+      settings_.noAlignStackPtr ? PushAdjustedStackReg(index, it->offset + totalStackReserveSize_)
+                                : PushAdjustedStackReg(index, it->offset, true);
     }
     else {
-      writer.push(reg);
+      push(reg);
     }
   }
 
@@ -2063,110 +2123,117 @@ static size_t CreateLowLevelHookTrampoline(
   // ** TODO x64 Moving from register to register would be more optimal, but then we'd have to deal with potential
   //         dependencies (if any arg registers e.g. RCX are requested), and reorder the movs or fall back to
   //         xchg/push+pop as needed.
-  for (size_t i = 0; i < numPassedViaRegisters; writer.pop(ArgRegisters[i++]), stackSlots.pop_back());
+  for (size_t i = 0; i < NumPassedViaRegisters(); pop(ArgRegisters[i++]), stackSlots_.pop_back());
+}
 
-  const uintptr    functorObjAddr   = uintptr(pfnHookCb.Functor().get());
-  const void*const pHookFunction    = isFunctor ? pfnHookCb.Invoker() : pfnHookCb.Pfn();
-  void*const       pTrampolineToOld = PtrInc(pLowLevelHook, MaxLowLevelHookSize);
+// =====================================================================================================================
+void LowLevelHookBuilder::CallUserFunction() {
+  const uintptr    functorObjAddr   = uintptr(pfnHookCb_->Functor().get());
+  const void*const pHookFunction    = IsFunctor() ? pfnHookCb_->Invoker() : pfnHookCb_->Pfn();
 
   // Write the call instruction to our hook callback function.
   // If return value == nullptr, or custom return destinations aren't allowed, we can take a simpler path.
-  if (isFunctor) {
+  if (IsFunctor()) {
     // We need to push the extra args to FunctionRef::InvokeFunctor().
     // Allocate uninitialized stack space to fill in for where pPrevReturnAddr and old shadow space would normally go.
-    writer.SubSp(int32(RegisterSize * (InvokeFunctorNumArgs + shadowSpace - 1)));
+    SubSp(int32(RegisterSize * (InvokeFunctorNumArgs + ShadowSpace - 1)));
 
     if (IsX86_32) {
-      writer.push(uint32(functorObjAddr));  // Push pFunctorObj
+      push(uint32(functorObjAddr));  // Push pFunctorObj
     }
     IF_X86_64(else {
-      writer.mov(rax, functorObjAddr);
-      writer.push(rax);                     // Push pFunctorObj
+      mov(rax, functorObjAddr);
+      push(rax);                     // Push pFunctorObj
     })
 
     // Allocate uninitialized stack space for where InvokeFunctor alignment padding would normally go.
-    const size_t numPadders = GetInvokeFunctorNumPadders(pfnHookCb.Signature().stackAlignment);
+    const size_t numPadders = GetInvokeFunctorNumPadders(pfnHookCb_->Signature().stackAlignment);
     if (numPadders > 0) {
-      writer.SubSp(int32(RegisterSize * numPadders));
+      SubSp(int32(RegisterSize * numPadders));
     }
   }
 
   // MS x64 ABI expects 32 bytes of shadow space be allocated on the stack just before the call.
-  if (shadowSpace != 0) {
-    writer.SubSp(int32(RegisterSize * shadowSpace));
+  if (ShadowSpace != 0) {
+    SubSp(int32(RegisterSize * ShadowSpace));
   }
 
-  if (writer.IsFarDisplacement(sizeof(Call32), pHookFunction)) {
-    writer.mov(returnRegister, uintptr(pHookFunction));
-    writer.call(returnRegister);
+  if (IsFarDisplacement(sizeof(Call32), pHookFunction)) {
+    mov(returnRegister, uintptr(pHookFunction));
+    call(returnRegister);
   }
   else {
-    writer.call(pHookFunction);
+    call(pHookFunction);
   }
 
-  // Epilog begins here.
   // Pop the shadow space if MS x64 ABI, and then the InvokeFunctor() args if we passed them.
-  writer.AddSp(int32(RegisterSize * ((isFunctor ? (InvokeFunctorNumArgs + shadowSpace) : 0) + shadowSpace)));
+  AddSp(int32(RegisterSize * ((IsFunctor() ? (InvokeFunctorNumArgs + ShadowSpace) : 0) + ShadowSpace)));
+}
 
-  if ((settings.noCustomReturnAddr || settings.noNullReturnDefault) == false) {
-    writer.test(returnRegister, returnRegister);  // Test if returned address is nullptr
-    writer.jnz(".useCustomReturnDestination");
+// =====================================================================================================================
+void LowLevelHookBuilder::DefaultReturnEpilog() {
+  if ((settings_.noCustomReturnAddr || settings_.noNullReturnDefault) == false) {
+    test(returnRegister, returnRegister);  // Test if returned address is nullptr
+    jnz(".useCustomReturnDestination");
   }
 
-  if (settings.noNullReturnDefault == false) {
+  if (settings_.noNullReturnDefault == false) {
     // Case 1: Return to default address (hook function returned nullptr, or custom returns are disabled)
     const bool lateRestoreStack = (IsRegisterRequested(StackRegister) &&
-      (regValueIndex[StackRegister] != 0) && (regValueIndex[StackRegister] != UINT_MAX));
+      (RegValueIndex(StackRegister) != 0) && (RegValueIndex(StackRegister) != UINT_MAX));
 
     // Restore register values from the stack.  We must take care not to clobber flags at this point.
-    for (auto it = stackSlots.rbegin(); it != stackSlots.rend(); ++it) {
+    for (auto it = stackSlots_.rbegin(); it != stackSlots_.rend(); ++it) {
       const Register reg   = it->type;
-      const size_t   index = stackSlots.size() - (it - stackSlots.rbegin()) - 1;
-      if ((index != regValueIndex[reg]) || it->byReference) {
+      const size_t   index = stackSlots_.size() - (it - stackSlots_.rbegin()) - 1;
+      if ((index != RegValueIndex(reg)) || it->byReference) {
         // Skip this arg.
-        writer.PopNil();
+        PopNil();
       }
       else if ((reg == StackRegister) && lateRestoreStack) {
         // If this is the stack register, pop this arg to the near end of the scratch space.
-        writer.PopToStack(int32(RegisterSize * index));
+        PopToStack(int32(RegisterSize * index));
       }
       else {
-        writer.pop(reg);
+        pop(reg);
       }
     }
 
     if (lateRestoreStack) {
-      writer.pop(stackRegister);                       // Restore SP
+      pop(stackRegister);                             // Restore SP
     }
-    else if (regValueIndex[StackRegister] == UINT_MAX) {
-      writer.PopNil(totalReserveSize / RegisterSize);  // Pop scratch space and user reserve
+    else if (RegValueIndex(StackRegister) == UINT_MAX) {
+      PopNil(totalStackReserveSize_ / RegisterSize);  // Pop scratch space and user reserve
     }
 
     // If there's a user-specified default return address, relocate and use that;  otherwise, return to original code.
-    void* pDefaultReturnAddr = (settings.pDefaultReturnAddr == nullptr) ? pTrampolineToOld :
-      PtrInc(settings.pDefaultReturnAddr, (settings.pDefaultReturnAddr.ShouldRelocate() ? moduleRelocDelta : 0));
+    void* pDefaultReturnAddr = (settings_.pDefaultReturnAddr == nullptr) ? GetTrampolineToOld() :
+      PtrInc(settings_.pDefaultReturnAddr, (settings_.pDefaultReturnAddr.ShouldRelocate() ? moduleRelocDelta_ : 0));
 
-    if ((pDefaultReturnAddr >= pAddress) && (pDefaultReturnAddr < PtrInc(pAddress, overwrittenSize))) {
-      pDefaultReturnAddr = PtrInc(pTrampolineToOld, offsetLut[PtrDelta(pDefaultReturnAddr, pAddress)]);
+    if ((pDefaultReturnAddr >= pAddress_) && (pDefaultReturnAddr < PtrInc(pAddress_, overwrittenSize_))) {
+      pDefaultReturnAddr = PtrInc(GetTrampolineToOld(), pOffsetLut_[PtrDelta(pDefaultReturnAddr, pAddress_)]);
     }
 
     // Jump to the default return address.
-    writer.IsFarDisplacement(sizeof(Jmp32), pDefaultReturnAddr) ?
-      writer.JmpAbs(pDefaultReturnAddr) : writer.jmp(pDefaultReturnAddr);
+    IsFarDisplacement(sizeof(Jmp32), pDefaultReturnAddr) ? JmpAbs(pDefaultReturnAddr) : jmp(pDefaultReturnAddr);
   }
+}
 
-  if (settings.noCustomReturnAddr == false) {
+// =====================================================================================================================
+// ** TODO Try to reuse pop stack code with the default return epilog path
+void LowLevelHookBuilder::CustomReturnEpilog() {
+  if (settings_.noCustomReturnAddr == false) {
     // Case 2: Return to custom destination
-    writer.L(".useCustomReturnDestination");
+    L(".useCustomReturnDestination");
 
-    if ((settings.noBaseRelocReturn == false) && (moduleRelocDelta != 0)) {
+    if ((settings_.noBaseRelocReturn == false) && (moduleRelocDelta_ != 0)) {
       // Adjust return address for module base relocation.
       if (IsX86_32) {
-        writer.add(eax, int32(moduleRelocDelta));
+        add(eax, int32(moduleRelocDelta_));
       }
       IF_X86_64(else {
-        writer.mov(rcx, moduleRelocDelta);
-        writer.add(rax, rcx);
+        mov(rcx, moduleRelocDelta_);
+        add(rax, rcx);
       })
     }
 
@@ -2176,117 +2243,107 @@ static size_t CreateLowLevelHookTrampoline(
     // We will defer initializing the offset LUT lookup operand until we know where the LUT will be placed.
     X86_SELECTOR(uintptr* pRelocateLutOperand = nullptr, Xbyak::Label labelOffsetLut);
 
-    if (settings.noShortReturnAddr == false) {
+    if (settings_.noShortReturnAddr == false) {
       if (IsX86_32) {
-        writer.cmp(eax, uint32(PtrInc<uintptr>(pAddress, overwrittenSize)));  // Test after overwrite
-        writer.jae(".skipRelocIntoTrampoline");
-        writer.cmp(eax, uint32(uintptr(pAddress)));                           // Test before overwrite
-        writer.jb(".skipRelocIntoTrampoline");
-        writer.sub(eax, uint32(uintptr(pAddress)));                           // Subtract old address
-        writer.mov(al, byte [eax + 0xBABEFACE]);                              // Offset table lookup
-        IF_X86_32(pRelocateLutOperand = &writer.GetNext<uint32*>()[-1]);
-        writer.add(eax, uint32(uintptr(pTrampolineToOld)));                   // Add trampoline to old
+        cmp(eax, uint32(PtrInc<uintptr>(pAddress_, overwrittenSize_)));  // Test after overwrite
+        jae(".skipRelocIntoTrampoline");
+        cmp(eax, uint32(uintptr(pAddress_)));                            // Test before overwrite
+        jb(".skipRelocIntoTrampoline");
+        sub(eax, uint32(uintptr(pAddress_)));                            // Subtract old address
+        mov(al, byte [eax + 0xBABEFACE]);                                // Offset table lookup
+        IF_X86_32(pRelocateLutOperand = &GetNext<uint32*>()[-1]);
+        add(eax, uint32(uintptr(GetTrampolineToOld())));                 // Add trampoline to old
       }
       IF_X86_64(else {
-        writer.mov(rcx, PtrInc<uintptr>(pAddress, overwrittenSize));          // Test after overwrite
-        writer.cmp(rax, rcx);
-        writer.jae(".skipRelocIntoTrampoline");
-        writer.mov(rcx, uintptr(pAddress));                                   // Test before overwrite
-        writer.cmp(rax, rcx);
-        writer.jb(".skipRelocIntoTrampoline");
-        writer.sub(rax, rcx);                                                 // Subtract old address
-        writer.mov(rcx, labelOffsetLut);                                      // Offset table lookup
-        writer.mov(al, byte [rax + rcx]);
-        writer.mov(rcx, uintptr(pTrampolineToOld));                           // Add trampoline to old
-        writer.add(rax, rcx);
+        mov(rcx, PtrInc<uintptr>(pAddress_, overwrittenSize_));          // Test after overwrite
+        cmp(rax, rcx);
+        jae(".skipRelocIntoTrampoline");
+        mov(rcx, uintptr(pAddress_));                                    // Test before overwrite
+        cmp(rax, rcx);
+        jb(".skipRelocIntoTrampoline");
+        sub(rax, rcx);                                                   // Subtract old address
+        mov(rcx, labelOffsetLut);                                        // Offset table lookup
+        mov(al, byte [rax + rcx]);
+        mov(rcx, uintptr(GetTrampolineToOld()));                         // Add trampoline to old
+        add(rax, rcx);
       })
-      writer.L(".skipRelocIntoTrampoline");
+      L(".skipRelocIntoTrampoline");
     }
 
-    const bool restoreStackPtr = (regValueIndex[StackRegister] != UINT_MAX) &&
-      (IsRegisterRequested(StackRegister, true) || (settings.noAlignStackPtr == false));
+    const bool restoreStackPtr = (RegValueIndex(StackRegister) != UINT_MAX) &&
+      (IsRegisterRequested(StackRegister, true) || (settings_.noAlignStackPtr == false));
     if (restoreStackPtr) {
       // If we're restoring the stack pointer: save the return address to either scratch[0], or if it's been changed, to
       // just below what the SP will be; and save the new SP (with space reserved for return address) to the near end of
       // scratch, or in-place if it's the last arg to pop.
       const auto& scratchRegister = X86_SELECTOR(ecx, rcx);
-      const int32 stackValOffset  = int32(RegisterSize * (stackSlots.size() - regValueIndex[StackRegister] - 1));
+      const int32 stackValOffset  = int32(RegisterSize * (stackSlots_.size() - RegValueIndex(StackRegister) - 1));
       const int32 scratchOffset   =
-        (regValueIndex[StackRegister] == 0) ? stackValOffset : int32(RegisterSize * stackSlots.size());
+        (RegValueIndex(StackRegister) == 0) ? stackValOffset : int32(RegisterSize * stackSlots_.size());
 
-      writer.mov(scratchRegister, ptr [stackRegister + stackValOffset]);     // Load SP
-      if (useRedZone) {
-        writer.mov(ptr [scratchRegister - RegisterSize], returnRegister);    // Save return address
-        if (regValueIndex[StackRegister] != 0) {
-          writer.mov(ptr [stackRegister + scratchOffset], scratchRegister);  // Save SP
+      mov(scratchRegister, ptr [stackRegister + stackValOffset]);     // Load SP
+      if (UseRedZone()) {
+        mov(ptr [scratchRegister - RegisterSize], returnRegister);    // Save return address
+        if (RegValueIndex(StackRegister) != 0) {
+          mov(ptr [stackRegister + scratchOffset], scratchRegister);  // Save SP
         }
       }
       else {
-        writer.lea(scratchRegister, ptr [scratchRegister - RegisterSize]);  // Reserve space
-        writer.mov(ptr [scratchRegister], returnRegister);                  // Save return address
-        writer.mov(ptr [stackRegister + scratchOffset], scratchRegister);   // Save SP
+        lea(scratchRegister, ptr [scratchRegister - RegisterSize]);  // Reserve space
+        mov(ptr [scratchRegister], returnRegister);                  // Save return address
+        mov(ptr [stackRegister + scratchOffset], scratchRegister);   // Save SP
       }
     }
     else {
       // Save the return address to scratch[0].
-      const int32 scratchOffset = int32((RegisterSize * (stackSlots.size() - 1)) + totalReserveSize);
-      writer.mov(ptr [stackRegister + scratchOffset], returnRegister);
+      const int32 scratchOffset = int32((RegisterSize * (stackSlots_.size() - 1)) + totalStackReserveSize_);
+      mov(ptr [stackRegister + scratchOffset], returnRegister);
     }
 
     // Restore register values from the stack.  We must take care not to clobber flags at this point.
-    for (auto it = stackSlots.rbegin(); it != stackSlots.rend(); ++it) {
+    for (auto it = stackSlots_.rbegin(); it != stackSlots_.rend(); ++it) {
       const Register reg   = it->type;
-      const size_t   index = stackSlots.size() - (it - stackSlots.rbegin()) - 1;
-      if ((index != regValueIndex[reg]) || it->byReference) {
+      const size_t   index = stackSlots_.size() - (it - stackSlots_.rbegin()) - 1;
+      if ((index != RegValueIndex(reg)) || it->byReference) {
         // Skip arg references; we only care about the actual values they point to further up the stack.
-        writer.PopNil();
+        PopNil();
       }
       else if (reg == StackRegister) {
-        // Stack register is special cased.
-        if ((regValueIndex[StackRegister] != 0) || (index != 0)) {
-          writer.PopNil();
+        // Stack register is special cased and must be handled at the end.
+        if ((RegValueIndex(StackRegister) != 0) || (index != 0)) {
+          PopNil();
         }
       }
       else {
-        writer.pop(reg);
+        pop(reg);
       }
     }
 
     // Finish cleanup and jump to the address requested by the callback.
-    if (useRedZone && IsMsAbi) {
+    if (UseRedZone() && IsMsAbi) {
       // The first instruction at the start of the cache line is more likely to be executed just before a context
       // switch.  By ensuring the jmp instruction is at the start of the cache line, we may reduce (but not eliminate!)
       // the chance that Windows preempts us in between the pop and the jmp.
-      const size_t nextInsnSize = restoreStackPtr ? 1 : ((IsX86_64 ? 4 : 3) + ((totalReserveSize > INT8_MAX) ? 4 : 1));
-      const void*const pJmp     = PtrInc(writer.getCurr(), nextInsnSize);
-      writer.nop(PtrDelta(PtrAlign(pJmp, CodeAlignment), pJmp));
+      const size_t nextInsnSize =
+        restoreStackPtr ? 1 : ((IsX86_64 ? 4 : 3) + ((totalStackReserveSize_ > INT8_MAX) ? 4 : 1));
+      const void*const pJmp     = PtrInc(getCurr(), nextInsnSize);
+      nop(PtrDelta(PtrAlign(pJmp, CodeAlignment), pJmp));
     }
 
     restoreStackPtr ?  // Restore SP, or pop scratch
-      writer.pop(stackRegister) : writer.PopNil((totalReserveSize / RegisterSize) - (useRedZone ? 0 : 1));
+      pop(stackRegister) : PopNil((totalStackReserveSize_ / RegisterSize) - (UseRedZone() ? 0 : 1));
 
     // If the stack red zone is safe to use, then we can avoid a RSB branch misprediction by using jmp instead of retn.
-    useRedZone ? writer.jmp(ptr [stackRegister - RegisterSize]) : writer.ret();  // Jump or return
+    UseRedZone() ? jmp(ptr [stackRegister - RegisterSize]) : ret();  // Jump or return
 
-    if (settings.noShortReturnAddr == false) {
-      writer.align(4, false);
+    if (settings_.noShortReturnAddr == false) {
+      align(4, false);
       // Initialize the offset LUT lookup instruction we had deferred, now that we know where we're copying the LUT to.
-      X86_SELECTOR(*pRelocateLutOperand = uintptr(writer.getCurr()), writer.L(labelOffsetLut));
+      X86_SELECTOR(*pRelocateLutOperand = uintptr(getCurr()), L(labelOffsetLut));
       // Copy the offset lookup table.
-      writer.Memcpy(&offsetLut[0], overwrittenSize);
+      Memcpy(pOffsetLut_, overwrittenSize_);
     }
   }
-
-  const size_t size = PtrDelta(writer.getCurr(), pLowLevelHook);
-  assert(size <= MaxLowLevelHookSize);
-
-  // Fill in unused bytes with int 3 padders.
-  if (size < MaxLowLevelHookSize) {
-    writer.Memset(0xCC, (MaxLowLevelHookSize - size));
-  }
-
-  FlushInstructionCache(GetCurrentProcess(), pLowLevelHook, size);
-  return size;
 }
 
 // =====================================================================================================================
@@ -2355,8 +2412,9 @@ Status PatchContext::LowLevelHook(
   if (status_ == Status::Ok) {
     if (pTrampoline != nullptr) {
       // Initialize low-level hook code.
-      const size_t usedSize = CreateLowLevelHookTrampoline(
+      LowLevelHookBuilder builder(
         pTrampoline, registers, pAddress, pfnHookCb, moduleRelocDelta_, offsetLut, overwrittenSize, info);
+      const size_t usedSize = builder.BuildTrampoline();
 
       PATCHER_PACK_STRUCT
       struct {

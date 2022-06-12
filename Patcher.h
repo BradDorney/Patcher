@@ -273,6 +273,9 @@ public:
   /// Returns true if the given address had previously been touched or patched.
   bool HasPatched(TargetPtr pAddress) const { return historyAt_.count(MaybeFixTargetPtr(pAddress)) != 0; }
 
+protected:
+  void SetStatus(PatcherStatus status) { status_ = status; }  ///< Sets the context's status code.
+
 private:
   /// Initializes associated module information.
   void InitModule();

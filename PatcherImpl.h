@@ -182,7 +182,7 @@ public:
   /// Conversion constructor for pointers-to-member-functions.  Never relocated.
   ///
   /// @param pThis  (Optional) Used to help look up the function address.
-  /// 
+  ///
   /// @note Consider using the PATCHER_MFN_PTR() macro, which is more robust than PmfCast() backing this constructor.
   template <typename Fn, typename T, typename = EnableIf<std::is_function<Fn>::value>>
   TargetPtr(Fn T::*pmf, const T* pThis = nullptr) : pAddress_((void*)(Util::PmfCast(pmf, pThis))), relocate_() { }
@@ -221,7 +221,7 @@ public:
   /// Conversion constructor for pointers-to-member-functions.
   ///
   /// @param pThis  (Optional) Used to help look up the function address, without binding it to this FunctionRef.
-  /// 
+  ///
   /// @note Consider using the PATCHER_MFN_PTR() macro, which is more robust than PmfCast() backing this constructor.
   template <typename Fn, typename T, typename = EnableIf<std::is_function<Fn>::value>>
   FunctionRef(Fn T::*pmf, const T* pThis = nullptr)
@@ -229,9 +229,9 @@ public:
 
   /// Conversion constructor for callable objects.  This works with lambdas, (non-overloaded) functors, etc.
   /// Capturing lambdas or non-empty functor objects will become bound to this FunctionRef via std::function.
-  /// 
+  ///
   /// @param call  (Optional) Calling convention to use (specify e.g. AsCdecl, AsStdcall, AsThiscall, etc.)
-  /// 
+  ///
   /// @note To hook T::operator() itself, consider constructing a FunctionRef from &T::operator().
   template <
     typename T, Call C = Call::AbiStd, typename E = typename std::is_empty<T>::type, typename = decltype(&T::operator())>
@@ -239,10 +239,10 @@ public:
 
   /// Conversion constructor for std::function.  Used for any non-empty callable objects, such as capturing lambdas.
   /// The std::function object becomes bound to this FunctionRef.
-  /// 
+  ///
   /// @param call          (Optional) Calling convention to use (specify e.g. AsCdecl, AsStdcall, AsThiscall, etc.)
   /// @param pfnGetTarget  (Optional) Function of the form [](Fn* pObj) -> void* { return pObj->target<T>(); }
-  /// 
+  ///
   /// @note std::bind objects must be explicitly wrapped with std::function in order to create a FunctionRef from one.
   template <typename R, typename... A, typename Fn = std::function<R(A...)>, Call C = Call::AbiStd>
   FunctionRef(

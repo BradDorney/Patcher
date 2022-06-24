@@ -1807,17 +1807,17 @@ public:
     settings_(settings), requestedRegMask_(0), requestedByRefMask_(0), spareRegister_(Register::Count),
     totalStackReserveSize_(0) { Init(); }
 
-  size_t BuildTrampoline();
+  size_t BuildTrampoline();  // Generate the LowLevelHook trampoline code.
 
 private:
   void Init();
-  void SetupStackLayout();
+  void SetupStackLayout();  // Determine the order in which registers and other args are pushed to the stack.
 
-  void AlignAndReserveStackSpace();
-  void PassArgs();
-  void CallUserFunction();
-  void DefaultReturnEpilog();
-  void CustomReturnEpilog();
+  void AlignAndReserveStackSpace();  // Reserve stack space for scratch space, alignment padding, and user reservation.
+  void PassArgs();                   // Put register/stack values on the stack.
+  void CallUserFunction();           // Call the user function with the args that we passed.
+  void DefaultReturnEpilog();        // Return to default return address (returned void/0/nullptr).
+  void CustomReturnEpilog();         // Return to custom return address.
 
   void AddRegisterToStack(RegisterInfo reg, bool restore = true) {
     if (restore && (reg.byReference == false) && (reg.offset == 0) && (RegValueIndex(reg.type) == UINT_MAX)) {
@@ -1826,22 +1826,26 @@ private:
     stackSlots_.push_back(reg);
   };
 
-  bool IsRegisterRequested(Register reg, bool byRef = false) const
+  bool IsRegisterRequested(Register reg, bool byRef = false) const  // Returns true if the register type was requested.
     { return BitFlagTest(byRef ? requestedByRefMask_ : requestedRegMask_, 1u << uint32(reg)); };
 
-  size_t NumPassedViaRegisters() const
+  size_t NumPassedViaRegisters() const  // Returns the number of registers used for passing args.
     { return IsX86_32 ? 0 : Min((settings_.argsAsStructPtr ? 1 : registers_.size()), ArrayLen(ArgRegisters)); }
-    
+
+  // Gets the address of the trampoline to the original code.
   void* GetTrampolineToOld() const { return PtrInc(pLowLevelHook_, MaxLowLevelHookSize); }
 
   bool IsFunctor()   const { return (pfnHookCb_->Functor() != nullptr);     }
   bool SavingFlags() const { return (settings_.noRestoreFlagsReg == false); }
   bool UseRedZone()  const { return (settings_.forceUseRedZone || (PATCHER_STACK_RED_ZONE_SIZE >= RegisterSize)); }
 
+  // Gets the stack slot index holding the register type's value.
   uint32& RegValueIndex(Register reg) { return regValueIndex_[size_t(reg)]; }
 
+  // Push the stack pointer (possibly offset).  "fromOrigin" is only valid when (settings_.noAlignStackPtr == 0).
   void PushAdjustedStackReg(size_t index, uint32 addend, bool fromOrigin = false);
 
+  // ABI-specific helper constants.
 #if PATCHER_X86_32
   static constexpr Register VolatileRegisters[] = { Register::Ecx, Register::Edx, Register::Eax };
   static constexpr Register ArgRegisters[]      = { Register::Count };
@@ -1870,21 +1874,21 @@ private:
   static constexpr auto&  AbiTraits   = GetCallTraits(Call::AbiStd);
   static constexpr uint32 ShadowSpace = (AbiTraits.flags & CallTraits::ShadowSpace) ? AbiTraits.numArgSgprs : 0;
 
-  void*               pLowLevelHook_;
-  Span<RegisterInfo>  registers_;
-  const void*         pAddress_;
-  const FunctionRef*  pfnHookCb_;
+  void*               pLowLevelHook_;     // Placement address of LowLevelHook code.
+  Span<RegisterInfo>  registers_;         // User-requested register args.
+  const void*         pAddress_;          // Address where the hook is installed.
+  const FunctionRef*  pfnHookCb_;         // User hook callback.
   ptrdiff_t           moduleRelocDelta_;
-  const uint8*        pOffsetLut_;
-  uint8               overwrittenSize_;
+  const uint8*        pOffsetLut_;        // Maps overwritten instruction offsets to copied trampoline instructions.
+  uint8               overwrittenSize_;   // Size of instructions overwritten by the hook.
   LowLevelHookInfo    settings_;
 
-  uint32    requestedRegMask_;
-  uint32    requestedByRefMask_;
-  Register  spareRegister_;
-  uint8     totalStackReserveSize_;
+  uint32    requestedRegMask_;       // Bitmask of Register types requested by the user.
+  uint32    requestedByRefMask_;     // Bitmask of Register types requested by the user by reference.
+  Register  spareRegister_;          // Spare register that is safe to be clobbered, or Register::Count if no spare.
+  uint8     totalStackReserveSize_;  // Size of internal scratch space + user-requested stack reservation.
 
-  std::vector<RegisterInfo> stackSlots_;
+  std::vector<RegisterInfo> stackSlots_;           // Specifies the layout of what the trampoline puts on the stack.
   uint32 regValueIndex_[uint32(Register::Count)];  // Stack slot indexes of register values (UINT_MAX if not present).
 };
 
@@ -1941,7 +1945,7 @@ void LowLevelHookBuilder::Init() {
     }
   }
 
-  stackSlots_.reserve(registers_.size() + ArrayLen(VolatileRegisters) + numByRef + 2);  // +2 for SP and flags
+  stackSlots_.reserve(registers_.size() + ArrayLen(VolatileRegisters) + numByRef + 3);  // +3 for SP (x2) and flags
   SetupStackLayout();
 }
 
@@ -1973,7 +1977,7 @@ void LowLevelHookBuilder::SetupStackLayout() {
     }
 
     // Push the function args the user-provided callback will actually see now.
-    for (size_t i = registers_.Length(); i > 0; AddRegisterToStack(registers_[--i], settings_.argsAsStructPtr));
+    for (size_t i = registers_.size(); i > 0; AddRegisterToStack(registers_[--i], settings_.argsAsStructPtr));
 
     if (settings_.argsAsStructPtr) {
       // Pushing SP last is equivalent of pushing a pointer to everything before it on the stack.
@@ -1990,9 +1994,9 @@ void LowLevelHookBuilder::SetupStackLayout() {
 
 // =====================================================================================================================
 void LowLevelHookBuilder::PushAdjustedStackReg(
-  size_t index,
-  uint32 addend,
-  bool   fromOrigin)
+  size_t  index,
+  uint32  addend,
+  bool    fromOrigin)
 {
   assert((fromOrigin == false) || (settings_.noAlignStackPtr == false));  // fromOrigin requires aligned stack mode.
   addend += (fromOrigin == false) ? uint32(RegisterSize * index) : 0;
@@ -2128,11 +2132,10 @@ void LowLevelHookBuilder::PassArgs() {
 
 // =====================================================================================================================
 void LowLevelHookBuilder::CallUserFunction() {
+  // Write the call instruction to our hook callback function.
   const uintptr    functorObjAddr   = uintptr(pfnHookCb_->Functor().get());
   const void*const pHookFunction    = IsFunctor() ? pfnHookCb_->Invoker() : pfnHookCb_->Pfn();
 
-  // Write the call instruction to our hook callback function.
-  // If return value == nullptr, or custom return destinations aren't allowed, we can take a simpler path.
   if (IsFunctor()) {
     // We need to push the extra args to FunctionRef::InvokeFunctor().
     // Allocate uninitialized stack space to fill in for where pPrevReturnAddr and old shadow space would normally go.

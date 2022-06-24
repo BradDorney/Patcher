@@ -317,6 +317,7 @@ enum PropertyFlags : uint32 {
   ClassTypesByRef    = (1u << 5),  ///< Non-trivial class/struct/union types are always passed by reference.
   PodTypeGprSplit    = (1u << 6),  ///< Aligned, uniquely-representable, POD types can span multiple registers.
   AnyTypeGprSplit    = (1u << 7),  ///< Any type can span multiple registers.
+  FixedLayout        = (1u << 8),  ///< Args cannot be reordered for placement into registers.
 
   IfMsAbi   = IsMsAbi   ? ~0u : 0u,  ///< @internal  Mask for setting properties to only apply when in MS ABI mode.
   IfUnixAbi = IsUnixAbi ? ~0u : 0u   ///< @internal  Mask for setting properties to only apply when in Unix ABI mode.
@@ -338,23 +339,23 @@ constexpr struct Traits {
   uint32  numReturnSgprs;  ///< Max number of standard general-purpose registers used for passing return value.
   uint32  flags;           ///< Calling convention properties.
 } For[size_t(Call::Count)] = {
-  {                                                                                                         },
+  {                                                                                                                 },
 #if PATCHER_X86_32
-  { Exists(Call::Cdecl),       0,                    2,  CalleePopReturnPtr & IfUnixAbi                     },
-  { Exists(Call::Stdcall),     0,                    2,  CalleeCleanup                                      },
-  { Exists(Call::Fastcall),    2,                    2,  CalleeCleanup                                      },
-  { Exists(Call::Thiscall),    1,                    2,  CalleeCleanup                                      },
-  { Exists(Call::Vectorcall),  2,                    2,  CalleeCleanup                                      },
-  { Exists(Call::Regcall),     (IsMsAbi ? 4 : 5),    2,  PodTypesInGprs | PodTypeGprSplit | ClassTypesByRef },
-  { Exists(Call::Regparm1),    1,                    2,  PodTypesInGprs | PodTypeGprSplit                   },
-  { Exists(Call::Regparm2),    2,                    2,  PodTypesInGprs | PodTypeGprSplit                   },
-  { Exists(Call::Regparm),     3,                    2,  PodTypesInGprs | PodTypeGprSplit                   },
-  { Exists(Call::SseRegparm),  0,                    2,  CalleePopReturnPtr & IfUnixAbi                     }
+  { Exists(Call::Cdecl),       0,                    2,  CalleePopReturnPtr & IfUnixAbi                             },
+  { Exists(Call::Stdcall),     0,                    2,  CalleeCleanup                                              },
+  { Exists(Call::Fastcall),    2,                    2,  CalleeCleanup /* Return ptr on stack if not member func */ },
+  { Exists(Call::Thiscall),    1,                    2,  CalleeCleanup                                              },
+  { Exists(Call::Vectorcall),  2,                    2,  CalleeCleanup                                              },
+  { Exists(Call::Regcall),     (IsMsAbi ? 4 : 5),    2,  PodTypesInGprs | PodTypeGprSplit | ClassTypesByRef         },
+  { Exists(Call::Regparm1),    1,                    2,  PodTypesInGprs | PodTypeGprSplit                           },
+  { Exists(Call::Regparm2),    2,                    2,  PodTypesInGprs | PodTypeGprSplit                           },
+  { Exists(Call::Regparm),     3,                    2,  PodTypesInGprs | PodTypeGprSplit                           },
+  { Exists(Call::SseRegparm),  0,                    2,  CalleePopReturnPtr & IfUnixAbi                             }
 #elif PATCHER_X86_64
-  { Exists(Call::Mscall),      4,                    1,  ShadowSpace | AnyTypesInGprs | BigTypesByRef       },
-  { Exists(Call::Vectorcall),  4,                    1,  ShadowSpace | AnyTypesInGprs | BigTypesByRef       },
-  { Exists(Call::Unixcall),    6,                    2,  PodTypesInGprs                                     },
-  { Exists(Call::Regcall),     (IsMsAbi ? 11 : 12),  2,  PodTypesInGprs | PodTypeGprSplit | ClassTypesByRef }
+  { Exists(Call::Mscall),      4,                    1,  ShadowSpace | FixedLayout | AnyTypesInGprs | BigTypesByRef },
+  { Exists(Call::Vectorcall),  4,                    1,  ShadowSpace | FixedLayout | AnyTypesInGprs | BigTypesByRef },
+  { Exists(Call::Unixcall),    6,                    2,  PodTypesInGprs                                             },
+  { Exists(Call::Regcall),     (IsMsAbi ? 11 : 12),  2,  PodTypesInGprs | PodTypeGprSplit | ClassTypesByRef         }
 #endif
 };
 }  // CallTraits
@@ -1064,11 +1065,12 @@ struct InvokeFunctorSgprMapper {
   static constexpr size_t Available = ((Flags & CallTraits::AnyTypeGprSplit) ||
     ((IsBasicType || IsSplittablePod) && (Flags & CallTraits::PodTypeGprSplit))) ? Remaining : 1;
 
-  static constexpr bool PlaceInSgpr = (NumNeeded <= Available) && (IsVectorArg<Arg>() == false) && (IsBasicType ||
+  static constexpr bool   PlaceInSgpr = (NumNeeded <= Available) && (IsVectorArg<Arg>() == false) && (IsBasicType ||
     (Flags & CallTraits::AnyTypesInGprs) || (IsUniquePod<Arg>() && (Flags & CallTraits::PodTypesInGprs)));
+  static constexpr size_t NowRemain   =
+    (Remaining == 0) ? 0 : (Remaining - (PlaceInSgpr ? NumNeeded : ((flags & CallTraits::FixedLayout) ? 1 : 0)));
 
-  using Type = ConcatSeq<BoolSequence<PlaceInSgpr>,
-                         typename InvokeFunctorSgprMapper<C, Remaining - (PlaceInSgpr ? NumNeeded : 0), Args...>::Type>;
+  using Type = ConcatSeq<BoolSequence<PlaceInSgpr>,  typename InvokeFunctorSgprMapper<C, NowRemain, Args...>::Type>;
 };
 
 template <Call C, size_t Remaining> struct InvokeFunctorSgprMapper<C, Remaining, void> { using Type = BoolSequence<>; };

@@ -459,7 +459,6 @@ template <typename T>  struct UnderlyingTypeImpl<T, true> { using Type = typenam
 template <typename T>  using UnderlyingType = typename UnderlyingTypeImpl<T>::Type;
 ///@}
 
-
 /// @internal  Returns the larger of a or b.
 template <typename T1, typename T2, typename U = CommonType<T1, T2>>
 constexpr U Max(const T1& a, const T2& b) { return (static_cast<U>(a) > static_cast<U>(b)) ? a : b; }
@@ -481,6 +480,8 @@ template <typename T, T... Elements>  struct ValueSequence{};                   
 template <size_t... Indices>  using IndexSequence = ValueSequence<size_t, Indices...>;  ///< Parameter pack of size_t.
 template <bool... Conditions> using BoolSequence  = ValueSequence<bool, Conditions...>; ///< Parameter pack of bool.
 template <typename... Ts>  struct TypeSequence { using Tuple = std::tuple<Ts...>; };    ///< Parameter pack of types.
+
+template <typename...> constexpr bool ToBool(bool value = true) { return value; }  ///< Helper for making BoolSequences.
 
 
 /// @internal  Gets the length of an array.
@@ -1068,7 +1069,7 @@ struct InvokeFunctorSgprMapper {
   static constexpr bool   PlaceInSgpr = (NumNeeded <= Available) && (IsVectorArg<Arg>() == false) && (IsBasicType ||
     (Flags & CallTraits::AnyTypesInGprs) || (IsUniquePod<Arg>() && (Flags & CallTraits::PodTypesInGprs)));
   static constexpr size_t NowRemain   =
-    (Remaining == 0) ? 0 : (Remaining - (PlaceInSgpr ? NumNeeded : ((flags & CallTraits::FixedLayout) ? 1 : 0)));
+    (Remaining == 0) ? 0 : (Remaining - (PlaceInSgpr ? NumNeeded : ((Flags & CallTraits::FixedLayout) ? 1 : 0)));
 
   using Type = ConcatSeq<BoolSequence<PlaceInSgpr>,  typename InvokeFunctorSgprMapper<C, NowRemain, Args...>::Type>;
 };
@@ -1076,7 +1077,7 @@ struct InvokeFunctorSgprMapper {
 template <Call C, size_t Remaining> struct InvokeFunctorSgprMapper<C, Remaining, void> { using Type = BoolSequence<>; };
 
 template <Call C, typename Arg, typename... Args>
-struct InvokeFunctorSgprMapper<C, 0, Arg, Args...> { using Type = BoolSequence<false, (ToVoid<Args>(0), false)...>; };
+struct InvokeFunctorSgprMapper<C, 0, Arg, Args...> { using Type = BoolSequence<false, (ToBool<Args>(false))...>; };
 ///@}
 
 /// @internal  Helper metafunction to reorder function args so that we can inject extra stack arguments.

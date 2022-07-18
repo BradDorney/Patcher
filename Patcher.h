@@ -81,11 +81,18 @@ public:
   PatcherStatus SetModule(const void* hModule,     bool addReference = false);
   ///@}
 
-  ///@{ Fixes up a raw address, adjusting it for module base relocation.
+  ///@{ Fixes up a raw address (from the module's default base address), adjusting it for runtime base relocation.
   template <typename T>         T* FixPtr(T*     pAddress) const
     { return (pAddress == nullptr) ? pAddress : Util::PtrInc<T*>(pAddress, moduleRelocDelta_); }
   template <typename T = void>  T* FixPtr(uintptr address) const { return FixPtr(reinterpret_cast<T*>(address)); }
   ///@}
+
+  /// Compares the given value against module memory.
+  template <typename T>
+  bool Compare(TargetPtr pAddress, const T& value) { return Memcmp<sizeof(T)>(pAddress, &value) == 0; }
+
+  /// Compares the given bytes against module memory.
+  bool CompareBytes(TargetPtr pAddress, Span<uint8> bytes) { return Memcmp(pAddress, bytes.data(), bytes.size()) == 0; }
 
   /// Writes the given value to module memory.
   template <typename T, typename = Impl::EnableIf<std::is_base_of<FunctionRef, T>::value == false>>
@@ -96,7 +103,7 @@ public:
 
   /// Writes the given bytes to module memory.
   PatcherStatus WriteBytes(TargetPtr pAddress, Span<uint8> bytes)
-    { return Memcpy(pAddress, bytes.Data(), bytes.Length()); }
+    { return Memcpy(pAddress, bytes.data(), bytes.size()); }
 
   /// Writes no-ops to module memory up to size in bytes.  If @ref size is 0, then overwrite a whole single instruction.
   PatcherStatus WriteNop(TargetPtr pAddress, size_t size = 0);
@@ -242,8 +249,10 @@ public:
   /// @example  EditExports({ { 0x404000, 1 /* By ordinal */     },  { nullptr, "?DeleteDecoratedCppExport@@YAXXZ" } })
   PatcherStatus EditExports(Span<ExportInfo> exportInfos);
 
+  int32         Memcmp(TargetPtr pAddress, const void* pSrc, size_t size);            ///< Safe memcmp of module memory.
   PatcherStatus Memcpy(TargetPtr pAddress, const void* pSrc, size_t size);            ///< Safe memcpy to module memory.
   PatcherStatus Memset(TargetPtr pAddress, uint8      value, size_t count);           ///< Safe memset to module memory.
+  template <size_t Size>  int32         Memcmp(TargetPtr pAddress, const void* pSrc); ///< Safe memcmp w/constexpr size.
   template <size_t Size>  PatcherStatus Memcpy(TargetPtr pAddress, const void* pSrc); ///< Safe memcpy w/constexpr size.
   template <size_t Count> PatcherStatus Memset(TargetPtr pAddress, uint8      value); ///< Safe memset w/constexpr size.
 
@@ -317,6 +326,25 @@ private:
   /// Threads locked by LockThreads() (pair of handle, program counter).  AdvanceThreads() may temporarily resume these.
   std::vector<std::pair<uint32, uintptr>>  frozenThreads_;
 };
+
+// =====================================================================================================================
+template <size_t Size>
+int32 PatchContext::Memcmp(
+  TargetPtr    pAddress,
+  const void*  pSrc)
+{
+  assert((pAddress != nullptr) && (pSrc != nullptr));
+  pAddress             = MaybeFixTargetPtr(pAddress);
+  int32 result         = INT32_MAX;
+  const uint32 oldAttr = BeginDeProtect(pAddress, Size);  // ** TODO Add readOnly param
+
+  if (status_ == PatcherStatus::Ok) {
+    result = memcmp(pAddress, pSrc, Size);
+    EndDeProtect(pAddress, Size, oldAttr);
+  }
+
+  return result;
+}
 
 // =====================================================================================================================
 template <size_t Size>

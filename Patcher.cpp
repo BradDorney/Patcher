@@ -615,6 +615,28 @@ Status PatchContext::SetModule(
 }
 
 // =====================================================================================================================
+int32 PatchContext::Memcmp(
+  TargetPtr    pAddress,
+  const void*  pSrc,
+  size_t       size)
+{
+  if ((status_ == Status::Ok) && ((pAddress == nullptr) || (pSrc == nullptr) || (size == 0))) {
+    status_ = Status::FailInvalidPointer;
+  }
+
+  pAddress = MaybeFixTargetPtr(pAddress);
+  int32 result         = INT32_MAX;
+  const uint32 oldAttr = BeginDeProtect(pAddress, size);  // ** TODO Add readOnly param
+
+  if (status_ == Status::Ok) {
+    result = memcmp(pAddress, pSrc, size);
+    EndDeProtect(pAddress, size, oldAttr);
+  }
+
+  return result;
+}
+
+// =====================================================================================================================
 Status PatchContext::Memcpy(
   TargetPtr    pAddress,
   const void*  pSrc,

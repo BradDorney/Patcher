@@ -35,6 +35,7 @@
 
 namespace Patcher {
 
+// =====================================================================================================================
 /// @brief  RAII memory patch context class.  Allows for safe writes and insertion of code hooks into process memory.
 ///
 /// The first time some memory is modified, the original data is tracked, and is automatically restored when the context

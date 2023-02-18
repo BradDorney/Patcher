@@ -36,6 +36,7 @@
 
 // Defines
 
+// =====================================================================================================================
 // Compiler/ABI detection
 #if (defined(PATCHER_CLANG) || defined(PATCHER_ICC) || defined(PATCHER_GCC) || defined(PATCHER_MSVC)) == false
 # if   defined(__clang__) || defined(__INTEL_CLANG_COMPILER)
@@ -58,6 +59,7 @@
 # endif
 #endif
 
+// =====================================================================================================================
 // Architecture detection
 #if (defined(PATCHER_X86_32) || defined(PATCHER_X86_64)) == false
 # if   defined(_M_IX86) || (defined(__i386__) && (defined(__x86_64__) == false))
@@ -94,6 +96,7 @@
 # endif
 #endif
 
+// =====================================================================================================================
 // Build settings detection
 #if PATCHER_MSVC && defined(_DEBUG) && (defined(PATCHER_INCREMENTAL_LINKING) == false)
 # define PATCHER_INCREMENTAL_LINKING  1  // MSVC incremental linking is typically on in debug builds and off in release.
@@ -140,6 +143,7 @@
 # endif
 #endif
 
+// =====================================================================================================================
 // Calling conventions.  These are ignored if they do not exist for the given target ISA and build config.
 #if PATCHER_MSVC || defined(__ICL)
 # define  PATCHER_CDECL       __cdecl
@@ -191,6 +195,7 @@
 # define PATCHER_ABICALL  PATCHER_UNIXCALL
 #endif
 
+// =====================================================================================================================
 /// @internal  Macro that takes a macro which takes (convention, name, passthru...) as args, and invokes it for each
 ///            calling convention.
 #if PATCHER_X86_32
@@ -219,7 +224,9 @@
 #define PATCHER_EMIT_CV_REF_QUALIFIERS($)  $(,)  $(,&)  $(,&&)  $(const,)  $(const, &)  $(const, &&)  \
   $(volatile,)  $(volatile, &)  $(volatile, &&)  $(const volatile,)  $(const volatile, &)  $(const volatile, &&)
 
+
 namespace Patcher {
+// =====================================================================================================================
 // Typedefs
 
 using int8    = int8_t;     ///< 8-bit  signed   integer type.
@@ -234,6 +241,7 @@ using uintptr = uintptr_t;  ///< Pointer-size unsigned integer type.
 
 namespace Registers { enum class Register : uint8; }
 
+// =====================================================================================================================
 // Constants
 
 #if PATCHER_X86_32
@@ -261,6 +269,7 @@ constexpr bool IsUnixAbi = false;
 
 constexpr size_t RegisterSize = sizeof(void*);  ///< Size in bytes of native registers.
 
+// =====================================================================================================================
 // Utilities
 
 /// Info about registers requested by LowLevelHook().  Can be template deduced.
@@ -280,6 +289,7 @@ constexpr bool IsMacroEmptyImpl()              { return true;                   
 constexpr bool IsMacroEmptyImpl(const char* p) { return (p == nullptr) || (*p == '\0'); }
 }
 
+// =====================================================================================================================
 /// Enum specifying a function's calling convention.
 enum class Call : uint32 {
 #define PATCHER_CALLING_CONVENTION_ENUM_DEF(conv, name, ...)  name,
@@ -323,6 +333,7 @@ enum PropertyFlags : uint32 {
   IfUnixAbi = IsUnixAbi ? ~0u : 0u   ///< @internal  Mask for setting properties to only apply when in Unix ABI mode.
 };
 
+// =====================================================================================================================
 /// @internal  Info about ABI calling conventions.
 ///
 /// For more information, see the following documentation:
@@ -333,6 +344,17 @@ enum PropertyFlags : uint32 {
 /// https://raw.githubusercontent.com/wiki/hjl-tools/x86-psABI/intel386-psABI-1.1.pdf
 /// https://raw.githubusercontent.com/wiki/hjl-tools/x86-psABI/x86-64-psABI-1.0.pdf
 /// https://intel.com/content/www/us/en/develop/documentation/cpp-compiler-developer-guide-and-reference/top/compiler-reference/c-c-calling-conventions.html
+// ** TODO This table is incomplete.  Need to double check:
+// - Differences with member vs non-member functions
+// - C conventions (e.g. C stdcall needs PodTypesInGprs) - can extern "C" be detected from the function type?
+// - FP/vector registers
+// - Non-MS conventions corner cases
+// - Pass-by-reference or pass-by-register corner cases
+// - Somehow handle __attributes callee_pop_aggregate_return(n), no_caller_saved_registers, interrupt?
+//   These can't be detected from the function type!
+// - Implementing handling for pass-by-register (esp register splitting cases) for structs requires C++14 Type Loophole
+//   (see boost.pfr, https://alexpolt.github.io/type-loophole.html)
+//   But can't handle bitfields, custom field align, mixed visibility!
 constexpr struct Traits {
   bool    supported;       ///< Does the compiler and platform support this calling convention?
   uint32  numArgSgprs;     ///< Max number of standard general-purpose registers used for passing args.
@@ -371,6 +393,7 @@ PATCHER_EMIT_CALLS(PATCHER_ASCALL_DEF);
 ///@}
 
 
+// =====================================================================================================================
 ///@{ Pointer arithmetic helpers.
 template <typename T = void*>        T PtrInc(void*       p, size_t offset) { return T((uint8*)(p)       + offset); }
 template <typename T = const void*>  T PtrInc(const void* p, size_t offset) { return T((const uint8*)(p) + offset); }
@@ -413,6 +436,7 @@ template <typename T = size_t>         constexpr bool All()                { ret
 template <typename T, typename... Ts>  constexpr bool All(T a, Ts... next) { return a && All<T>(next...); }
 ///@}
 
+// =====================================================================================================================
 ///@{ @internal  Type traits convenience aliases.
 #if __cpp_lib_is_aggregate
 template <typename T>
@@ -459,6 +483,7 @@ template <typename T>  struct UnderlyingTypeImpl<T, true> { using Type = typenam
 template <typename T>  using UnderlyingType = typename UnderlyingTypeImpl<T>::Type;
 ///@}
 
+// =====================================================================================================================
 /// @internal  Returns the larger of a or b.
 template <typename T1, typename T2, typename U = CommonType<T1, T2>>
 constexpr U Max(const T1& a, const T2& b) { return (static_cast<U>(a) > static_cast<U>(b)) ? a : b; }
@@ -476,6 +501,7 @@ template <typename T1, typename T2, typename U = CommonType<T1, T2>, typename...
 constexpr U Min(const T1& a, const T2& b, const Ts&... rest) { return Min(Min(a, b), rest...); }
 
 
+// =====================================================================================================================
 template <typename T, T... Elements>  struct ValueSequence{};                           ///< Parameter pack of values.
 template <size_t... Indices>  using IndexSequence = ValueSequence<size_t, Indices...>;  ///< Parameter pack of size_t.
 template <bool... Conditions> using BoolSequence  = ValueSequence<bool, Conditions...>; ///< Parameter pack of bool.
@@ -499,6 +525,7 @@ struct ConstValue { static constexpr T Value = Value_;  constexpr operator T() c
 
 struct NotFound{};  ///< @internal  Empty tag type returned for out-of-bounds TupleElement.
 
+// =====================================================================================================================
 ///@{ @internal  TupleElement, gets the Nth element of a std::tuple, TypeSequence, or ValueSequence (as a ConstValue).
 template <size_t N, typename T, typename Enable = void>  struct TupleElementImpl { using Type = NotFound; };
 template <size_t N, typename T>                          using  TupleElement = typename TupleElementImpl<N, T>::Type;
@@ -513,7 +540,11 @@ template <size_t N, typename T, T... Seq>  struct TupleElementImpl<N, ValueSeque
   : public TupleElementImpl<N, std::tuple<ConstValue<T, Seq>...>, void>{};
 ///@}
 
+/// @internal  Gets the median element of a value sequence as a ConstValue (or NotFound if empty sequence).
+template <typename T, T... Seq>  using SeqMedian = TupleElement<(sizeof...(Seq) / 2), ValueSequence<T, Seq...>>;
 
+
+// =====================================================================================================================
 ///@{ @internal  ConcatSeq helper metafunction to concatenate N parameter packs of sequences.
 template <typename... Seqs>  struct ConcatSeqImpl;
 template <typename... Seqs>  using  ConcatSeq = typename ConcatSeqImpl<Seqs...>::Type;
@@ -534,6 +565,7 @@ struct ConcatSeqImpl<TypeSequence<SeqA...>, TypeSequence<SeqB...>, Seqs...>
 ///@}
 
 
+// =====================================================================================================================
 ///@{ @internal  Helper metafunctions to generate parameter packs of sequences.
 template <typename T, T Begin, size_t Length>  struct MakeSeqRangeImpl;
 template <typename T, T Begin, size_t Length>  using MakeSeqRange = typename MakeSeqRangeImpl<T, Begin, Length>::Type;
@@ -557,6 +589,7 @@ template <size_t Begin, size_t End>  using MakeIndexRange    = MakeSeqRange<size
 template <typename T, size_t Length>
 using MakeTypeSequence = typename MakeTypeSeqImpl<MakeIndexSequence<Length>, T>::Type;
 
+// =====================================================================================================================
 ///@{ @internal  SliceSeq/SeqElements helper metafunctions to obtain a subsequence from a sequence.
 template <typename Seq, typename Is>  struct SliceSeqImpl;
 
@@ -577,6 +610,7 @@ using SliceSeq = typename SliceSeqImpl<T, MakeIndexRange<Min(Begin, SeqSize(T{})
 template <typename Seq, typename Is>  using SeqElements = typename SliceSeqImpl<Seq, Is>::Type;
 ///@}
 
+// =====================================================================================================================
 ///@{ @internal  FilterSeq/FilterFalseSeq helper metafunctions to obtain a subsequence from Seq filtered by Conditions.
 template <template<class, class> class Filter, typename Seq, typename Conditions>
 using FilterHelper = SeqElements<Seq, typename Filter<MakeIndexSequence<SeqSize(Seq{})>, Conditions>::Type>;
@@ -595,9 +629,7 @@ struct FilterFalseSeqImpl<IndexSequence<Indexes...>, BoolSequence<Conditions...>
   { using Type = ConcatSeq<IndexSequence<>, Conditional<Conditions, IndexSequence<>, IndexSequence<Indexes>>...>; };
 ///@}
 
-/// @internal  Gets the median element of a value sequence as a ConstValue (or NotFound if empty sequence).
-template <typename T, T... Seq>  using SeqMedian = TupleElement<(sizeof...(Seq) / 2), ValueSequence<T, Seq...>>;
-
+// =====================================================================================================================
 /// @internal  Functor that returns -1 if (a < b), 0 if (a == b), or 1 if (a > b).  For use with SeqSort.
 struct Less {
   template <typename T>
@@ -614,6 +646,7 @@ struct KeySeqCompare {
     { return Compare{}(TupleElement<A, Seq>{}, TupleElement<B, Seq>{}); }
 };
 
+// =====================================================================================================================
 ///@{ @internal  SeqBinSearch helper metafunction to do a binary search over a ValueSequence at compile time.
 ///   Returns the index of the element if found, otherwise returns ~0 if not found.
 ///   Sequence must be sorted in ascending order.
@@ -645,6 +678,7 @@ template <typename T, T Key, T... Is>  constexpr size_t SeqBinSearch(ValueSequen
 template <typename T, T Key, T... Is>  constexpr size_t SeqBinSearch() { return SeqBinSearch<T, Key, Is...>({}, {}); }
 ///@}
 
+// =====================================================================================================================
 ///@{ @internal  SpliceSeq helper to get a subset of Seq that filters out elements present in Exclude (must be sorted).
 template <typename Seq, typename Exclude>  struct SpliceSeqImpl;
 template <typename Seq, typename Exclude>  using  SpliceSeq = typename SpliceSeqImpl<Seq, Exclude>::Type;
@@ -658,6 +692,7 @@ struct SpliceSeqImpl<ValueSequence<T, Seq...>, ValueSequence<T, Exclude...>> {
 };
 ///@}
 
+// =====================================================================================================================
 ///@{ @internal  SeqSort helper metafunction to sort a ValueSequence.
 template <typename Seq, typename Compare>         struct SeqSortImpl;
 template <typename Seq, typename Compare = Less>  using  SeqSort = typename SeqSortImpl<Seq, Compare>::Type;
@@ -709,6 +744,7 @@ struct SeqSortImpl<ValueSequence<T, Seq...>, Compare> {
 ///@}
 
 
+// =====================================================================================================================
 /// @internal  Transparent wrapper around a type, as if it were passed as a function argument.
 /// @note      Depending on the platform ABI, like in MSVC x86-32, ArgWrappers might be never passed via registers.
 template <typename T>
@@ -743,6 +779,7 @@ private:
 template <typename R>
 class ReturnTag : public ArgWrapper<R> { public:  using ArgWrapper<R>::ArgWrapper;  using ArgWrapper<R>::operator=; };
 
+// =====================================================================================================================
 /// @internal  Converts a type to its effective machine representation when passed as a function arg.
 template <typename T> using EffectiveArgType = Decay<Conditional<std::is_reference<T>::value, Decay<T>*, T>>;
 
@@ -803,6 +840,7 @@ constexpr bool IsAggregateReturnArg() {
 template <Call C>  using EnableIfConventionExists = Conditional<GetCallTraits(C).supported, void, Util::AsCall<C>>;
 ///@}
 
+// =====================================================================================================================
 ///@{ @internal  Implementation for helper template which breaks out qualifiers from a function pointer.
 template <typename T, typename = void>  struct TokenizeFunctionQualifiersImpl;
 template <typename R, typename... A>
@@ -891,6 +929,7 @@ template <typename T>  using GetParams = typename GetParamsImpl<T>::Type;
 ///@}
 
 
+// =====================================================================================================================
 ///@{ @internal  Template metafunction used to obtain function call signature information from a callable.
 template <typename T, typename = void>  struct FuncTraitsImpl   :   public FuncTraitsImpl<decltype(&T::operator())>{};
 template <typename T>                   using  FuncTraits       = typename FuncTraitsImpl<Decay<T>>::Type;
@@ -997,6 +1036,7 @@ PATCHER_EMIT_CV_REF_QUALIFIERS(PATCHER_FUNC_TRAITS_VARIADIC_PMF_DEF);
 ///@}
 
 
+// =====================================================================================================================
 ///@{ @internal  Helper template used in converting non-capturing lambdas (and stateless functors) to function pointers.
 template <typename T, bool Empty>  struct LambdaInvokerImpl{};
 template <typename T>
@@ -1044,6 +1084,7 @@ constexpr size_t InvokeFunctorNumArgs = 2;
 constexpr size_t GetInvokeFunctorNumPadders(size_t stackAlignment = PATCHER_DEFAULT_STACK_ALIGNMENT)
   { return ((stackAlignment / RegisterSize) - 1) - ((InvokeFunctorNumArgs - 1) % (stackAlignment / RegisterSize)); }
 
+// =====================================================================================================================
 ///@{ @internal  Helper metafunction that produces a BoolSequence for whether args should be placed in registers or not.
 ///
 /// @warning POD type detection, particularly large struct types, can produce false positives, especially without C++17.
@@ -1080,6 +1121,7 @@ template <Call C, typename Arg, typename... Args>
 struct InvokeFunctorSgprMapper<C, 0, Arg, Args...> { using Type = BoolSequence<false, (ToBool<Args>(false))...>; };
 ///@}
 
+// =====================================================================================================================
 /// @internal  Helper metafunction to reorder function args so that we can inject extra stack arguments.
 template <Call C, typename R, typename... Args>
 struct InvokeFunctorArgMapper {
@@ -1103,6 +1145,7 @@ struct InvokeFunctorArgMapper {
   using OtherArgs   = SeqElements<TypeSequence<Args...>, NonSgprArgIndexes>;
 };
 
+// =====================================================================================================================
 /// @internal  Helper metafunction to get a plain wrapper function of any calling convention which invokes a functor via
 ///            "hidden" extra arguments.  These args are passed on the stack by functor thunk or LowLevelHook code.
 // ** TODO Should maybe try to make this and LambdaInvokerImpl look more similar?
@@ -1151,6 +1194,7 @@ private:
 };
 
 
+// =====================================================================================================================
 ///@{ @internal  Helper metafunction for implementing register type and by reference deduction for LowLevelHook().
 template <typename    T>  using  GetRegisterInfoTraits =
   Conditional<std::is_function<RemoveCvRefPtr<T>>::value, FuncTraits<T>, FuncTraitsNoThis<T>>;
@@ -1164,6 +1208,7 @@ template <typename... A>  struct GetRegisterInfo<TypeSequence<A...>> {
 ///@}
 
 
+// =====================================================================================================================
 /// Literal array type.  Useful for making arrays of arrays where the inner arrays have variable length (up to MaxSize).
 template <typename T, size_t MaxSize>
 class ConstArray {
@@ -1179,6 +1224,7 @@ private:
 };
 
 
+// =====================================================================================================================
 ///@{ @internal  Helpers for creating a dummy object instance.  Used as a target for GetVftable() in PmfCast().
 template <typename T, bool = std::is_polymorphic<T>::value && (std::is_abstract<T>::value == false)>
 struct DummyFactory { static T* Create(void* pPlacementAddr) { return nullptr; } static void Destroy(const void*) { } };
@@ -1360,6 +1406,7 @@ auto PmfCast(
   return reinterpret_cast<typename Impl::FuncTraits<decltype(pmf)>::Pfn>(cast.pOut);
 }
 
+// =====================================================================================================================
 ///@{ PATCHER_MFN_PTR helper macro to get the address of a class member function without requiring an object instance.
 ///
 /// Notice that this takes a function identifier literal, not a pointer-to-member-function!
@@ -1367,7 +1414,7 @@ auto PmfCast(
 /// but it may be ignored altogether on certain platforms/compilers.
 ///
 /// @example  patcher.Hook(PATCHER_MFN_PTR(ClassA::Func), PATCHER_MFN_PTR(HookClassA::Func))
-/// 
+///
 /// @note  This does not work on overloaded functions.  There may be compiler-specific limitations.
 #if PATCHER_MSVC && PATCHER_X86_32
 // MSVC (x86_32):  Inline __asm can reference C++ symbols, including virtual methods, by address.

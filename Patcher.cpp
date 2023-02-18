@@ -53,6 +53,7 @@ using namespace Impl;
 using namespace Util;
 using namespace Registers;
 
+// =====================================================================================================================
 // Internal macros
 
 #define PATCHER_PACK_STRUCT      PATCHER_PRAGMA(pack(push, 1))
@@ -70,6 +71,7 @@ using namespace Registers;
 #endif
 #define X86_SELECTOR(x86_32, x86_64)  IF_X86_32(x86_32) IF_X86_64(x86_64)
 
+// =====================================================================================================================
 // Internal typedefs
 
 using Status     = PatcherStatus;
@@ -140,6 +142,7 @@ struct CallAbs {
 };
 PATCHER_END_PACK_STRUCT
 
+// =====================================================================================================================
 // Internal constants
 
 // x86 fetches instructions on 16-byte boundaries.  Allocated code should be aligned on these boundaries in memory.
@@ -165,6 +168,7 @@ constexpr uint32 ExecutableProtectFlags =
   (PAGE_EXECUTE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY);
 constexpr uint32 ReadOnlyProtectFlags   = (PAGE_READONLY | PAGE_EXECUTE_READ | PAGE_EXECUTE);
 
+// =====================================================================================================================
 // Internal utility functions and classes
 
 // Returns true if any flags are set in mask.
@@ -201,6 +205,7 @@ static void AppendString(char** ppWriter, const char*       pSrc)
 static void AppendString(char** ppWriter, const std::string& src)
   { const size_t length = (src.length() + 1);  strcpy_s(*ppWriter, length, src.data());  *ppWriter += length; }
 
+// =====================================================================================================================
 // Capstone disassembler helper class.  Disassembly reveals useful pathways.
 template <cs_arch CsArchitecture, uint32 CsMode>
 class Disassembler {
@@ -257,6 +262,7 @@ private:
   std::mutex  lock_;
 };
 
+// =====================================================================================================================
 // Translates a Patcher Register enum value to a Xbyak register object.
 static const Xbyak::Reg& GetXbyakRegister(Register reg) {
   using namespace Xbyak::util;
@@ -266,6 +272,7 @@ static const Xbyak::Reg& GetXbyakRegister(Register reg) {
   return registers[uint32(reg)];
 }
 
+// =====================================================================================================================
 // Xbyak assembler class, with helpers defined to generate common sequences of instructions, etc.
 class Assembler : public Xbyak::CodeGenerator {
 public:
@@ -340,6 +347,7 @@ public:
   template <typename T = uint8*>  T GetNext() { return reinterpret_cast<T>(const_cast<uint8*>(getCurr())); }
 };
 
+// =====================================================================================================================
 // Allocates memory such that it can be executed, and so that it is placed within 32-bit signed addressing.
 class Allocator {
 public:
@@ -396,6 +404,7 @@ private:
   std::deque<BlockHeader*> pBlocks_;  // Max heap of committed memory pages, sorted by free size remaining.
 };
 
+// =====================================================================================================================
 // Internal globals
 
 static Disassembler<CS_ARCH_X86, IsX86_64 ? CS_MODE_64 : CS_MODE_32>  g_disasm;

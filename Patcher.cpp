@@ -847,7 +847,7 @@ Status PatchContext::ReplaceReferencesToGlobal(
 static void CopyInstructions(
   uint8**   ppWriter,
   cs_insn*  pInsns,
-  size_t*   pCount,
+  uint32_t*   pCount,
   uint8*    pOverwrittenSize,
   uint8     offsetLut[MaxOverwriteSize])
 {
@@ -856,7 +856,7 @@ static void CopyInstructions(
 
   uint8*const  pBegin     = *ppWriter;
   size_t  curOldOffset    = 0;
-  size_t  count           = *pCount;
+  uint32_t  count           = *pCount;
   uint8   overwrittenSize = *pOverwrittenSize;
   bool    foundEnd        = false;
   std::vector<std::pair<uint32*, uint8>> deferredRelocs;

@@ -47,9 +47,10 @@
 #if PATCHER_MSVC
 # include <intrin.h>
 #endif
-
+#ifndef MAX
+#define MAX(a, b) ((a) > (b) ? (a) : (b))
+#endif
 namespace Patcher {
-
 #pragma pack(push, 1)
 // Generic structure of a simple x86 instruction with a 1-byte opcode and one 1-dword operand.
 struct Op1_4 {
@@ -328,7 +329,7 @@ void PatchContext::Init() {
         CreateFileW(&path[0], GENERIC_READ, ShareFlags, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_READONLY, NULL);
 
       if ((hFile != NULL) && (hFile != INVALID_HANDLE_VALUE)) {
-        uint8 buf[max(sizeof(IMAGE_NT_HEADERS), sizeof(IMAGE_NT_HEADERS64))];
+        uint8 buf[MAX(sizeof(IMAGE_NT_HEADERS), sizeof(IMAGE_NT_HEADERS64))];
         DWORD numRead = 0;
 
         if ((SetFilePointer(hFile, pDosHeader->e_lfanew, nullptr, FILE_BEGIN) != INVALID_SET_FILE_POINTER) &&

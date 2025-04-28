@@ -1275,7 +1275,7 @@ void FunctionRef::InitFunctorThunk(
 }
 
 // =====================================================================================================================
-// Finds if there's a region we can insert a hook patch, and what instructions will be overwritten.
+// Finds if there's a region we can insert a hook patch, and what instructions will be overwritten where.
 static Status FindHookPatchRegion(
   void*       pAddress,
   uint8*      pOverwrittenSize,  // [out] Total size in bytes of overwritten instructions.
@@ -1368,7 +1368,6 @@ static Status FindHookPatchRegion(
 
 // =====================================================================================================================
 // Functionally copies machine code instructions from one code memory location to another.
-// Note that this function does not flush the instruction cache.
 // Program counter-relative instructions require complicated fixups.
 // Note that this function does not flush the instruction cache!
 static void CopyInstructions(

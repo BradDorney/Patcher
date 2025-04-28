@@ -440,7 +440,7 @@ inline size_t PtrDelta(const void* pHigh, const void* pLow)
 
 template <typename T = int32>  T PcRelPtr(const void* pFrom, size_t fromSize, const void* pTo)
   { return T(PtrDelta(pTo, PtrInc(pFrom, fromSize))); }  // C-style cast works for both T as integer or pointer type.
-template <typename R = int32, typename T>
+template <typename R = int32, typename T = int32>
 R PcRelPtr(const T* pFrom, const void* pTo) { return PcRelPtr<R>(pFrom, sizeof(T), pTo); }
 ///@}
 
@@ -466,6 +466,7 @@ template <typename T, typename... Ts>  constexpr bool Any(T a, Ts... next) { ret
 ///@}
 
 ///@{ @internal  Returns true if all of the values are truthy, otherwise false.  C++11 equivalent of &&... fold-expr.
+template <typename T = size_t>         constexpr bool All()                { return true;                 }
 template <typename T, typename... Ts>  constexpr bool All(T a, Ts... next) { return a && All<T>(next...); }
 ///@}
 
@@ -884,6 +885,7 @@ template <typename T, typename = void>  struct TokenizeFunctionQualifiersImpl;
 template <typename R, typename... A>
 struct TokenizeFunctionQualifiersImpl<R(*)(A..., ...), void> {
   static constexpr auto Convention = Call::Variadic;
+  using This                       = void;
   using StripAll                   = R(A..., ...);
   using StripConvention            = R(*)(A..., ...);
   using StripThisQualifiers        = R(*)(A..., ...);
@@ -893,6 +895,7 @@ struct TokenizeFunctionQualifiersImpl<R(*)(A..., ...), void> {
 template <typename R, typename... A>                                                                      \
 struct TokenizeFunctionQualifiersImpl<R(conv*)(A...), EnableIfConventionExists<Call::name>> {             \
   static constexpr auto Convention = Call::name;                                                          \
+  using This                       = void;                                                                \
   using StripAll                   = R(A...);                                                             \
   using StripConvention            = R(*)(A...);                                                          \
   using StripThisQualifiers        = R(conv*)(A...);                                                      \

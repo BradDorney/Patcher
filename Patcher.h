@@ -297,7 +297,9 @@ public:
   bool HasPatched(TargetPtr pAddress) const { return historyAt_.count(MaybeFixTargetPtr(pAddress)) != 0; }
 
 protected:
-  void SetStatus(PatcherStatus status) { status_ = status; }  ///< Sets the context's status code.
+  /// Sets the context's status code, and returns the new status.
+  Status SetStatus(Status newStatus)
+    { if (status_ >= Status::Ok) { status_ = newStatus; }  return status_; }
 
 private:
   /// Initializes associated module information.

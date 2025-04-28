@@ -38,10 +38,11 @@
 
 namespace Patcher {
 
-class Allocator;  ///< @internal Code allocator class.
+class Allocator;  ///< @internal  Code allocator class.  Ensures allocations are within ISA effective addressable range.
 
 namespace Impl {
 
+// =====================================================================================================================
 /// Type erasure reference accessor class for immutable, possibly temporary, array-like types.
 template <typename T>
 class Span {
@@ -79,6 +80,7 @@ private:
   size_t    length_;
 };
 
+// =====================================================================================================================
 /// RAII growable array container with a fixed-size initial storage buffer.
 template <typename T, size_t InitialSize = 10>
 class SmallVector {
@@ -143,6 +145,7 @@ public:
   bool Append(Span<U> elements);
 
 protected:
+  // ** TODO can localStorage_ be fully elided for InitialSize == 0?
   using LocalStorageType = Conditional<(InitialSize != 0), Array<TypeStorage<T>, Max(InitialSize, 1)>, TypeStorage<T>*>;
   static constexpr bool IsPod = std::is_trivially_copyable<T>::value;
 
@@ -152,6 +155,7 @@ protected:
   size_t            capacity_;
 };
 
+// =====================================================================================================================
 /// Type erasure wrapper for field offset arguments passed to PatchContext.
 /// Can implicitly convert size_t, offsetof(), SetCapturedTrampoline, and pointers-to-member-variables.
 class Offset {
@@ -165,6 +169,7 @@ private:
 };
 
 
+// =====================================================================================================================
 /// Type erasure wrapper for (possibly relocated) uint or pointer address arguments passed to PatchContext.
 /// If uint, relocation is assumed by default;  if void*, no relocation is assumed by default.
 class TargetPtr {
@@ -204,6 +209,7 @@ private:
 };
 
 
+// =====================================================================================================================
 /// Type erasure wrapper for callable arguments passed to PatchContext.  Can implicitly convert most callables.
 /// With non-empty callable types, the object and its lifetime become bound to this and to any patches referencing it.
 class FunctionRef {
@@ -284,6 +290,7 @@ private:
   const void*           pfnInvoke_;  ///< (State-bound functors) Pointer to the invoker function used by the thunk.
 };
 
+// =====================================================================================================================
 /// Template subclass of FunctionRef that can be implicitly converted to a plain function pointer and used as a callable
 /// This allows capturing lambdas and state-bound functors to be passed as function pointers of any calling convention.
 template <typename T, Call Convention>
@@ -300,6 +307,7 @@ public:
 };
 
 
+// =====================================================================================================================
 /// Transparent wrapper around a type that has a Register enum value attached to it, allowing for deducing the desired
 /// register for the arg for LowLevelHook() at compile time.
 template <Registers::Register Id, typename T, uint32 Offset = 0>

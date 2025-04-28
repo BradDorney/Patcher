@@ -145,6 +145,7 @@
 
 // =====================================================================================================================
 // Calling conventions.  These are ignored if they do not exist for the given target ISA and build config.
+// Calling conventions and attributes. These are ignored if they do not exist for the given target ISA and build config.
 #if PATCHER_MSVC || defined(__ICL)
 # define  PATCHER_CDECL       __cdecl
 # define  PATCHER_STDCALL     __stdcall
@@ -214,11 +215,10 @@
 /// @internal  Macro that takes a macro which takes (convention, callName, cv, ref) as args, and invokes it for each
 ///            combination of calling conventions and qualifiers.
 #define PATCHER_EMIT_PMF_QUALIFIERS($)                                                                                 \
-  PATCHER_EMIT_CALLS($,,)                 PATCHER_EMIT_CALLS($,,                &)  PATCHER_EMIT_CALLS($,,          &&)\
-  PATCHER_EMIT_CALLS($, const,)           PATCHER_EMIT_CALLS($, const,          &)  PATCHER_EMIT_CALLS($, const,    &&)\
-  PATCHER_EMIT_CALLS($, volatile,)        PATCHER_EMIT_CALLS($, volatile,       &)  PATCHER_EMIT_CALLS($, volatile, &&)\
-  PATCHER_EMIT_CALLS($, const volatile,)  PATCHER_EMIT_CALLS($, const volatile, &)                                     \
-  PATCHER_EMIT_CALLS($, const volatile, &&)
+PATCHER_EMIT_CALLS($, ,)               PATCHER_EMIT_CALLS($,,               &) PATCHER_EMIT_CALLS($,,               &&)\
+PATCHER_EMIT_CALLS($, const,)          PATCHER_EMIT_CALLS($,const,          &) PATCHER_EMIT_CALLS($,const,          &&)\
+PATCHER_EMIT_CALLS($, volatile,)       PATCHER_EMIT_CALLS($,volatile,       &) PATCHER_EMIT_CALLS($,volatile,       &&)\
+PATCHER_EMIT_CALLS($, const volatile,) PATCHER_EMIT_CALLS($,const volatile, &) PATCHER_EMIT_CALLS($,const volatile, &&)
 
 /// @internal  Macro that takes a macro which takes (cv, ref) as args, and invokes it for each combination.
 #define PATCHER_EMIT_CV_REF_QUALIFIERS($)  $(,)  $(,&)  $(,&&)  $(const,)  $(const, &)  $(const, &&)  \
@@ -229,17 +229,18 @@ namespace Patcher {
 // =====================================================================================================================
 // Typedefs
 
-using int8    = int8_t;     ///< 8-bit  signed   integer type.
-using int16   = int16_t;    ///< 16-bit signed   integer type.
-using int32   = int32_t;    ///< 32-bit signed   integer type.
-using int64   = int64_t;    ///< 64-bit signed   integer type.
-using uint8   = uint8_t;    ///< 8-bit  unsigned integer type.
+using int8    = int8_t;     ///<  8-bit   signed integer type.
+using int16   = int16_t;    ///< 16-bit   signed integer type.
+using int32   = int32_t;    ///< 32-bit   signed integer type.
+using int64   = int64_t;    ///< 64-bit   signed integer type.
+using uint8   = uint8_t;    ///<  8-bit unsigned integer type.
 using uint16  = uint16_t;   ///< 16-bit unsigned integer type.
 using uint32  = uint32_t;   ///< 32-bit unsigned integer type.
 using uint64  = uint64_t;   ///< 64-bit unsigned integer type.
 using uintptr = uintptr_t;  ///< Pointer-size unsigned integer type.
 
 namespace Registers { enum class Register : uint8; }
+namespace Registers { enum class Register : uint8; }  ///< Register types passed to LowLevelHook.
 
 // =====================================================================================================================
 // Constants
@@ -274,9 +275,9 @@ constexpr size_t RegisterSize = sizeof(void*);  ///< Size in bytes of native reg
 
 /// Info about registers requested by LowLevelHook().  Can be template deduced.
 struct RegisterInfo {
-  Registers::Register type;         ///< Register type.
-  bool                byReference;  ///< Pass register by reference for writing? (Not needed with stack values)
-  uint32              offset;       ///< (Stack only) Offset into the stack associated with this value.
+  Registers::Register type;        ///< Register type, eg Register::Eax, ...::Esp (@see offset), ::R15.
+  bool                byReference; ///< Pass register by reference for writing? (Not needed with stack values)
+  int32               offset;      ///< (Stack only) Offset signed & in bytes into the stack associated with this value.
 };
 
 namespace Impl {
@@ -325,8 +326,8 @@ enum PropertyFlags : uint32 {
   PodTypesInGprs     = (1u << 4),  ///< Aligned trivial types, incl. POD class/struct/union, can be placed in registers.
   BigTypesByRef      = (1u << 5),  ///< Arg types larger than 1 register, and unions, are always passed by reference.
   ClassTypesByRef    = (1u << 5),  ///< Non-trivial class/struct/union types are always passed by reference.
-  PodTypeGprSplit    = (1u << 6),  ///< Aligned, uniquely-representable, POD types can span multiple registers.
-  AnyTypeGprSplit    = (1u << 7),  ///< Any type can span multiple registers.
+  AnyTypeGprSplit    = (1u << 7),  ///< Any type can span multiple registers,  e.g. a x86-32 struct containing uint64
+  PodTypeGprSplit    = (1u << 6),  ///< Aligned, uniquely-representable, POD types can span multiple registers (u64 x32)
   FixedLayout        = (1u << 8),  ///< Args cannot be reordered for placement into registers.
 
   IfMsAbi   = IsMsAbi   ? ~0u : 0u,  ///< @internal  Mask for setting properties to only apply when in MS ABI mode.
@@ -336,7 +337,8 @@ enum PropertyFlags : uint32 {
 // =====================================================================================================================
 /// @internal  Info about ABI calling conventions.
 ///
-/// For more information, see the following documentation:
+/// @note  For more information, see the following documentation:
+/// https://learn.microsoft.com/en-us/cpp/cpp/calling-conventions
 /// https://docs.microsoft.com/en-us/cpp/cpp/argument-passing-and-naming-conventions
 /// https://docs.microsoft.com/en-us/cpp/build/x64-calling-convention
 /// https://clang.llvm.org/docs/AttributeReference.html
@@ -421,18 +423,17 @@ constexpr bool IsAligned(T value, size_t align) { return ((value & static_cast<T
 
 
 namespace Impl {
-///@{ @internal  Returns the sum of the values.  Intended usage is with an expanded non-type parameter pack.
+///@{ @internal  Returns the sum of all the values.  C++11 equivalent of the C++17 `+...` fold-expression.
 template <typename T = size_t>         constexpr T Sum()                { return 0;                   }
 template <typename T, typename... Ts>  constexpr T Sum(T a, Ts... next) { return a + Sum<T>(next...); }
 ///@}
 
-///@{ @internal  Returns true if any one of the values is truthy, otherwise false.
+///@{ @internal  Returns true if any one of the values is truthy, otherwise false.  C++11 equivalent of ||... fold-expr.
 template <typename T = size_t>         constexpr bool Any()                { return false;                }
 template <typename T, typename... Ts>  constexpr bool Any(T a, Ts... next) { return a || Any<T>(next...); }
 ///@}
 
-///@{ @internal  Returns true if all of the values are truthy, otherwise false.
-template <typename T = size_t>         constexpr bool All()                { return false;                }
+///@{ @internal  Returns true if all of the values are truthy, otherwise false.  C++11 equivalent of &&... fold-expr.
 template <typename T, typename... Ts>  constexpr bool All(T a, Ts... next) { return a && All<T>(next...); }
 ///@}
 
@@ -448,8 +449,9 @@ constexpr bool IsPod() {
 template <typename T>  constexpr bool IsPod() { return std::is_trivial<T>::value && std::is_standard_layout<T>::value; }
 #endif
 
+/// IsUniquePod requires C++17 to fully work.  True if T is POD and does not contain any alignment padders, or floats.
 #if __cpp_lib_has_unique_object_representations
-template <typename T>  ///< Requires C++17.  True if T is POD and does not contain alignment padders or floating-points.
+template <typename T>  
 constexpr bool IsUniquePod() { return IsPod<T>() && std::has_unique_object_representations<T>::value; }
 #else
 template <typename T>  constexpr bool IsUniquePod() { return IsPod<T>(); }
@@ -472,7 +474,6 @@ template <typename T>                using AddLvalueRef   = typename std::add_lv
 template <bool B, class T = void>    using EnableIf       = typename std::enable_if<B, T>::type;
 template <typename... T>             using ToVoid         = void;
 template <bool B, class T, class F>  using Conditional    = typename std::conditional<B, T, F>::type;
-template <typename T>                using TypeStorage    = typename std::aligned_storage<sizeof(T), alignof(T)>::type;
 template <typename... Ts>            using CommonType     = typename std::common_type<Ts...>::type;
 template <typename T, size_t N>      using Array          = T[N];
 template <typename T>                using AddPtrIfValue  = Conditional<IsRefPtr<T>(), T, AddPointer<T>>;
@@ -481,6 +482,8 @@ template <typename T, bool = std::is_enum<T>::value>  struct UnderlyingTypeImpl 
 template <typename T>  struct UnderlyingTypeImpl<T, true> { using Type = typename std::underlying_type<T>::type; };
 
 template <typename T>  using UnderlyingType = typename UnderlyingTypeImpl<T>::Type;
+
+template <typename T>  struct TypeStorage { alignas(T) uint8 buffer_[sizeof(T)]; };
 ///@}
 
 // =====================================================================================================================
@@ -590,7 +593,7 @@ template <typename T, size_t Length>
 using MakeTypeSequence = typename MakeTypeSeqImpl<MakeIndexSequence<Length>, T>::Type;
 
 // =====================================================================================================================
-///@{ @internal  SliceSeq/SeqElements helper metafunctions to obtain a subsequence from a sequence.
+///@{ @internal  SliceSeq/SeqElements helper metafunctions to obtain a subset of a sequence.
 template <typename Seq, typename Is>  struct SliceSeqImpl;
 
 template <typename... Seq, size_t... Is>
@@ -611,7 +614,7 @@ template <typename Seq, typename Is>  using SeqElements = typename SliceSeqImpl<
 ///@}
 
 // =====================================================================================================================
-///@{ @internal  FilterSeq/FilterFalseSeq helper metafunctions to obtain a subsequence from Seq filtered by Conditions.
+///@{ @internal  FilterSeq/FilterFalseSeq helper metafunctions to obtain a subset of Seq filtered by Conditions.
 template <template<class, class> class Filter, typename Seq, typename Conditions>
 using FilterHelper = SeqElements<Seq, typename Filter<MakeIndexSequence<SeqSize(Seq{})>, Conditions>::Type>;
 
@@ -630,7 +633,7 @@ struct FilterFalseSeqImpl<IndexSequence<Indexes...>, BoolSequence<Conditions...>
 ///@}
 
 // =====================================================================================================================
-/// @internal  Functor that returns -1 if (a < b), 0 if (a == b), or 1 if (a > b).  For use with SeqSort.
+/// @internal  SeqSort's default comparison functor.  Returns -1 if (a < b), 0 if (a == b), or 1 if (a > b).
 struct Less {
   template <typename T>
   constexpr int32 operator()(const T& a, const T& b) const { return (a < b) ? -1 : ((a == b) ? 0 : 1); }
@@ -639,7 +642,7 @@ struct Less {
   constexpr int32 operator()(ConstValue<T, A>, ConstValue<T, B>) const { return operator()(A, B); }
 };
 
-/// @internal  Template functor that does a proxy comparison using a reference key sequence.  For use with SeqSort.
+/// @internal  @ref SeqSort template functor that does a proxy comparison using a reference key sequence.
 template <typename Seq, typename Compare = Less>
 struct KeySeqCompare {
   template <size_t A, size_t B>  constexpr int32 operator()(ConstValue<size_t, A>, ConstValue<size_t, B>) const
@@ -672,6 +675,7 @@ struct SeqBinSearchImpl<ValueSequence<T, Seq...>, ConstValue<T, Key>, EnableIf<(
 template <typename T, T Key, T... Seq>
 using SeqBinSearchResult = typename SeqBinSearchImpl<ValueSequence<T, Seq...>, ConstValue<T, Key>>::Type;
 
+
 template <typename T, T Key, T... Is>  constexpr size_t SeqBinSearch(ValueSequence<T, Is...>, ConstValue<T, Key>)
   { return SeqBinSearchResult<T, Key, Is...>::Value; }
 
@@ -679,9 +683,10 @@ template <typename T, T Key, T... Is>  constexpr size_t SeqBinSearch() { return 
 ///@}
 
 // =====================================================================================================================
-///@{ @internal  SpliceSeq helper to get a subset of Seq that filters out elements present in Exclude (must be sorted).
+///@{ @internal  SpliceSeq helper to get a subset of Seq (must be sorted) that filters out elements present in Exclude.
 template <typename Seq, typename Exclude>  struct SpliceSeqImpl;
 template <typename Seq, typename Exclude>  using  SpliceSeq = typename SpliceSeqImpl<Seq, Exclude>::Type;
+
 
 template <typename T, T... Seq, T... Exclude>
 struct SpliceSeqImpl<ValueSequence<T, Seq...>, ValueSequence<T, Exclude...>> {
@@ -696,6 +701,7 @@ struct SpliceSeqImpl<ValueSequence<T, Seq...>, ValueSequence<T, Exclude...>> {
 ///@{ @internal  SeqSort helper metafunction to sort a ValueSequence.
 template <typename Seq, typename Compare>         struct SeqSortImpl;
 template <typename Seq, typename Compare = Less>  using  SeqSort = typename SeqSortImpl<Seq, Compare>::Type;
+
 
 template <typename SeqA, typename SeqB, typename Compare, typename Enable = void>  struct SeqMergeSortImpl;
 template <typename SeqA, typename SeqB, typename Compare = Less>
@@ -745,8 +751,8 @@ struct SeqSortImpl<ValueSequence<T, Seq...>, Compare> {
 
 
 // =====================================================================================================================
-/// @internal  Transparent wrapper around a type, as if it were passed as a function argument.
-/// @note      Depending on the platform ABI, like in MSVC x86-32, ArgWrappers might be never passed via registers.
+/// @internal Transparent wrapper around a type, as if it were passed as a function argument.
+/// @note     Depending on platform ABI (eg x86-32), ArgWrapper<T> is never passed in registers, unlike maybe plain T!
 template <typename T>
 class ArgWrapper {
   using Type      = RemoveRef<T>;
@@ -762,7 +768,7 @@ public:
   Reference Get()      { return data_; } ///< Explicitly retrieves the underlying data.
   operator Reference() { return data_; } ///< Implicit conversion operator to a reference of the underlying type.
 
-  AddPointer<Type> operator&() { return &data_; }  ///< Reference operator.
+  AddPointer<Type> operator&() { return &data_; }  ///< Implicit pointer operator, strip away ArgWrapper<T>* to plain T*
 
   ///@{ In lieu of no "operator.", dereference-like semantics are allowed for all types for struct field access, etc.
   template <typename U = Element> auto operator->() -> EnableIf<std::is_same<U, Type>::value,     U*> { return &data_; }
@@ -848,6 +854,7 @@ struct TokenizeFunctionQualifiersImpl<R(*)(A..., ...), void> {
   static constexpr auto Convention = Call::Variadic;
   using StripAll                   = R(A..., ...);
   using StripConvention            = R(*)(A..., ...);
+  using StripThisQualifiers        = R(*)(A..., ...);
 };
 
 #define PATCHER_TOKENIZE_FUNCTION_QUALIFIERS_DEF(conv, name, ...)                                         \
@@ -856,6 +863,7 @@ struct TokenizeFunctionQualifiersImpl<R(conv*)(A...), EnableIfConventionExists<C
   static constexpr auto Convention = Call::name;                                                          \
   using StripAll                   = R(A...);                                                             \
   using StripConvention            = R(*)(A...);                                                          \
+  using StripThisQualifiers        = R(conv*)(A...);                                                      \
 };
 
 #define PATCHER_TOKENIZE_PMF_QUALIFIERS_DEF(conv, name, cv, ref, ...)                                     \
@@ -953,8 +961,8 @@ struct FuncSig {
   static constexpr size_t TotalParamSize                    = Sum(ArgSize<A>()...);      ///< Total aligned params size.
   static constexpr size_t StackAlignment                    = GetStackAlignment<A...>(); ///< Stack alignment for args.
 
-  using ThisPtr   = AddPtrIfValue<This>;  ///< "this" qualified parameter type.
-  using ReturnPtr = AddPtrIfValue<R>;     ///< Return pointer parameter type.
+  using ThisPtr   = AddPtrIfValue<This>;  ///< "this" pointer parameter type.
+  using ReturnPtr = AddPtrIfValue<R>;     ///< "return" pointer parameter type.
 
   using FnBase_ = Conditional<(HasThisPtr && HasReturnPtr),  ReturnPtr(ThisPtr, ReturnTag<R>&, A...),
                   Conditional<HasThisPtr,                    R(ThisPtr, A...),  R(A...)>>;
@@ -967,7 +975,7 @@ struct FuncSig {
   using AllParams = GetParams<Function>;                                     ///< All params including implicit ones.
   template <size_t N>  using Param = TupleElement<N, Params>;                ///< Nth parameter's type.
 
-  /// Returns a FuncSig with the "this" (first) parameter removed.
+  /// Returns a FuncSig with the "this" (usually 1st) parameter removed.
   using StripThis = Conditional<HasThisPtr, FuncSig<R, Call::Unknown, Variadic, void, A...>, FuncSig>;
 };
 
@@ -1066,6 +1074,7 @@ struct LambdaInvokerImpl<Return(Lambda::*)(Args...), true> {
 namespace Util {
 ///@{ Converts a non-capturing lambda or stateless functor to a function pointer (of the specified calling convention).
 ///   The returned function pointer can be passed to PatchContext methods, as well as having general callable uses.
+///   @see Raymond Chen's blog post on lambda pointers: https://devblogs.microsoft.com/oldnewthing/20150220-00/?p=44623
 #define PATCHER_LAMBDA_PTR_DEF(convention, name, ...)  \
 template <typename T>  PATCHER_INVOKE_DEF(name)  name##LambdaPtr(T) { return &Impl::LambdaInvoker<T>::name;    }
 template <typename T>  PATCHER_INVOKE_DEF(Default)     LambdaPtr(T) { return &Impl::LambdaInvoker<T>::Default; }
@@ -1086,6 +1095,7 @@ constexpr size_t GetInvokeFunctorNumPadders(size_t stackAlignment = PATCHER_DEFA
 
 // =====================================================================================================================
 ///@{ @internal  Helper metafunction that produces a BoolSequence for whether args should be placed in registers or not.
+///              This is ultimately needed in order to inject extra stack-only args to a function call, for example.
 ///
 /// @warning POD type detection, particularly large struct types, can produce false positives, especially without C++17.
 ///          This becomes yet more problematic with calling conventions that allow GPR splitting (Regcall and Regparm*).
@@ -1323,6 +1333,7 @@ void** GetVftable(
 /// @note  For virtual PMFs, either an object instance must be provided, or a dummy object instance will attempt to be
 ///        created (may be unsafe!).  Class cannot multiply inherit.
 /// @see   PATCHER_MFN_PTR() macro, which is more robust for certain compilers and more reliable for virtual methods.
+///        https://developer.apple.com/documentation/kernel/osmemberfunctioncast has info on Itanium/Unix/SysV ABI PMFs.
 template <typename Fn, typename T>
 auto PmfCast(
   Fn    T::*  pmf,

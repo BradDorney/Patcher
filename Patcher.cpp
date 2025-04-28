@@ -1347,6 +1347,7 @@ static Status FindHookPatchRegion(
           BitFlagTest(memInfo.Protect, ExecutableProtectFlags))
       {
         // Padder bytes are typically int 3 (0xCC), nop (0x90), or NUL.
+        // Note that this is a heuristic!  x86 ISA is variable-length - reverse reading frames are not guaranteed!
         // ** TODO Check for 2 or more NUL?
         for (int32 i = 1; ((pReader[-i] == 0xCC) || (pReader[-i] == 0x90)); ++i) {
           if (i >= static_cast<int32>(sizeof(Jmp32))) {

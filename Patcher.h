@@ -48,6 +48,8 @@ namespace Patcher {
 ///        Calling methods with address provided as a pointer type will not relocate.
 class PatchContext {
 public:
+  using Status = PatcherStatus;  ///< Shorthand for @ref Patcher::PatcherStatus.
+
   template <typename T>  using Span = Impl::Span<T>;
   using TargetPtr   = Impl::TargetPtr;
   using FunctionRef = Impl::FunctionRef;
@@ -70,16 +72,16 @@ public:
 
   /// Gets the status of this context.  This can be called once after multiple Write/Memcpy/Hook/etc. calls, rather than
   /// checking the returned status of each call individually.
-  PatcherStatus GetStatus() const { return status_; }
+  Status GetStatus() const { return status_; }
 
-  PatcherStatus ResetStatus();  ///< Resets the tracked status of this context for non-fatal errors (for user handling).
+  Status ResetStatus();  ///< Resets the tracked status of this context for non-fatal errors (for user handling).
 
   void* GetModule() const { return hModule_; }  ///< Gets the OS module handle associated with this context.
 
   ///@{ Reverts all patches, releases any module reference held, and sets the module associated with this context.
-  PatcherStatus SetModule() { return SetModule(static_cast<const char*>(nullptr), false); }
-  PatcherStatus SetModule(const char* pModuleName, bool loadModule   = false);
-  PatcherStatus SetModule(const void* hModule,     bool addReference = false);
+  Status SetModule() { return SetModule(static_cast<const char*>(nullptr), false); }
+  Status SetModule(const char* pModuleName, bool loadModule   = false);
+  Status SetModule(const void* hModule,     bool addReference = false);
   ///@}
 
   ///@{ Fixes up a raw address (from the module's default base address), adjusting it for runtime base relocation.
@@ -97,22 +99,21 @@ public:
 
   /// Writes the given value to module memory.
   template <typename T, typename = Impl::EnableIf<std::is_base_of<FunctionRef, T>::value == false>>
-  PatcherStatus Write(TargetPtr pAddress, const T& value) { return Memcpy<sizeof(T)>(pAddress, &value); }
+  Status Write(TargetPtr pAddress, const T& value) { return Memcpy<sizeof(T)>(pAddress, &value); }
 
   /// Writes the given FunctionRef address to module memory.
-  PatcherStatus Write(TargetPtr pAddress, const FunctionRef& pfnNewFunction);
+  Status Write(TargetPtr pAddress, const FunctionRef& pfnNewFunction);
 
   /// Writes the given bytes to module memory.
-  PatcherStatus WriteBytes(TargetPtr pAddress, Span<uint8> bytes)
-    { return Memcpy(pAddress, bytes.data(), bytes.size()); }
+  Status WriteBytes(TargetPtr pAddress, Span<uint8> bytes) { return Memcpy(pAddress, bytes.data(), bytes.size()); }
 
   /// Writes no-ops to module memory up to size in bytes.  If @ref size is 0, then overwrite a whole single instruction.
-  PatcherStatus WriteNop(TargetPtr pAddress, size_t size = 0);
+  Status WriteNop(TargetPtr pAddress, size_t size = 0);
 
   ///@{ Adds the specified module memory to the history tracker so it can be restored via Revert().
-  PatcherStatus Touch(TargetPtr pAddress, size_t size);
+  Status Touch(TargetPtr pAddress, size_t size);
   template <typename T, typename = decltype(sizeof(T))>
-  PatcherStatus Touch(T* pAddress) { return Touch(pAddress, sizeof(T)); };
+  Status Touch(T* pAddress) { return Touch(pAddress, sizeof(T)); };
   ///@}
 
   ///@{ Hooks the beginning of a function in module memory, and optionally returns a pointer to a trampoline function
@@ -132,17 +133,17 @@ public:
   /// ** @example  Hook(&Class::Fn,  Util::ThiscallFunctor([](Class* pThis, int a) { return pThis->b - a; }))
   ///
   /// ** Consider using PATCHER_MFN_PTR(Class::Fn) explicitly, especially for virtual methods.
-  PatcherStatus Hook(TargetPtr pAddress, const FunctionRef& pfnNewFunction, void* pPfnTrampoline = nullptr);
+  Status Hook(TargetPtr pAddress, const FunctionRef& pfnNewFunction, void* pPfnTrampoline = nullptr);
 
   template <typename T>
-  PatcherStatus Hook(TargetPtr pAddress, const FunctionRef& pfnNewFunction, T** pPfnTrampoline)
+  Status Hook(TargetPtr pAddress, const FunctionRef& pfnNewFunction, T** pPfnTrampoline)
     { return Hook(pAddress, pfnNewFunction, static_cast<void*>(pPfnTrampoline)); }
 
   template <typename T = void>
-  PatcherStatus Hook(TargetPtr pAddress, uintptr toAddress, T** pPfnTrampoline = nullptr)
+  Status Hook(TargetPtr pAddress, uintptr toAddress, T** pPfnTrampoline = nullptr)
     { return Hook(pAddress, FixPtr(toAddress), static_cast<void*>(pPfnTrampoline)); }
 
-  PatcherStatus Hook(TargetPtr pAddress, Offset pfnTrampolineOffset, const FunctionRef& pfnNewFunction) {
+  Status Hook(TargetPtr pAddress, Offset pfnTrampolineOffset, const FunctionRef& pfnNewFunction) {
     void*const pState = pfnNewFunction.FunctorState();
     return Hook(pAddress, pfnNewFunction, (pState == nullptr) ? nullptr : Util::PtrInc(pState, pfnTrampolineOffset));
   }
@@ -158,17 +159,17 @@ public:
   ///                                 state to pfnOriginal.  Use SetCapturedTrampoline for the first lambda capture.
   ///
   /// @see  Comments of @ref Hook for examples, which has similar usage.
-  PatcherStatus HookCall(TargetPtr pAddress, const FunctionRef& pfnNewFunction, void* pPfnOriginal = nullptr);
+  Status HookCall(TargetPtr pAddress, const FunctionRef& pfnNewFunction, void* pPfnOriginal = nullptr);
 
   template <typename T>
-  PatcherStatus HookCall(TargetPtr pAddress, const FunctionRef& pfnNewFunction, T** pPfnOriginal)
+  Status HookCall(TargetPtr pAddress, const FunctionRef& pfnNewFunction, T** pPfnOriginal)
     { return HookCall(pAddress, pfnNewFunction, static_cast<void*>(pPfnOriginal)); }
 
   template <typename T = void>
-  PatcherStatus HookCall(TargetPtr pAddress, uintptr toAddress, T** pPfnOriginal = nullptr)
+  Status HookCall(TargetPtr pAddress, uintptr toAddress, T** pPfnOriginal = nullptr)
     { return HookCall(pAddress, FixPtr(toAddress), static_cast<void*>(pPfnOriginal)); }
 
-  PatcherStatus HookCall(TargetPtr pAddress, Offset pfnOriginalOffset, const FunctionRef& pfnNewFunction) {
+  Status HookCall(TargetPtr pAddress, Offset pfnOriginalOffset, const FunctionRef& pfnNewFunction) {
     void*const pState = pfnNewFunction.FunctorState();
     return HookCall(pAddress, pfnNewFunction, (pState == nullptr) ? nullptr : Util::PtrInc(pState, pfnOriginalOffset));
   }
@@ -178,9 +179,9 @@ public:
   ///   registers is provided via function args, and control flow can be manipulated via the returned value.
   ///
   /// @param [in] pAddress   Address of the instruction where to insert the hook.
-  /// @param [in] registers  Registers to pass to the hook function.  Can be template-deduced.
-  /// @param [in] pfnHookCb  The hook callable to call instead.
-  /// @param [in] info       (Optional) Settings for callback behavior, performance, etc.  Some can be template-deduced.
+  /// @param [in] registers  (Optional) Registers to pass to the hook function. Can be template-deduced from @pfnHookCb.
+  /// @param [in] pfnHookCb  The hook callable to inject.
+  /// @param [in] info       (Optional) Settings for callback performance, behavior, etc.  Some msy be template-deduced.
   ///
   /// @example  LowLevelHook(0x402044,  [](Registers::Eax<int>& rw, Esi<bool> r) { ++rw;  return r ? 0 : 0x402046; })
   /// @example  LowLevelHook(0x14005200AF,  [=](Registers::Rsp<int64&, 16> stackVar) { stackVar /= someCapturedLocal; })
@@ -188,8 +189,8 @@ public:
   ///
   /// Available registers: [Eax, Ecx, Edx, Ebx, Esi, Edi, Ebp, Esp, Eflags] (x86-32)
   ///                      [Rax, Rcx, Rdx, Rbx, Rsi, Rdi, Rbp, Rsp, R8, R9, R10, R11, R12, R13, R14, R15, Rflags] (x64)
-  /// To write to registers, declare args with >& or >*, e.g. Eax<int>&, Ecx<int>*, Ebp<char*>&, R15<int64*>*
-  /// To read/write stack values, declare args with Esp<T&, N> or Rsp<T*, N>, where N is offset in bytes into the stack.
+  /// To write to registers, declare args suffixed with >& or >*, e.g. Eax<int>&, Ecx<int>*, Ebp<char*>&, R15<int64*>*
+  /// To read/write stack values, declare args like Esp<T&, N> or Rsp<T*, N>, where N is offset in bytes into the stack.
   ///
   /// Hook must return either void, or an address/pointer to jump to (where 0 or nullptr = original address by default).
   /// Return addresses within the overwritten area are allowed by default settings.
@@ -199,18 +200,18 @@ public:
   ///
   /// @warning  This requires 5 bytes at pAddress; if the last 4 bytes overlap any jump targets elsewhere in the module,
   ///           this could crash.
-  PatcherStatus LowLevelHook(
+  Status LowLevelHook(
     TargetPtr pAddress, Span<RegisterInfo> registers, const FunctionRef& pfnHookCb, const LowLevelHookInfo& info = {});
 
   template <typename T, typename Enable = decltype(FunctionRef(std::declval<T>()))>
-  PatcherStatus LowLevelHook(TargetPtr pAddress, T&& pfnHookCb, LowLevelHookInfo info = {}) {
+  Status LowLevelHook(TargetPtr pAddress, T&& pfnHookCb, LowLevelHookInfo info = {}) {
     Impl::DeduceLowLevelHookSettings(info, Impl::FuncTraits<T>{});
     return LowLevelHook(pAddress, Impl::GetRegisterInfo<T>::Info, std::forward<T>(pfnHookCb), info);
   }
 
-  // ** TODO use SFINAE to clarify disambiguation between this LowLevelHook overload and the non-templated one
+  // ** TODO use SFINAE to clarify disambiguation between this LowLevelHook overload's registers and the non-tmpl one's?
   template <typename T, typename Enable = decltype(FunctionRef(std::declval<T>()))>
-  PatcherStatus LowLevelHook(TargetPtr pAddress, Span<Register> registers, T&& pfnHookCb, LowLevelHookInfo info = {}) {
+  Status LowLevelHook(TargetPtr pAddress, Span<Register> registers, T&& pfnHookCb, LowLevelHookInfo info = {}) {
     Impl::DeduceLowLevelHookSettings(info, Impl::FuncTraits<T>{}).argsAsStructPtr = 1;
     std::vector<RegisterInfo> registerInfos;
     for (Register reg : registers) { registerInfos.push_back({ reg }); }
@@ -227,12 +228,13 @@ public:
   /// @param [out] pRefsOut    (Optional) Pointer to a vector to contain all locations that have been patched up.
   ///
   /// @note If the module's .reloc section has been stripped (mainly only seen in some older exe files), this will fail.
-  PatcherStatus ReplaceStaticReferences(
+  Status ReplaceStaticReferences(
     TargetPtr pOldMemory, size_t size, const void* pNewMemory, std::vector<void*>* pRefsOut = nullptr);
+
+  // ** TODO need TargetPtr to be able to encode sizeof(OldT);  using sizeof(NewT) here isn't necessarily safe?
   template <typename T>
-  PatcherStatus ReplaceStaticReferences(
-    TargetPtr pOldMemory, const T* pNewMemory, std::vector<void*>* pRefsOut = nullptr)
-      { return ReplaceStaticReferences(pOldMemory, sizeof(T), pNewMemory, pRefsOut); }
+  Status ReplaceStaticReferences(TargetPtr pOldMemory, const T* pNewMemory, std::vector<void*>* pRefsOut = nullptr)
+    { return ReplaceStaticReferences(pOldMemory, sizeof(T), pNewMemory, pRefsOut); }
   ///@}
 
   /// Adds or modifies export table entries in the module.  The modified export table will be seen by future modules.
@@ -248,37 +250,48 @@ public:
   ///
   /// @example  EditExports({ { 0x401260, "AddUndecoratedExport" },  { 0x402000, "_AddDecoratedCFastcallExport@8"  } })
   /// @example  EditExports({ { 0x404000, 1 /* By ordinal */     },  { nullptr, "?DeleteDecoratedCppExport@@YAXXZ" } })
-  PatcherStatus EditExports(Span<ExportInfo> exportInfos);
+  Status EditExports(Span<ExportInfo> exportInfos);
 
-  int32         Memcmp(TargetPtr pAddress, const void* pSrc, size_t size);            ///< Safe memcmp of module memory.
-  PatcherStatus Memcpy(TargetPtr pAddress, const void* pSrc, size_t size);            ///< Safe memcpy to module memory.
-  PatcherStatus Memset(TargetPtr pAddress, uint8      value, size_t count);           ///< Safe memset to module memory.
-  template <size_t Size>  int32         Memcmp(TargetPtr pAddress, const void* pSrc); ///< Safe memcmp w/constexpr size.
-  template <size_t Size>  PatcherStatus Memcpy(TargetPtr pAddress, const void* pSrc); ///< Safe memcpy w/constexpr size.
-  template <size_t Count> PatcherStatus Memset(TargetPtr pAddress, uint8      value); ///< Safe memset w/constexpr size.
+  Status EditImports(Span<ImportInfo> importInfos);  // ** TODO Implement this for feature-parity with MS Detours
+
+  // ** TODO Figure out how EditExports/EditImports fits with *nix-land GOT/PLT
+
+  int32  Memcmp(TargetPtr pAddress, const void* pSrc, size_t size);            ///< Safe memcmp of module memory.
+  Status Memcpy(TargetPtr pAddress, const void* pSrc, size_t size);            ///< Safe memcpy to module memory.
+  Status Memset(TargetPtr pAddress, uint8      value, size_t count);           ///< Safe memset to module memory.
+  template <size_t Size>  int32  Memcmp(TargetPtr pAddress, const void* pSrc); ///< Safe memcmp w/constexpr size.
+  template <size_t Size>  Status Memcpy(TargetPtr pAddress, const void* pSrc); ///< Safe memcpy w/constexpr size.
+  template <size_t Count> Status Memset(TargetPtr pAddress, uint8      value); ///< Safe memset w/constexpr size.
 
   ///@{ Reassigns an object within module memory.
-  template <typename T1, typename T2>  PatcherStatus Assign(T1*    pAddress, T2&& value);
-  template <typename T>                PatcherStatus Assign(uintptr address,  T&& value)
+  template <typename T1, typename T2>  Status Assign(T1*    pAddress, T2&& value);
+  template <typename T>                Status Assign(uintptr address,  T&& value)
     { return Assign(FixPtr<Impl::RemoveConst<Impl::RemoveRef<T>>>(address), std::forward<T>(value)); }
   ///@}
 
   ///@{ In-place constructs an object within module memory.
-  template <typename T, typename... Args>  PatcherStatus Construct(T*     pAddress, Args&&... args);
-  template <typename T, typename... Args>  PatcherStatus Construct(uintptr address, Args&&... args)
+  template <typename T, typename... Args>  Status Construct(T*     pAddress, Args&&... args);
+  template <typename T, typename... Args>  Status Construct(uintptr address, Args&&... args)
     { return Construct<T>(FixPtr<T>(address), std::forward<Args>(args)...); }
   ///@}
 
-  PatcherStatus LockThreads();    ///< Freezes all other process threads to avoid races between writing and executing.
-  PatcherStatus UnlockThreads();  ///< Unfreezes all other process threads after having used LockThreads().
+  ///@{ In-place destroys an object within module memory.  @note This does not free the base object's memory!
+  template <typename T, typename... Args>  Status Destruct(T*     pAddress, Args&&... args);
+  template <typename T, typename... Args>  Status Destruct(uintptr address, Args&&... args)
+    { return Destruct<T>(FixPtr<T>(address), std::forward<Args>(args)...); }
+  ///@}
 
-  PatcherStatus Revert(TargetPtr pAddress);  ///< Reverts a patch that was previously written at the given address.
-  PatcherStatus RevertExports();             ///< Reverts exports that had been injected by EditExports().
-  PatcherStatus RevertAll();                 ///< Reverts all patches this context had applied, and resets the status.
+  Status LockThreads();    ///< Freezes all other process threads to avoid races between writing and executing.
+  Status UnlockThreads();  ///< Unfreezes all other process threads after having used LockThreads().
 
-  PatcherStatus ReleaseModule();  ///< If this PatchContext has loaded a module, releases its active handle to it.
+  Status Revert(TargetPtr pAddress);  ///< Reverts a patch that was previously written at the given address.
+  Status RevertExports();             ///< Reverts exports that had been injected by EditExports().
+  Status RevertAll();                 ///< Reverts all patches this context had applied, and resets the status.
 
-  size_t NumPatches() const { return history_.size(); }  ///< Returns the number of active patches.
+  Status ReleaseModule();  ///< If this PatchContext has loaded a module, releases its active handle to it.
+
+  size_t NumPatches() const { return history_.size();   }  ///< Returns the number of active patches.
+  bool   IsEmpty()    const { return NumPatches() == 0; }  ///< Is this an empty PatchContext?
 
   /// Returns true if the given address had previously been touched or patched.
   bool HasPatched(TargetPtr pAddress) const { return historyAt_.count(MaybeFixTargetPtr(pAddress)) != 0; }
@@ -295,17 +308,17 @@ private:
     { return pAddress.ShouldRelocate() ? FixPtr(pAddress) : static_cast<void*>(pAddress); }
 
   ///@{ Helper functions for barriering around memory writes.
-  uint32        BeginDeProtect(void* pAddress, size_t size);
-  void          EndDeProtect(void*   pAddress, size_t size, uint32 oldAttr);
-  PatcherStatus AdvanceThreads(const void* pAddress, size_t size);
+  uint32 BeginDeProtect(void* pAddress, size_t size);
+  void   EndDeProtect(void*   pAddress, size_t size, uint32 oldAttr);
+  Status AdvanceThreads(const void* pAddress, size_t size);
   ///@}
 
-  void*          hModule_;          ///< Handle to the module this PatchContext operates on.
-  bool           hasModuleRef_;     ///< If set, this PatchContext has acquired a reference to @ref hModule_.
-  ptrdiff_t      moduleRelocDelta_; ///< Delta between the module's preferred base address and its loaded address.
-  uint32         moduleHash_;       ///< Hash identifying the module based on its header attributes.
-  Allocator*     pAllocator_;       ///< Code allocator instance used by this PatchContext.
-  PatcherStatus  status_;           ///< Status of this PatchContext.  If this is an error, most methods become a no-op.
+  void*       hModule_;          ///< Handle to the module this PatchContext operates on.
+  bool        hasModuleRef_;     ///< If set, this PatchContext has acquired a reference to @ref hModule_.
+  ptrdiff_t   moduleRelocDelta_; ///< Delta between the module's preferred base address and its loaded address.
+  uint32      moduleHash_;       ///< Hash identifying the module based on its header attributes.
+  Allocator*  pAllocator_;       ///< Code allocator instance used by this PatchContext.
+  Status      status_;           ///< Status of this PatchContext.  If this is an error, most methods become a no-op.
 
   using OldDataStorage     = Impl::SmallVector<uint8, 8>;
   using TrackedAllocVector = Impl::SmallVector<std::pair<void*, size_t>, (IsX86_64 ? 2 : 1)>;      // pAlloc, sizeIfCode

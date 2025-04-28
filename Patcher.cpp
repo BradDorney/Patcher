@@ -1369,6 +1369,8 @@ static Status FindHookPatchRegion(
 // =====================================================================================================================
 // Functionally copies machine code instructions from one code memory location to another.
 // Note that this function does not flush the instruction cache.
+// Program counter-relative instructions require complicated fixups.
+// Note that this function does not flush the instruction cache!
 static void CopyInstructions(
   Assembler*         pWriter,
   const InsnVector&  insns,
@@ -2065,7 +2067,7 @@ void LowLevelHookBuilder::AlignAndReserveStackSpace() {
   if (settings_.noAlignStackPtr == false) {
     // Ensure the stack address upon reaching the upcoming call instruction is aligned to ABI requirements.
     // This always pushes the original stack pointer (and flags register if needed) to the stack after aligning.
-    // Generating this code isn't necessary if stack alignment <= register size (i.e. MSVC x86-32).
+    // Generating this code isn't necessary if stack alignment <= register size (i.e. MSVC x86-32 without FP registers).
     const size_t totalStackSize = RegisterSize * (stackSlots_.size()
                                                 - NumPassedViaRegisters()
                                                 + ShadowSpace
@@ -2200,7 +2202,7 @@ void LowLevelHookBuilder::CallUserFunction() {
 void LowLevelHookBuilder::DefaultReturnEpilog() {
   if ((settings_.noCustomReturnAddr || settings_.noNullReturnDefault) == false) {
     test(returnRegister, returnRegister);  // Test if returned address is nullptr
-    jnz(".useCustomReturnDestination");
+    jnz(".useCustomReturnDestination");    // Otherwise, goto CustomReturnEpilog()  (see below)
   }
 
   if (settings_.noNullReturnDefault == false) {

@@ -186,7 +186,6 @@
 #endif
 
 // =====================================================================================================================
-// Calling conventions.  These are ignored if they do not exist for the given target ISA and build config.
 // Calling conventions and attributes. These are ignored if they do not exist for the given target ISA and build config.
 #if PATCHER_MSVC || defined(__ICL)
 # define  PATCHER_CDECL       __cdecl
@@ -276,7 +275,6 @@ using uint32  = uint32_t;   ///< 32-bit unsigned integer type.
 using uint64  = uint64_t;   ///< 64-bit unsigned integer type.
 using uintptr = uintptr_t;  ///< Pointer-size unsigned integer type.
 
-namespace Registers { enum class Register : uint8; }
 namespace Registers { enum class Register : uint8; }  ///< Register types passed to LowLevelHook.
 
 // =====================================================================================================================

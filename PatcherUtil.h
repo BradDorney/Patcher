@@ -29,6 +29,7 @@
 
 #include "PatcherImpl.h"
 
+// =====================================================================================================================
 /// Status enum returned by PatchContext methods.
 enum class PatcherStatus : int32_t {
   Ok = 0,
@@ -51,11 +52,12 @@ enum class PatcherStatus : int32_t {
 namespace Patcher {
 
 namespace Util {
-/// Constant to specify to PatchContext::Hook() that the first lambda capture (which must be by value) is pfnTrampoline.
-/// For other functor types, it is recommended that you use a pointer-to-member-variable or offsetof() instead.
+/// Constant to specify to PatchContext::Hook() that the first lambda capture (which must be by-value) is pfnTrampoline.
+/// For other functor types, it is recommended that you use a pointer-to-member-variable or offsetof() instead of this!
 constexpr size_t SetCapturedTrampoline = 0;
 
 
+// =====================================================================================================================
 ///@{ Helpers to obtain a pointer to a particular function overload.
 /// @example  GetOverload<void(int)>(&Fn); GetOverload<bool()>(&Class::Fn); GetOverload<float __vectorcall(float)>(&Fn);
 ///           GetOverload<int() const>(&Class::Fn);
@@ -76,6 +78,7 @@ PATCHER_EMIT_CALLS(PATCHER_CREATE_FUNCTOR_INVOKER_DEF);
 } // Util
 
 
+// =====================================================================================================================
 /// Settings passed to LowLevelHook() for hook callback behavior, performance, etc.  Some flags can be template-deduced.
 struct LowLevelHookInfo {
   Impl::TargetPtr pDefaultReturnAddr; ///< If set, overrides the default return address when callback returns nullptr or
@@ -106,6 +109,7 @@ constexpr LowLevelHookInfo& DeduceLowLevelHookSettings(LowLevelHookInfo& info, I
 
 namespace Registers {
 #if PATCHER_X86_32
+// =====================================================================================================================
 /// x86_32 Register types passed to PatchContext::LowLevelHook().
 enum class Register : uint8 { Eax = 0, Ecx, Edx, Ebx, Esi, Edi, Ebp, GprLast = Ebp, Esp, Eflags, Count };
 
@@ -148,6 +152,7 @@ template <typename T>                     using Rflags = Impl::RegisterArg<Regis
 } // Registers
 
 
+// =====================================================================================================================
 /// Export insertion/modification info passed to PatchContext::EditExports().
 struct ExportInfo {
   ///@{ Constructor for defining an export by symbol name.

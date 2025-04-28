@@ -36,6 +36,14 @@
 
 // Defines
 
+///@{ @internal Utility macro which conditionally expands (or not) another macro.
+#define  PATCHER_EXPAND_IF(args)                 PATCHER_EXPAND_IF_IMPL args
+#define  PATCHER_EXPAND_IF_IMPL(intBool, value)  PATCHER_EXPAND_IF_##intBool(value)
+#define  PATCHER_EXPAND_IF_1(value)              value
+#define  PATCHER_EXPAND_IF_0(value)
+#define  PATCHER_EXPAND_IF_(value)
+///@}
+
 // =====================================================================================================================
 // Compiler/ABI detection
 #if (defined(PATCHER_CLANG) || defined(PATCHER_ICC) || defined(PATCHER_GCC) || defined(PATCHER_MSVC)) == false
@@ -59,6 +67,20 @@
 # endif
 #endif
 
+///@{ @internal PATCHER_IF_MS_ABI, PATCHER_IF_UNIX_ABI, PATCHER_ABI_SELECTOR expands conditionally upon MS or Unix ABI.
+#if PATCHER_MS_ABI
+# define PATCHER_IF_MS_ABI(...)  __VA_ARGS__
+#else
+# define PATCHER_IF_MS_ABI(...)
+#endif
+#if PATCHER_UNIX_ABI
+# define PATCHER_IF_UNIX_ABI(...)  __VA_ARGS__
+#else
+# define PATCHER_IF_UNIX_ABI(...)
+#endif
+#define  PATCHER_ABI_SELECTOR(ms, unix)  PATCHER_IF_MS_ABI(ms)  PATCHER_IF_UNIX_ABI(unix)
+///@}
+
 // =====================================================================================================================
 // Architecture detection
 #if (defined(PATCHER_X86_32) || defined(PATCHER_X86_64)) == false
@@ -69,6 +91,24 @@
 # endif
 #endif
 #define   PATCHER_X86     (PATCHER_X86_32 || PATCHER_X86_64)
+
+///@{ @internal PATCHER_IF_X86_32, PATCHER_IF_X86_64, PATCHER_X86_SELECTOR expands conditionally upon x86- 32 or 64.
+#if PATCHER_X86_32
+# define PATCHER_IF_X86_32(...)  __VA_ARGS__
+#else
+# define PATCHER_IF_X86_32(...)
+#endif
+#if PATCHER_X86_64
+# define PATCHER_IF_X86_64(...)  __VA_ARGS__
+#else
+# define PATCHER_IF_X86_64(...)
+#endif
+#if PATCHER_X86
+# define PATCHER_X86_SELECTOR(x86_32, x86_64)  PATCHER_IF_X86_32(x86_32)  PATCHER_IF_X86_64(x86_64)
+#else
+# define PATCHER_X86_SELECTOR(x86_32, x86_64)
+#endif
+///@}
 
 // Platform-specific headers
 #if PATCHER_X86
@@ -93,6 +133,8 @@
 #  define  PATCHER_X86_SSE_LEVEL  2                     // SSE2
 # elif __SSE__  || (_M_IX86_FP >= 1)
 #  define  PATCHER_X86_SSE_LEVEL  1                     // SSE
+# else
+#  define  PATCHER_X86_SSE_LEVEL  0                     // MMX, x87
 # endif
 #endif
 
@@ -159,7 +201,7 @@
 # endif
 # define  PATCHER_REGPARM(n)
 # define  PATCHER_SSEREGPARM
-# define  PATCHER_MSCALL      __cdecl
+# define  PATCHER_MSCALL      __cdecl  // ** TODO __fastcall?  See https://learn.microsoft.com/en-us/cpp/cpp/fastcall
 # define  PATCHER_UNIXCALL
 
 # define  PATCHER_ATTRIBUTE(attr)
@@ -177,14 +219,9 @@
 # define  PATCHER_UNIXCALL    PATCHER_ATTRIBUTE(__sysv_abi__)
 
 ///@{ @internal  Macro that expands to an attribute if it is defined, otherwise expands to nil.
-# define  PATCHER_ATTRIBUTE(attr)        PATCHER_ATTR_IMPL1((__has_attribute(attr), __attribute((attr))))
-# define  PATCHER_ATTR_PARM(attr, ...)   PATCHER_ATTR_IMPL1((__has_attribute(attr), __attribute((attr(__VA_ARGS__)))))
+# define  PATCHER_ATTRIBUTE(attr)        PATCHER_EXPAND_IF((__has_attribute(attr), __attribute((attr))))
+# define  PATCHER_ATTR_PARM(attr, ...)   PATCHER_EXPAND_IF((__has_attribute(attr), __attribute((attr(__VA_ARGS__)))))
 ///@}
-
-# define  PATCHER_ATTR_IMPL1(args)       PATCHER_ATTR_IMPL2 args
-# define  PATCHER_ATTR_IMPL2(has, attr)  PATCHER_ATTR_EXPAND_##has(attr)
-# define  PATCHER_ATTR_EXPAND_1(attr)    attr
-# define  PATCHER_ATTR_EXPAND_0(attr)
 #endif
 
 /// @internal  PATCHER_ABICALL expands to the ABI-specified default calling convention.
@@ -244,20 +281,11 @@ namespace Registers { enum class Register : uint8; }  ///< Register types passed
 
 // =====================================================================================================================
 // Constants
+constexpr bool IsX86_32 = PATCHER_X86_SELECTOR(true  ||, false ||) false;
+constexpr bool IsX86_64 = PATCHER_X86_SELECTOR(false ||, true  ||) false;
+constexpr bool IsX86    = IsX86_32 || IsX86_64;
 
-#if PATCHER_X86_32
-constexpr bool IsX86_32 = true;
-constexpr bool IsX86_64 = false;
-#elif PATCHER_X86_64
-constexpr bool IsX86_32 = false;
-constexpr bool IsX86_64 = true;
-#else
-constexpr bool IsX86_32 = false;
-constexpr bool IsX86_64 = false;
-#endif
-constexpr bool IsX86 = IsX86_32 || IsX86_64;
-
-#if PATCHER_MS_ABI
+#if   PATCHER_MS_ABI
 constexpr bool IsMsAbi   = true;
 constexpr bool IsUnixAbi = false;
 #elif PATCHER_UNIX_ABI
@@ -345,43 +373,49 @@ enum PropertyFlags : uint32 {
 /// https://gcc.gnu.org/onlinedocs/gcc/x86-Function-Attributes.html
 /// https://raw.githubusercontent.com/wiki/hjl-tools/x86-psABI/intel386-psABI-1.1.pdf
 /// https://raw.githubusercontent.com/wiki/hjl-tools/x86-psABI/x86-64-psABI-1.0.pdf
-/// https://intel.com/content/www/us/en/develop/documentation/cpp-compiler-developer-guide-and-reference/top/compiler-reference/c-c-calling-conventions.html
-// ** TODO This table is incomplete.  Need to double check:
-// - Differences with member vs non-member functions
-// - C conventions (e.g. C stdcall needs PodTypesInGprs) - can extern "C" be detected from the function type?
-// - FP/vector registers
-// - Non-MS conventions corner cases
-// - Pass-by-reference or pass-by-register corner cases
-// - Somehow handle __attributes callee_pop_aggregate_return(n), no_caller_saved_registers, interrupt?
-//   These can't be detected from the function type!
-// - Implementing handling for pass-by-register (esp register splitting cases) for structs requires C++14 Type Loophole
-//   (see boost.pfr, https://alexpolt.github.io/type-loophole.html)
-//   But can't handle bitfields, custom field align, mixed visibility!
+/// https://intel.com/content/www/us/en/docs/cpp-compiler/developer-guide-reference/2021-8/c-c-calling-conventions.html
+/// https://www.agner.org/optimize/calling_conventions.pdf
 constexpr struct Traits {
   bool    supported;       ///< Does the compiler and platform support this calling convention?
   uint32  numArgSgprs;     ///< Max number of standard general-purpose registers used for passing args.
   uint32  numReturnSgprs;  ///< Max number of standard general-purpose registers used for passing return value.
   uint32  flags;           ///< Calling convention properties.
 } For[size_t(Call::Count)] = {
-  {                                                                                                                 },
+  {                                                                                                        },
 #if PATCHER_X86_32
-  { Exists(Call::Cdecl),       0,                    2,  CalleePopReturnPtr & IfUnixAbi                             },
-  { Exists(Call::Stdcall),     0,                    2,  CalleeCleanup                                              },
-  { Exists(Call::Fastcall),    2,                    2,  CalleeCleanup /* Return ptr on stack if not member func */ },
-  { Exists(Call::Thiscall),    1,                    2,  CalleeCleanup                                              },
-  { Exists(Call::Vectorcall),  2,                    2,  CalleeCleanup                                              },
-  { Exists(Call::Regcall),     (IsMsAbi ? 4 : 5),    2,  PodTypesInGprs | PodTypeGprSplit | ClassTypesByRef         },
-  { Exists(Call::Regparm1),    1,                    2,  PodTypesInGprs | PodTypeGprSplit                           },
-  { Exists(Call::Regparm2),    2,                    2,  PodTypesInGprs | PodTypeGprSplit                           },
-  { Exists(Call::Regparm),     3,                    2,  PodTypesInGprs | PodTypeGprSplit                           },
-  { Exists(Call::SseRegparm),  0,                    2,  CalleePopReturnPtr & IfUnixAbi                             }
+  { Exists(Call::Cdecl),       0,           2,  CalleePopReturnPtr & IfUnixAbi                             },
+  { Exists(Call::Stdcall),     0,           2,  CalleeCleanup                                              },
+  { Exists(Call::Fastcall),    2,           2,  CalleeCleanup /* Return ptr on stack if not member func */ },
+  { Exists(Call::Thiscall),    1,           2,  CalleeCleanup                                              },
+  { Exists(Call::Vectorcall),  2,           2,  CalleeCleanup                                              },
+  { Exists(Call::Regcall),     5-IsMsAbi,   2,  PodTypesInGprs | PodTypeGprSplit | ClassTypesByRef         },
+  { Exists(Call::Regparm1),    1,           2,  PodTypesInGprs | PodTypeGprSplit                           },
+  { Exists(Call::Regparm2),    2,           2,  PodTypesInGprs | PodTypeGprSplit                           },
+  { Exists(Call::Regparm),     3,           2,  PodTypesInGprs | PodTypeGprSplit                           },
+  { Exists(Call::SseRegparm),  0,           2,  CalleePopReturnPtr & IfUnixAbi                             }
 #elif PATCHER_X86_64
-  { Exists(Call::Mscall),      4,                    1,  ShadowSpace | FixedLayout | AnyTypesInGprs | BigTypesByRef },
-  { Exists(Call::Vectorcall),  4,                    1,  ShadowSpace | FixedLayout | AnyTypesInGprs | BigTypesByRef },
-  { Exists(Call::Unixcall),    6,                    2,  PodTypesInGprs                                             },
-  { Exists(Call::Regcall),     (IsMsAbi ? 11 : 12),  2,  PodTypesInGprs | PodTypeGprSplit | ClassTypesByRef         }
+  { Exists(Call::Mscall),      4,           1,  ShadowSpace | FixedLayout | AnyTypesInGprs | BigTypesByRef },
+  { Exists(Call::Vectorcall),  4,           1,  ShadowSpace | FixedLayout | AnyTypesInGprs | BigTypesByRef },
+  { Exists(Call::Unixcall),    6,           2,  PodTypesInGprs                                             },
+  { Exists(Call::Regcall),     12-IsMsAbi,  2,  PodTypesInGprs | PodTypeGprSplit | ClassTypesByRef         }
 #endif
 };
+// ** TODO This table is incomplete.  Need to double check:
+// - Any more differences with member vs non-member functions?
+// - Classes with mixed public+private fields can never(?) be passed by value in registers - see the COM C++ ABI problem
+// - C vs C++ convention may differ (eg C stdcall needs PodTypesInGprs?) - can extern "C" be detected in template land?
+// - Non-MS calling conventions corner cases, e.g. fastcall "return ptr on stack if not member func" thing?
+// - Pass-by-reference or pass-by-register corner cases
+// - Somehow handle __attribute__(callee_pop_aggregate_return(n)), (no_caller_saved_registers), (interrupt)?
+//     These can't be detected from the function type, unlike calling convention!
+// - x87 MMX, SSE, AVX, etc FP/vector registers?  x87 is used for 80bit/TBYTE long double today.  x87 has the reg stack.
+//     Linux kernel process context switch purposely avoids XSAV/XRSTOR since they're too slow, just save/restores
+//     ext reg state piecemeal - look into how?
+// - Implementing handling for pass-by-register (esp register splitting cases) for structs requires C++14 Type Loophole
+//     (see boost.pfr, https://alexpolt.github.io/type-loophole.html)
+//     But can't handle bitfields, custom field align, or mixed visibility!
+//     C++17 Structured Bindings are a little better, but still strangely limited.
+//     Clang has a weird hack involving "overloaded lambdas" + structured bindings in decltype-deduction, maybe useful?
 }  // CallTraits
 
 constexpr const CallTraits::Traits& GetCallTraits(Call convention) { return CallTraits::For[size_t(convention)]; }

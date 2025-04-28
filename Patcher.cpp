@@ -59,17 +59,9 @@ using namespace Registers;
 #define PATCHER_PACK_STRUCT      PATCHER_PRAGMA(pack(push, 1))
 #define PATCHER_END_PACK_STRUCT  PATCHER_PRAGMA(pack(pop))
 
-#if PATCHER_X86_32
-# define IF_X86_32(...)  __VA_ARGS__
-#else
-# define IF_X86_32(...)
-#endif
-#if PATCHER_X86_64
-# define IF_X86_64(...)  __VA_ARGS__
-#else
-# define IF_X86_64(...)
-#endif
-#define X86_SELECTOR(x86_32, x86_64)  IF_X86_32(x86_32) IF_X86_64(x86_64)
+#define IF_X86_32     PATCHER_IF_X86_32
+#define IF_X86_64     PATCHER_IF_X86_64
+#define X86_SELECTOR  PATCHER_X86_SELECTOR
 
 // =====================================================================================================================
 // Internal typedefs

@@ -365,8 +365,8 @@ enum PropertyFlags : uint32 {
 ///
 /// @note  For more information, see the following documentation:
 /// https://learn.microsoft.com/en-us/cpp/cpp/calling-conventions
-/// https://docs.microsoft.com/en-us/cpp/cpp/argument-passing-and-naming-conventions
-/// https://docs.microsoft.com/en-us/cpp/build/x64-calling-convention
+/// https://learn.microsoft.com/en-us/cpp/cpp/argument-passing-and-naming-conventions
+/// https://learn.microsoft.com/en-us/cpp/build/x64-calling-convention
 /// https://clang.llvm.org/docs/AttributeReference.html
 /// https://gcc.gnu.org/onlinedocs/gcc/x86-Function-Attributes.html
 /// https://raw.githubusercontent.com/wiki/hjl-tools/x86-psABI/intel386-psABI-1.1.pdf
@@ -383,7 +383,7 @@ constexpr struct Traits {
 #if PATCHER_X86_32
   { Exists(Call::Cdecl),       0,           2,  CalleePopReturnPtr & IfUnixAbi                             },
   { Exists(Call::Stdcall),     0,           2,  CalleeCleanup                                              },
-  { Exists(Call::Fastcall),    2,           2,  CalleeCleanup /* Return ptr on stack if not member func */ },
+  { Exists(Call::Fastcall),    2,           2,  CalleeCleanup /* Aggregate pRetn on stack if not method */ },
   { Exists(Call::Thiscall),    1,           2,  CalleeCleanup                                              },
   { Exists(Call::Vectorcall),  2,           2,  CalleeCleanup                                              },
   { Exists(Call::Regcall),     5-IsMsAbi,   2,  PodTypesInGprs | PodTypeGprSplit | ClassTypesByRef         },

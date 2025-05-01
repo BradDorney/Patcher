@@ -78,9 +78,9 @@ patcher.Hook(&SomeFunction, SetCapturedTrampoline, [F = &SomeFunction](int x) ->
 // In this example, we assume the target function uses the thiscall calling convention, so we use the ThiscallFunctor
 // util to convert the lambda to use thiscall.
 //
-// Valid *Functor types include:
-// x86-32: StdcalllFunctor,  Fastcall,  Thiscall,    Vectorcall,  Regcall,  Regparm{1,2},  SseRegparm
-// x86-64: MscallFunctor,    Unixcall,  Vectorcall,  Regcall
+// Valid Functor types include:
+// x86-32: StdcallFunctor,  Fastcall,  Thiscall,    Vectorcall,  Regcall,  Regparm{1,2},  SseRegparm
+// x86-64: MscallFunctor,   Unixcall,  Vectorcall,  Regcall
 patcher.Hook(
   PATCHER_MFN_PTR(SomeClass::SomeVirtualFunction),
   ThiscallFunctor([](SomeClass* pThis, int x) { pThis->someField_ -= x; }));

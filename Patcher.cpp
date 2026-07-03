@@ -1079,7 +1079,7 @@ void PatchContext::EndDeProtect(
 }
 
 // =====================================================================================================================
-Status PatchContext::ReplaceStaticReferences(
+Status PatchContext::HookRelocations(
   TargetPtr            pOldMemory,
   size_t               size,
   const void*          pNewMemory,

@@ -11,7 +11,7 @@ Patcher's features include:
 * Redirect specific function call instructions (`HookCall`)
 * Insert instruction-level hooks, with read/write access to registers and the ability to change control flow, with normal C++ code (`LowLevelHook`)
 * Edit the module's exports, redirecting them for subsequently-loaded importing modules (`EditExports`)
-* Redirect all fixed references to a global variable/object/function (`ReplaceStaticReferences`)
+* Redirect all fixed references to a global variable/object/function (`HookRelocations`)
 * Overwrite and later restore arbitrary bytes, and both POD and non-POD typed data (`Write<T>`, `WriteBytes`, `WriteNop`)
 * Convert capturing lambdas and functors to plain function pointers of any calling convention (`CdeclFunctor`, `StdcallFunctor`, `ThiscallFunctor`, etc.)
 
@@ -117,7 +117,7 @@ patcher.Write<int[3]>(0x5F29AC, { -1, 0, 1 });
 
 // Replace static fixed references within the module to a global array, with a larger-sized one of our own.
 static int newExtendedGlobalArray[10] = { };  // Expand from int[3] (old size) to int[10] (new size)
-patcher.ReplaceStaticReferences(0x608220, sizeof(int[3]), &newExtendedGlobalArray);
+patcher.HookRelocations(0x608220, sizeof(int[3]), &newExtendedGlobalArray);
 
 // Write some non-POD data by value assignment.
 patcher.Assign(0x5FF740, std::vector<int>(20));

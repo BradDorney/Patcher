@@ -228,13 +228,13 @@ public:
   /// @param [out] pRefsOut    (Optional) Pointer to a vector to contain all locations that have been patched up.
   ///
   /// @note If the module's .reloc section has been stripped (mainly only seen in some older exe files), this will fail.
-  Status ReplaceStaticReferences(
+  Status HookRelocations(
     TargetPtr pOldMemory, size_t size, const void* pNewMemory, std::vector<void*>* pRefsOut = nullptr);
 
   // ** TODO need TargetPtr to be able to encode sizeof(OldT);  using sizeof(NewT) here isn't necessarily safe?
   template <typename T>
-  Status ReplaceStaticReferences(TargetPtr pOldMemory, const T* pNewMemory, std::vector<void*>* pRefsOut = nullptr)
-    { return ReplaceStaticReferences(pOldMemory, sizeof(T), pNewMemory, pRefsOut); }
+  Status HookRelocations(TargetPtr pOldMemory, const T* pNewMemory, std::vector<void*>* pRefsOut = nullptr)
+    { return HookRelocations(pOldMemory, sizeof(T), pNewMemory, pRefsOut); }
   ///@}
 
   /// Adds or modifies export table entries in the module.  The modified export table will be seen by future modules.

@@ -429,6 +429,23 @@ PatcherStatus PatchContext::Construct(
 
   if (status_ == PatcherStatus::Ok) {
     new(pAddress) T(std::forward<Args>(args)...);
+    // ** TODO Need to pass a typed destroy function here
+    EndDeProtect(pAddress, sizeof(T), oldAttr);
+  }
+
+  return status_;
+}
+
+// =====================================================================================================================
+template <typename T>
+PatcherStatus PatchContext::Destruct(
+  T*  pAddress)
+{
+  assert(pAddress != nullptr);
+  const uint32 oldAttr = BeginDeProtect(pAddress, sizeof(T));
+
+  if (status_ == PatcherStatus::Ok) {
+    pAddress->~T();
     EndDeProtect(pAddress, sizeof(T), oldAttr);
   }
 

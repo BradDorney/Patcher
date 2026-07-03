@@ -127,27 +127,20 @@ template <typename T>                     using Eflags = Impl::RegisterArg<Regis
 
 #elif PATCHER_X86_64
 /// x86_64 Register types passed to PatchContext::LowLevelHook().
-enum class Register : uint8
-  { Rax = 0, Rcx, Rdx, Rbx, Rsi, Rdi, R8, R9, R10, R11, R12, R13, R14, R15, Rbp, GprLast = Rbp, Rsp, Rflags, Count };
+enum class Register : uint8 {
+  Rax = 0, Rcx, Rdx, Rbx, Rsi, Rdi, R8, R9, R10, R11, R12, R13, R14, R15,
+  R16, R17, R18, R19, R20, R21, R22, R23, R24, R25, R26, R27, R28, R29, R30, R31,  // APX
+  Rbp, GprLast = Rbp, Rsp, Rflags, Count };
 
 ///@{ Shorthand aliases for RegisterArgs of each x86_64 Register type.  Used for LowLevelHook() hook functions.
-template <typename T>                     using Rax    = Impl::RegisterArg<Register::Rax,    T>;
-template <typename T>                     using Rcx    = Impl::RegisterArg<Register::Rcx,    T>;
-template <typename T>                     using Rdx    = Impl::RegisterArg<Register::Rdx,    T>;
-template <typename T>                     using Rbx    = Impl::RegisterArg<Register::Rbx,    T>;
-template <typename T>                     using Rsi    = Impl::RegisterArg<Register::Rsi,    T>;
-template <typename T>                     using Rdi    = Impl::RegisterArg<Register::Rdi,    T>;
-template <typename T>                     using R8     = Impl::RegisterArg<Register::R8,     T>;
-template <typename T>                     using R9     = Impl::RegisterArg<Register::R9,     T>;
-template <typename T>                     using R10    = Impl::RegisterArg<Register::R10,    T>;
-template <typename T>                     using R11    = Impl::RegisterArg<Register::R11,    T>;
-template <typename T>                     using R12    = Impl::RegisterArg<Register::R12,    T>;
-template <typename T>                     using R13    = Impl::RegisterArg<Register::R13,    T>;
-template <typename T>                     using R14    = Impl::RegisterArg<Register::R14,    T>;
-template <typename T>                     using R15    = Impl::RegisterArg<Register::R15,    T>;
-template <typename T>                     using Rbp    = Impl::RegisterArg<Register::Rbp,    T>;
-template <typename T, uint32 Offset = 0>  using Rsp    = Impl::RegisterArg<Register::Rsp,    T, Offset>;
-template <typename T>                     using Rflags = Impl::RegisterArg<Register::Rflags, T>;
+#define PATCHER_EMIT_REGISTER_NAMES_X86_64($)                                                                         \
+  $(Rax) $(Rcx) $(Rdx) $(Rbx) $(Rsi) $(Rdi) $(R8)  $(R9)  $(R10) $(R11) $(R12) $(R13) $(R14) $(R15)                \
+  $(R16) $(R17) $(R18) $(R19) $(R20) $(R21) $(R22) $(R23) $(R24) $(R25) $(R26) $(R27) $(R28) $(R29) $(R30) $(R31)  \
+  $(Rbp) $(Rflags)
+
+#define PATCHER_REGISTER_DEF(RegName)  template <typename T>  using RegName = Impl::RegisterArg<Register::RegName, T>;
+PATCHER_EMIT_REGISTER_NAMES_X86_64(PATCHER_REGISTER_DEF);
+template <typename T, uint32 Offset = 0>  using Rsp = Impl::RegisterArg<Register::Rsp,  T,  Offset>;
 ///@}
 #endif
 } // Registers

@@ -1483,15 +1483,17 @@ auto PmfCast(
 ///
 /// @note  This does not work on overloaded functions.  There may be compiler-specific limitations.
 #if PATCHER_MSVC && PATCHER_X86_32
+# define PATCHER_SET_RETURN_PTR(Symbol) { __asm{ mov eax, Symbol }; }
+
 // MSVC (x86_32):  Inline __asm can reference C++ symbols, including virtual methods, by address.
 # if PATCHER_INCREMENTAL_LINKING == false
 #  define PATCHER_MFN_PTR(method, ...)  [] { using Pfn = typename Patcher::Impl::FuncTraits<decltype(&method)>::Pfn;  \
-     struct { static Pfn Get() { __asm mov eax, method } } p;  return p.Get(); }()
+     struct { static Pfn Get() { PATCHER_SET_RETURN_PTR(method); } };  return p.Get(); }()
 
 # else
 // Incremental linking (debug) conflicts with this method somewhat and gives you a pointer to a jump thunk instead.
 #  define PATCHER_MFN_PTR(method, ...)  [] {                                                               \
-     struct { static Patcher::uint8* Get() { __asm mov eax, method } } p;                                  \
+     struct { static Patcher::uint8* Get() { PATCHER_SET_RETURN_PTR(method); } } p;                        \
      auto*const pfn     = p.Get();                                                                         \
      void*const realPfn = (pfn[0] == 0xE9) ? (pfn + 5 + reinterpret_cast<Patcher::int32&>(pfn[1])) : pfn;  \
      return reinterpret_cast<typename Patcher::Impl::FuncTraits<decltype(&method)>::Pfn>(realPfn);         \

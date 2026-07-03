@@ -250,9 +250,9 @@ public:
   ///
   /// @example  EditExports({ { 0x401260, "AddUndecoratedExport" },  { 0x402000, "_AddDecoratedCFastcallExport@8"  } })
   /// @example  EditExports({ { 0x404000, 1 /* By ordinal */     },  { nullptr, "?DeleteDecoratedCppExport@@YAXXZ" } })
-  Status EditExports(Span<ExportInfo> exportInfos);
+  Status HookExports(Span<ExportInfo> exportInfos);
 
-  Status EditImports(Span<ImportInfo> importInfos);  // ** TODO Implement this for feature-parity with MS Detours
+  Status HookImports(Span<ImportInfo> importInfos);  // ** TODO Implement this for feature-parity with MS Detours
 
   // ** TODO Figure out how EditExports/EditImports fits with *nix-land GOT/PLT
 

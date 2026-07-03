@@ -2488,7 +2488,7 @@ Status PatchContext::LowLevelHook(
 }
 
 // =====================================================================================================================
-Status PatchContext::EditExports(
+Status PatchContext::HookExports(
   Span<ExportInfo>  exportInfos)
 {
   IMAGE_DATA_DIRECTORY*const pExportDataDir = GetDataDirectory(hModule_, IMAGE_DIRECTORY_ENTRY_EXPORT);
@@ -2576,6 +2576,31 @@ Status PatchContext::EditExports(
         exports[curExport.ordinal] = curExport.pAddress;
         if ((curExport.pAddress == nullptr) && (curExport.ordinal == nextIndex)) {
           ++nextIndex;
+        }
+        break;
+
+      case ExportInfo::ByAddressFix:
+        curExport.pAddress = FixPtr(curExport.address);
+      case ExportInfo::ByAddress:
+        if (curExport.pOrigAddress == nullptr) {
+          status_ = Status::FailInvalidPointer;
+        }
+        else {
+          // ** TODO replace this slow O(n) lookup
+          const auto it = std::find(exports.begin(), exports.end(), curExport.pOrigAddress);
+          if (it != exports.end()) {
+            *it = curExport.pAddress;
+
+            if (curExport.pAddress == nullptr) {
+              const size_t idx = it - exports.begin();
+              for (auto it2 = namesToOrdinals.begin(); it2 != namesToOrdinals.end(); ++it2) {
+                if (it2->second == idx) {
+                  namesToOrdinals.erase(it2);
+                  break;
+                }
+              }
+            }
+          }
         }
         break;
 
@@ -2707,6 +2732,23 @@ Status PatchContext::EditExports(
 }
 
 // =====================================================================================================================
+// ** TODO Maybe consolidate this and HookExports() into HookExterns(),
+// with DLL "namespace" being optional (to handle Windows import/export vs Linux GOT)?
+Status PatchContext::HookImports(
+  Span<ImportInfo>)
+{
+  IMAGE_DATA_DIRECTORY*const pImportDataDir = GetDataDirectory(hModule_, IMAGE_DIRECTORY_ENTRY_IMPORT);
+  // ** TODO IMAGE_DIRECTORY_ENTRY_BOUND_IMPORT, DELAY_IMPORT?
+
+  if ((status_ == Status::Ok) && (pImportDataDir == nullptr)) {
+    // Not a valid PE image.
+    status_ = Status::FailInvalidModule;
+  }
+
+  status_ = (status_ != Status::Ok) ? status_ : Status::FailUnsupported; // ** TODO
+  return status_;
+}
+
 // =====================================================================================================================
 // ** TODO Make Allocator able to lock pages to +RX-W - need to store block headers in separate memory pages?
 void* Allocator::Alloc(

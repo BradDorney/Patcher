@@ -39,9 +39,10 @@
 ///@{ @internal Utility macro which conditionally expands (or not) another macro.
 #define  PATCHER_EXPAND_IF(args)                 PATCHER_EXPAND_IF_IMPL args
 #define  PATCHER_EXPAND_IF_IMPL(intBool, value)  PATCHER_EXPAND_IF_##intBool(value)
+#define  PATCHER_EXPAND_IF_(value)               value
 #define  PATCHER_EXPAND_IF_1(value)              value
 #define  PATCHER_EXPAND_IF_0(value)
-#define  PATCHER_EXPAND_IF_(value)
+// ** TODO Can we check if ##intBool is undefined, rather than #define intBool [blank]'ed?
 ///@}
 
 // =====================================================================================================================

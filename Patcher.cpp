@@ -1962,7 +1962,7 @@ void LowLevelHookBuilder::Init() {
   if (StackAlignment <= RegisterSize) {
     settings_.noAlignStackPtr = 1;
   }
-  settings_.reserveStackSize = Align(settings_.reserveStackSize, RegisterSize);
+  settings_.reserveStackSize = Align(settings_.reserveStackSize, RegisterSize);  // ** TODO Wide min align with XMM regs
 
   uint32 numByRef = 0;
   for (const auto& reg : registers_) {
@@ -2094,19 +2094,19 @@ void LowLevelHookBuilder::AlignAndReserveStackSpace() {
       lea(stackRegister, ptr [stackRegister - settings_.reserveStackSize]);
     }
 
-    push(returnRegister);                                                                   // Save *AX to scratch[0]
-    if (SavingFlags()) { pushf(); }                                                         // Save flags to scratch[1]
-    if (remScratch)    { SubSp(remScratch); }                                               // Reserve remaining scratch
+    push(returnRegister);                                                                  // Save *AX to scratch[0]
+    if (SavingFlags()) { pushf(); }                                                        // (Save flags to scratch[1])
+    if (remScratch)    { SubSp(remScratch); }                                              // Reserve remaining scratch
     mov(returnRegister, stackRegister);
-    if (restoreFlags)  { PushFromStack(remScratch); }                                       // Fast copy flags
-    and_(returnRegister, StackAlignMask);                                                   // Calc aligned SP
+    if (restoreFlags)  { PushFromStack(remScratch); }                                      // Fast copy flags
+    and_(returnRegister, StackAlignMask);                                                  // Calc aligned SP
     if (alignDelta)    { sub(returnRegister, alignDelta); }
-    if (restoreFlags)  { popf(); }                                                          // Restore flags
-    xchg(returnRegister, stackRegister);                                                    // Align SP
+    if (restoreFlags)  { popf(); }                                                         // [(Restore flags)]
+    xchg(returnRegister, stackRegister);                                                   // Align SP
     lea(returnRegister, ptr [returnRegister + totalStackReserveSize_]);
-    push(returnRegister);                                                                   // Save old SP
-    if (SavingFlags()) { push(X86_SELECTOR(dword, qword) [returnRegister + flagsOffset]); } // Save flags
-    mov(returnRegister, ptr [returnRegister + eaxOffset]);                                  // Restore *AX
+    push(returnRegister);                                                                  // Save old SP
+    if (SavingFlags()) { push(X86_SELECTOR(dword, qword)[returnRegister + flagsOffset]); } // (Re-save flags)
+    mov(returnRegister, ptr [returnRegister + eaxOffset]);                                 // Restore *AX
   }
   else if (totalStackReserveSize_ != 0) {
     // Reserve user-requested stack space and our scratch space.

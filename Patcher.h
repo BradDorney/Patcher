@@ -276,9 +276,8 @@ public:
   ///@}
 
   ///@{ In-place destroys an object within module memory.  @note This does not free the base object's memory!
-  template <typename T, typename... Args>  Status Destruct(T*     pAddress, Args&&... args);
-  template <typename T, typename... Args>  Status Destruct(uintptr address, Args&&... args)
-    { return Destruct<T>(FixPtr<T>(address), std::forward<Args>(args)...); }
+  template <typename T>  Status Destruct(T*     pAddress);
+  template <typename T>  Status Destruct(uintptr address) { return Destruct<T>(FixPtr<T>(address)); }
   ///@}
 
   Status LockThreads();    ///< Freezes all other process threads to avoid races between writing and executing.

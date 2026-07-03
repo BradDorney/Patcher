@@ -145,8 +145,7 @@
 # define PATCHER_INCREMENTAL_LINKING  1  // MSVC incremental linking is typically on in debug builds and off in release.
 #endif
 
-#if ((PATCHER_MSVC && _CPPUNWIND) || (PATCHER_GXX && (__cpp_exceptions || __EXCEPTIONS))) &&  \
-    (defined(PATCHER_EXCEPTIONS) == false)
+#if (_CPPUNWIND || __cpp_exceptions || __EXCEPTIONS) && (defined(PATCHER_EXCEPTIONS) == false)
 # define PATCHER_EXCEPTIONS  1
 #endif
 

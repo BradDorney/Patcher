@@ -124,6 +124,7 @@ template <typename T>                     using Ebp    = Impl::RegisterArg<Regis
 template <typename T, uint32 Offset = 0>  using Esp    = Impl::RegisterArg<Register::Esp,    T, Offset>;
 template <typename T>                     using Eflags = Impl::RegisterArg<Register::Eflags, T>;
 ///@}
+
 #elif PATCHER_X86_64
 /// x86_64 Register types passed to PatchContext::LowLevelHook().
 enum class Register : uint8
@@ -154,6 +155,7 @@ template <typename T>                     using Rflags = Impl::RegisterArg<Regis
 
 // =====================================================================================================================
 /// Export insertion/modification info passed to PatchContext::EditExports().
+// ** TODO Use TargetPtr/FunctionRef here
 struct ExportInfo {
   ///@{ Constructor for defining an export by symbol name.
   constexpr ExportInfo(void*  pAddress, const char* pSymbolName)

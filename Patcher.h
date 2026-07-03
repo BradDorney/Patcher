@@ -337,9 +337,11 @@ private:
   /// Patch history, sorted from newest to oldest.
   std::list<PatchInfo>                                     history_;
   /// Mappings of user-requested patch addresses to PatchInfos.
+  // ** TODO make this unordered_map<void*, SmallVector<iterator>> to handle stacked patches?
   std::unordered_map<void*, decltype(history_)::iterator>  historyAt_;
 
   /// Threads locked by LockThreads() (pair of handle, program counter).  AdvanceThreads() may temporarily resume these.
+  // ** TODO Separate this out to a global context obj?
   std::vector<std::pair<uint32, uintptr>>  frozenThreads_;
 };
 
@@ -409,6 +411,7 @@ PatcherStatus PatchContext::Assign(
 
   if (status_ == PatcherStatus::Ok) {
     *pAddress = value;
+    // ** TODO Need to pass a typed destroy function here
     EndDeProtect(pAddress, sizeof(T1), oldAttr);
   }
 

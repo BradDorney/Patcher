@@ -44,7 +44,7 @@
 
 #define XBYAK_NO_EXCEPTION
 #include "imported/xbyak/xbyak.h"
-#include "imported/capstone/include/capstone.h"
+#include "imported/capstone/include/capstone.h"  // ** TODO allow user-configurable capstone include dir
 #include "Patcher.h"
 
 namespace Patcher {
@@ -316,6 +316,7 @@ public:
       if (skipSize <= INT8_MAX) {
         constexpr uint8 SkipPop[] = { IF_X86_64(0x48,) 0x8D, 0x64, 0x24, 0x00 };  // lea esp, [esp + i8]
         // Combine adjacent skips, otherwise write a new instruction.
+        // ** TODO Handle 32-bit lea
         if ((getSize() < sizeof(SkipPop))                                                        ||
             (memcmp(&SkipPop[0], &getCurr()[-int32(sizeof(SkipPop))], sizeof(SkipPop) - 1) != 0) ||
             ((getCurr()[-1] + skipSize) > INT8_MAX))
@@ -1053,6 +1054,7 @@ uint32 PatchContext::BeginDeProtect(
 
   if (status_ == Status::Ok) {
     // Make a copy of the original data if it hasn't been tracked already so we can revert it later.
+    // ** TODO Need to handle typed destructors
     Touch(pAddress, size);
   }
 
@@ -1209,6 +1211,7 @@ static bool CreateFunctorThunk(
     writer.push(uint32(functorObjAddr));
   }
   IF_X86_64(else if (IsX86_64) {
+    // R11 is the only callee-saved register not used by function args.
     writer.mov(r11, functorObjAddr);
     writer.push(r11);
   })
@@ -1223,7 +1226,7 @@ static bool CreateFunctorThunk(
   }
 
   IF_X86_64(if (writer.IsFarDisplacement(sizeof(Call32), pfnInvokeFunctor)) {
-    writer.mov(r11, uintptr(pfnInvokeFunctor));  // R11 is the only callee-saved register not used by function args.
+    writer.mov(r11, uintptr(pfnInvokeFunctor));
     calleeCleanup ? writer.jmp(r11)              : writer.call(r11);
   }
   else) {
@@ -1278,6 +1281,7 @@ void FunctionRef::InitFunctorThunk(
 // Finds if there's a region we can insert a hook patch, and what instructions will be overwritten where.
 static Status FindHookPatchRegion(
   void*       pAddress,
+                                 // ** TODO also return adjusted pAddress, e.g. to handle the Jmp8 case?
   uint8*      pOverwrittenSize,  // [out] Total size in bytes of overwritten instructions.
   InsnVector* pInsns,            // [out] Disassembled instructions in the region.
   size_t      maxPatchSize = IsX86_64 ? sizeof(JmpAbs) : sizeof(Jmp32))
@@ -1349,6 +1353,7 @@ static Status FindHookPatchRegion(
         // Padder bytes are typically int 3 (0xCC), nop (0x90), or NUL.
         // Note that this is a heuristic!  x86 ISA is variable-length - reverse reading frames are not guaranteed!
         // ** TODO Check for 2 or more NUL?
+        // ** TODO Check the alignment of the begin addr of the detected padders == CodeAlignment
         for (int32 i = 1; ((pReader[-i] == 0xCC) || (pReader[-i] == 0x90)); ++i) {
           if (i >= static_cast<int32>(sizeof(Jmp32))) {
             *pOverwrittenSize = bestSize;
@@ -1871,6 +1876,7 @@ private:
   void PushAdjustedStackReg(size_t index, uint32 addend, bool fromOrigin = false);
 
   // ABI-specific helper constants.
+  // ** TODO Move this to CallTraits?
 #if PATCHER_X86_32
   static constexpr Register VolatileRegisters[] = { Register::Ecx, Register::Edx, Register::Eax };
   static constexpr Register ArgRegisters[]      = { Register::Count };
@@ -2629,6 +2635,7 @@ Status PatchContext::EditExports(
       AppendString(&pStringBuffer, moduleName);
 
       for (uint32 i = 0; ((status_ == Status::Ok) && (i < exports.size())); ++i) {
+        // ** TODO Split out this far thunk handling to a separate function
         if (forwardExportOrdinals.count(i) == 0) {
           size_t exportRva = (exports[i] != nullptr) ? PtrDelta(exports[i], hModule_) : 0;
 
@@ -2667,6 +2674,7 @@ Status PatchContext::EditExports(
       if (status_ == Status::Ok) {
         // Add export table allocation and far thunk info to the history tracker entry for this patch so we can clean it
         // up later.
+        // ** TODO split out this memory management crap to another function
         auto& entry = *historyAt_[pExportDataDir];
 
         if (previouslyEdited && (entry.trackedAllocs.empty() == false)) {
@@ -2699,6 +2707,8 @@ Status PatchContext::EditExports(
 }
 
 // =====================================================================================================================
+// =====================================================================================================================
+// ** TODO Make Allocator able to lock pages to +RX-W - need to store block headers in separate memory pages?
 void* Allocator::Alloc(
   size_t  size,
   size_t  align)
@@ -2721,6 +2731,7 @@ void* Allocator::Alloc(
       ++pHeader->refCount;
 
       // Reorder the heap, since this block's free space has shrunk.
+      // ** TODO could be optimized
       std::pop_heap(pBlocks_.begin(),  pBlocks_.end(), FreeBlockSizeCompare);
       std::push_heap(pBlocks_.begin(), pBlocks_.end(), FreeBlockSizeCompare);
     }
@@ -2793,6 +2804,7 @@ void Allocator::Free(
 }
 
 // =====================================================================================================================
+// Finds the next free memory region within 32-bit relative addressing of pNearAddr.
 void* Allocator::FindNextRegion(
   void*   pNearAddr,
   size_t  sizeNeeded)

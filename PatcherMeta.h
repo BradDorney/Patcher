@@ -177,6 +177,7 @@
 #endif
 
 /// Size in bytes of the "red zone" below the stack that we can use.
+// ** TODO Can we auto detect if the function is an interrupt handler and always allow red zone use? Is that safe??
 #if defined(PATCHER_STACK_RED_ZONE_SIZE) == false
 # if   PATCHER_MS_ABI
 #  define PATCHER_STACK_RED_ZONE_SIZE  0
@@ -282,6 +283,7 @@ namespace Registers { enum class Register : uint8; }  ///< Register types passed
 constexpr bool IsX86_32 = PATCHER_X86_SELECTOR(true  ||, false ||) false;
 constexpr bool IsX86_64 = PATCHER_X86_SELECTOR(false ||, true  ||) false;
 constexpr bool IsX86    = IsX86_32 || IsX86_64;
+// ** TODO What about x32-64 (ABI mode used by WoW64, etc)?
 
 #if   PATCHER_MS_ABI
 constexpr bool IsMsAbi   = true;
@@ -345,16 +347,16 @@ constexpr bool SupportedCallingConventions[] = { false, PATCHER_EMIT_CALLS(PATCH
 constexpr bool Exists(Call convention) { return SupportedCallingConventions[size_t(convention)]; }
 
 enum PropertyFlags : uint32 {
-  CalleeCleanup      = (1u << 0),  ///< Callee cleans up the stack allocated for args.  Otherwise assume caller cleanup.
-  CalleePopReturnPtr = (1u << 1),  ///< Callee cleans up only the stack allocated for the aggregate return pointer.
-  ShadowSpace        = (1u << 2),  ///< Stack is allocated for shadow space for args passed by standard registers.
-  AnyTypesInGprs     = (1u << 3),  ///< Any type can be placed in registers.
-  PodTypesInGprs     = (1u << 4),  ///< Aligned trivial types, incl. POD class/struct/union, can be placed in registers.
-  BigTypesByRef      = (1u << 5),  ///< Arg types larger than 1 register, and unions, are always passed by reference.
-  ClassTypesByRef    = (1u << 5),  ///< Non-trivial class/struct/union types are always passed by reference.
-  AnyTypeGprSplit    = (1u << 7),  ///< Any type can span multiple registers,  e.g. a x86-32 struct containing uint64
-  PodTypeGprSplit    = (1u << 6),  ///< Aligned, uniquely-representable, POD types can span multiple registers (u64 x32)
-  FixedLayout        = (1u << 8),  ///< Args cannot be reordered for placement into registers.
+  CalleeCleanup      = 1u << 0,  ///< Callee cleans up the stack allocated for args.  Otherwise assume caller cleanup.
+  CalleePopReturnPtr = 1u << 1,  ///< Callee cleans up only the stack allocated for the aggregate return pointer.
+  ShadowSpace        = 1u << 2,  ///< Stack is allocated for shadow space for args passed by standard registers.
+  AnyTypesInGprs     = 1u << 3,  ///< Any type can be placed in registers.
+  PodTypesInGprs     = 1u << 4,  ///< Aligned trivial types, incl. POD class/struct/union, can be placed in registers.
+  BigTypesByRef      = 1u << 5,  ///< Arg types larger than 1 register, and unions, are always passed by reference.
+  ClassTypesByRef    = 1u << 5,  ///< Non-trivial class/struct/union types are always passed by reference.
+  AnyTypeGprSplit    = 1u << 7,  ///< Any type can span multiple registers,  e.g. a x86-32 struct containing uint64
+  PodTypeGprSplit    = 1u << 6,  ///< Aligned, uniquely-representable, POD types can span multiple registers (u64 x32)
+  FixedLayout        = 1u << 8,  ///< Args cannot be reordered for placement into registers.
 
   IfMsAbi   = IsMsAbi   ? ~0u : 0u,  ///< @internal  Mask for setting properties to only apply when in MS ABI mode.
   IfUnixAbi = IsUnixAbi ? ~0u : 0u   ///< @internal  Mask for setting properties to only apply when in Unix ABI mode.
@@ -367,12 +369,14 @@ enum PropertyFlags : uint32 {
 /// https://learn.microsoft.com/en-us/cpp/cpp/calling-conventions
 /// https://learn.microsoft.com/en-us/cpp/cpp/argument-passing-and-naming-conventions
 /// https://learn.microsoft.com/en-us/cpp/build/x64-calling-convention
+/// https://learn.microsoft.com/en-us/cpp/cpp/preserve-none
 /// https://clang.llvm.org/docs/AttributeReference.html
 /// https://gcc.gnu.org/onlinedocs/gcc/x86-Function-Attributes.html
 /// https://raw.githubusercontent.com/wiki/hjl-tools/x86-psABI/intel386-psABI-1.1.pdf
 /// https://raw.githubusercontent.com/wiki/hjl-tools/x86-psABI/x86-64-psABI-1.0.pdf
 /// https://intel.com/content/www/us/en/docs/cpp-compiler/developer-guide-reference/2021-8/c-c-calling-conventions.html
 /// https://www.agner.org/optimize/calling_conventions.pdf
+/// https://gcc.gnu.org/onlinedocs/libstdc++/manual/using_dual_abi.html
 constexpr struct Traits {
   bool    supported;       ///< Does the compiler and platform support this calling convention?
   uint32  numArgSgprs;     ///< Max number of standard general-purpose registers used for passing args.
@@ -484,7 +488,7 @@ template <typename T>  constexpr bool IsPod() { return std::is_trivial<T>::value
 
 /// IsUniquePod requires C++17 to fully work.  True if T is POD and does not contain any alignment padders, or floats.
 #if __cpp_lib_has_unique_object_representations
-template <typename T>  
+template <typename T>
 constexpr bool IsUniquePod() { return IsPod<T>() && std::has_unique_object_representations<T>::value; }
 #else
 template <typename T>  constexpr bool IsUniquePod() { return IsPod<T>(); }
@@ -543,6 +547,7 @@ template <size_t... Indices>  using IndexSequence = ValueSequence<size_t, Indice
 template <bool... Conditions> using BoolSequence  = ValueSequence<bool, Conditions...>; ///< Parameter pack of bool.
 template <typename... Ts>  struct TypeSequence { using Tuple = std::tuple<Ts...>; };    ///< Parameter pack of types.
 
+// ** TODO This is only ever used to generate BoolSequence<false, false, false, ...> right now
 template <typename...> constexpr bool ToBool(bool value = true) { return value; }  ///< Helper for making BoolSequences.
 
 
@@ -666,7 +671,7 @@ struct FilterFalseSeqImpl<IndexSequence<Indexes...>, BoolSequence<Conditions...>
 ///@}
 
 // =====================================================================================================================
-/// @internal  SeqSort's default comparison functor.  Returns -1 if (a < b), 0 if (a == b), or 1 if (a > b).
+/// @internal  @ref SeqSort default comparison functor.  Returns -1 if (a < b), 0 if (a == b), or 1 if (a > b).
 struct Less {
   template <typename T>
   constexpr int32 operator()(const T& a, const T& b) const { return (a < b) ? -1 : ((a == b) ? 0 : 1); }
@@ -980,6 +985,7 @@ template <typename T>                   using  FuncTraitsNoThis = typename FuncT
 ///@}
 
 ///@{ @internal  Template that defines typed function call signature information for use at compile time.
+// ** TODO Reimplement DynFuncSig/FuncSig and invert the inheritance graph, such that FuncSig inherits from DynFuncSig?
 // ** TODO In Unix x86-32, if (HasThisPtr && HasReturnPtr), Pfn isn't able to handle cdecl callee pop return ptr
 template <typename R, Call Call = Call::Default, bool Variadic = false, typename This = void, typename... A>
 struct FuncSig {
@@ -1090,11 +1096,11 @@ struct LambdaInvokerImpl<Return(Lambda::*)(Args...), true> {
   static constexpr Lambda* GetInvoker() { return nullptr; }
   template <Call C>  struct As{};
 
-#define PATCHER_LAMBDA_INVOKER_CONVERSION_DEF(convention, name, ...)                                 \
-  template <>  struct As<Call::name>                                                                 \
-    { static Return convention    Fn(Args... args) { return GetInvoker()->operator()(args...); } };  \
-  static     Return convention  name(Args... args) { return GetInvoker()->operator()(args...); }
-  static     Return          Default(Args... args) { return GetInvoker()->operator()(args...); }
+#define PATCHER_LAMBDA_INVOKER_CONVERSION_DEF(convention, name, ...)                                    \
+  template <>  struct As<Call::name>                                                                    \
+    { static Return convention       Fn(Args... args) { return GetInvoker()->operator()(args...); } };  \
+  static     Return convention     name(Args... args) { return GetInvoker()->operator()(args...); }
+  static     Return             Default(Args... args) { return GetInvoker()->operator()(args...); }
   PATCHER_EMIT_CALLS(PATCHER_LAMBDA_INVOKER_CONVERSION_DEF);
 };
 ///@}
@@ -1109,6 +1115,7 @@ struct LambdaInvokerImpl<Return(Lambda::*)(Args...), true> {
 namespace Util {
 ///@{ Converts a non-capturing lambda or stateless functor to a function pointer (of the specified calling convention).
 ///   The returned function pointer can be passed to PatchContext methods, as well as having general callable uses.
+///
 ///   @see Raymond Chen's blog post on lambda pointers: https://devblogs.microsoft.com/oldnewthing/20150220-00/?p=44623
 #define PATCHER_LAMBDA_PTR_DEF(convention, name, ...)  \
 template <typename T>  PATCHER_INVOKE_DEF(name)  name##LambdaPtr(T) { return &Impl::LambdaInvoker<T>::name;    }
@@ -1130,7 +1137,7 @@ constexpr size_t GetInvokeFunctorNumPadders(size_t stackAlignment = PATCHER_DEFA
 
 // =====================================================================================================================
 ///@{ @internal  Helper metafunction that produces a BoolSequence for whether args should be placed in registers or not.
-///              This is ultimately needed in order to inject extra stack-only args to a function call, for example.
+///              This is ultimately used by GetFunctorInvoker to inject extra stack-only args to a function call.
 ///
 /// @warning POD type detection, particularly large struct types, can produce false positives, especially without C++17.
 ///          This becomes yet more problematic with calling conventions that allow GPR splitting (Regcall and Regparm*).
@@ -1168,6 +1175,7 @@ struct InvokeFunctorSgprMapper<C, 0, Arg, Args...> { using Type = BoolSequence<f
 
 // =====================================================================================================================
 /// @internal  Helper metafunction to reorder function args so that we can inject extra stack arguments.
+///            This is ultimately used by GetFunctorInvoker to inject extra stack-only args to a function call.
 template <Call C, typename R, typename... Args>
 struct InvokeFunctorArgMapper {
   static constexpr size_t NumSgprs       = GetCallTraits(C).numArgSgprs;
@@ -1208,7 +1216,7 @@ private:
 
   // Invokes a functor through a pointer to an object instance.
   //
-  // Note that if there is a "this" pointer arg, AggregateReturn can never be true, as the return type is already R*.
+  // Note that if there is a "this" pointer arg, AggregateReturn can never be "true", as the return type is already R*.
 # define PATCHER_FUNCTOR_INVOKER_CONVERSION_DEF(conv, name, ...)                                                     \
   template <size_t...   ArgOrder,  typename... SgprArgs, typename... Padders, typename... ShadowSpace,               \
             typename... OtherArgs, size_t NumSgprArgs,   bool AggregateReturn>                                       \
@@ -1337,16 +1345,20 @@ template <typename T, typename U, typename = Impl::EnableIf<std::is_function<U>:
 size_t PmvCast(U T::* pmv, const T* pThis = nullptr) { return PtrDelta(&pThis->*pmv, pThis); }
 
 // =====================================================================================================================
-/// Helper function for getting the virtual function table for a given type.  If an object instance is not provided, a
-/// dummy instance will attempt to be created - this may potentially be unsafe depending on constructor implementation!
-template <typename T>
+/// Helper function for getting the virtual function table for a given type.
+///
+/// If an object instance is not provided, a dummy instance will attempt to be created -
+/// this may potentially be unsafe depending on constructor and/or destructor implementation!
+template <typename T /* ** TODO Add sanity checking around the static pVftable var for subclasses? */>
 void** GetVftable(
   const T* pThis = nullptr)
 {
   void** pVftable = nullptr;
 
   if (std::is_polymorphic<T>::value) {
+    // We need to extract the vfptr from pThis for the first time.
     if ((pThis == nullptr) || (*reinterpret_cast<void*const*>(pThis) == nullptr)) {
+      // Unsafe: Try to create a dummy object instance
       Impl::TypeStorage<T> dummy = { };
       T*const pLocalSelf = Impl::DummyFactory<T>::Create(&dummy);
 
@@ -1355,7 +1367,8 @@ void** GetVftable(
         Impl::DummyFactory<T>::Destroy(pLocalSelf);
       }
     }
-    else if (pThis != nullptr) {
+    else if (pThis != nullptr /* ** TODO && check type of pThis == T exactly, not a subclass? */) {
+      // Safer: Get the vptr from the user-provided object instance, if there is one
       pVftable = *reinterpret_cast<void**const*>(pThis);
     }
   }
@@ -1364,11 +1377,17 @@ void** GetVftable(
 }
 
 // =====================================================================================================================
-/// Cast pointer-to-member-function to a standard pointer-to-function.
-/// @note  For virtual PMFs, either an object instance must be provided, or a dummy object instance will attempt to be
-///        created (may be unsafe!).  Class cannot multiply inherit.
-/// @see   PATCHER_MFN_PTR() macro, which is more robust for certain compilers and more reliable for virtual methods.
-///        https://developer.apple.com/documentation/kernel/osmemberfunctioncast has info on Itanium/Unix/SysV ABI PMFs.
+/// Casts pointer-to-member-function to a standard pointer-to-function.
+/// @see  PATCHER_MFN_PTR() macro, which is more robust for virtual methods, especially depending on compiler versions.
+///
+/// For virtual PMFs, either an object instance should be provided (ideally), otherwise we will fallback to
+/// creating a dummy ojbect instance (may be unsafe!)
+///
+/// The class cannot multiply inherit.
+///
+/// @note  https://developer.apple.com/documentation/kernel/osmemberfunctioncast
+///        https://github.com/apple-oss-distributions/xnu/blob/rel/xnu-8019/libkern/libkern/c++/OSMetaClass.h#L511-L550
+// ** TODO Separate out the non-template-dependent bits of this function, so there's only 1 instance of e.g. Vcalls
 template <typename Fn, typename T>
 auto PmfCast(
   Fn    T::*  pmf,
@@ -1382,7 +1401,7 @@ auto PmfCast(
   } cast = {pmf};
 
   // Test if this is a virtual PMF, which requires special compiler-specific handling and an object instance.  If so and
-  // pThis was not provided, then we will need to try to create a dummy object instance in order to get the vftable. 
+  // pThis was not provided, then we will need to try to create a dummy object instance in order to get the vftable.
   // Non-virtual PMFs are straightforward to convert, and do not require an object instance.
 
 #if PATCHER_UNIX_ABI
@@ -1396,24 +1415,25 @@ auto PmfCast(
   // MS ABI uses compiler-generated "vcall" thunks for calling through pointers-to-virtual-member-functions.
   // We have to parse the assembly of the thunk in order to get the offset into the vftable.
   // ** TODO Need to check what ICC does in MS mode
+  // ** TODO Move this table out of template land
   static constexpr struct {
     Impl::ConstArray<uint8, 20>  bytes;
     uint8  operandBase;  // x86:  +0x0 for 0, +0x40 for byte operand, +0x80 for dword operand
   } Vcalls[] = {
 # if   PATCHER_MSVC  && PATCHER_X86_64
-    { { 0x48,0x8B,0x01,       0xFF},0x20 },      // mov rax, [rcx];  jmp qword ptr [rax+?]
+    { {0x48,0x8B,0x01,            0xFF},0x20 },  // mov rax, [rcx];  jmp qword ptr [rax+?]
 # elif PATCHER_MSVC  && PATCHER_X86_32
-    { { 0x8B,0x01,            0xFF},0x20 },      // mov eax, [ecx];  jmp dword ptr [eax+?]
+    { {     0x8B,0x01,            0xFF},0x20 },  // mov eax, [ecx];  jmp dword ptr [eax+?]
 # elif PATCHER_CLANG && PATCHER_X86_64
-    { { 0x48,0x8B,0x01,       0x48,0x8B},0x00 }, // mov rax, [rcx];  mov rax, [rax+?]
-    //  sub rsp, 16;          mov [rsp+16+var_8], rcx;   mov rax, [rsp+16+var_8];   mov rcx, [rax];  mov rcx, [rcx+?]
-    { { 0x48,0x83,0xEC,0x10,  0x48,0x89,0x4C,0x24,0x08,  0x48,0x8B,0x44,0x24,0x08,  0x48,0x8B,0x08,  0x48,0x8B},0x09 },
+    { {0x48,0x8B,0x01,       0x48,0x8B},0x00 },  // mov rax, [rcx];  mov rax, [rax+?]
+    // sub rsp, 16;          mov [rsp+16+var_8], rcx;   mov rax, [rsp+16+var_8];   mov rcx, [rax];  mov rcx, [rcx+?]
+    { {0x48,0x83,0xEC,0x10,  0x48,0x89,0x4C,0x24,0x08,  0x48,0x8B,0x44,0x24,0x08,  0x48,0x8B,0x08,  0x48,0x8B},0x09 },
 # elif PATCHER_CLANG && PATCHER_X86_32
-    { { 0x8B,0x01,            0x8B},0x00 },      // mov eax, [ecx];  mov eax, [eax+?]
-    //  push esp; mov ebp, esp; sub esp, 8; mov [ebp+var_4], ecx; mov eax, [ebp+var_4]; mov ecx, [eax]; mov ecx, [ecx+?]
-    { { 0x55,  0x89,0xE5,  0x83,0xEC,0x08,  0x89,0x4D,0xFC,  0x8B,0x45,0xFC,  0x8B,0x08,  0x8B},0x09 },
-    //  sub esp, 8;      mov [esp+8+var_4], ecx;  mov eax, [esp+8+var_4];  mov ecx, [eax];  mov ecx, [ecx+?]
-    { { 0x83,0xEC,0x08,  0x89,0x4C,0x24,0x04,     0x8B,0x44,0x24,0x04,     0x8B,0x08,       0x8B},0x09 },
+    { {     0x8B,0x01,            0x8B},0x00 },  // mov eax, [ecx];  mov eax, [eax+?]
+    // push esp; mov ebp, esp; sub esp, 8; mov [ebp+var_4], ecx; mov eax, [ebp+var_4]; mov ecx, [eax]; mov ecx, [ecx+?]
+    { {0x55,     0x89,0xE5,    0x83,0xEC,0x08, 0x89,0x4D,0xFC,   0x8B,0x45,0xFC,       0x8B,0x08,      0x8B},0x09 },
+    // sub esp, 8;      mov [esp+8+var_4], ecx;  mov eax, [esp+8+var_4];  mov ecx, [eax];  mov ecx, [ecx+?]
+    { {0x83,0xEC,0x08,  0x89,0x4C,0x24,0x04,     0x8B,0x44,0x24,0x04,     0x8B,0x08,       0x8B},0x09 },
 # else
     { }  // Unknown compiler or architecture; virtual PMF conversion unsupported.
 # endif
@@ -1453,12 +1473,12 @@ auto PmfCast(
 
 // =====================================================================================================================
 ///@{ PATCHER_MFN_PTR helper macro to get the address of a class member function without requiring an object instance.
+/// This takes a function identifier literal, not a pointer-to-member-function!
 ///
-/// Notice that this takes a function identifier literal, not a pointer-to-member-function!
-/// A pointer to an object instance may optionally be passed as a second arg, e.g. PATCHER_MFN_PTR(ClassA::Func, &obj),
-/// but it may be ignored altogether on certain platforms/compilers.
+/// A pointer to an object instance may optionally be passed as a second arg, but most compilers/platforms ignore it.
 ///
 /// @example  patcher.Hook(PATCHER_MFN_PTR(ClassA::Func), PATCHER_MFN_PTR(HookClassA::Func))
+///           patcher.Hook(PATCHER_MFN_PTR(ClassA::Func, &objA), PATCHER_MFN_PTR(HookClassA::Func, &hookObjA))
 ///
 /// @note  This does not work on overloaded functions.  There may be compiler-specific limitations.
 #if PATCHER_MSVC && PATCHER_X86_32

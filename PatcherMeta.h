@@ -190,34 +190,36 @@
 // =====================================================================================================================
 // Calling conventions and attributes. These are ignored if they do not exist for the given target ISA and build config.
 #if PATCHER_MSVC || defined(__ICL)
-# define  PATCHER_CDECL       __cdecl
-# define  PATCHER_STDCALL     __stdcall
-# define  PATCHER_FASTCALL    __fastcall
-# define  PATCHER_THISCALL    __thiscall
-# define  PATCHER_VECTORCALL  __vectorcall
+# define  PATCHER_CDECL         __cdecl
+# define  PATCHER_STDCALL       __stdcall
+# define  PATCHER_FASTCALL      __fastcall
+# define  PATCHER_THISCALL      __thiscall
+# define  PATCHER_VECTORCALL    __vectorcall
 # if defined(__ICL)
-#  define PATCHER_REGCALL     __regcall
+#  define PATCHER_REGCALL       __regcall
 # else
 #  define PATCHER_REGCALL
 # endif
 # define  PATCHER_REGPARM(n)
 # define  PATCHER_SSEREGPARM
-# define  PATCHER_MSCALL      __cdecl  // ** TODO __fastcall?  See https://learn.microsoft.com/en-us/cpp/cpp/fastcall
+# define  PATCHER_MSCALL        __cdecl  // ** TODO __fastcall?  See https://learn.microsoft.com/en-us/cpp/cpp/fastcall
 # define  PATCHER_UNIXCALL
+# define  PATCHER_PRESERVENONE  __preserve_none  ///< @note C x64 only
 
 # define  PATCHER_ATTRIBUTE(attr)
 # define  PATCHER_ATTR_PARM(attr, ...)
 #elif PATCHER_GXX
-# define  PATCHER_CDECL       PATCHER_ATTRIBUTE(__cdecl__)
-# define  PATCHER_STDCALL     PATCHER_ATTRIBUTE(__stdcall__)
-# define  PATCHER_FASTCALL    PATCHER_ATTRIBUTE(__fastcall__)
-# define  PATCHER_THISCALL    PATCHER_ATTRIBUTE(__thiscall__)
-# define  PATCHER_VECTORCALL  PATCHER_ATTRIBUTE(__vectorcall__)
-# define  PATCHER_REGCALL     PATCHER_ATTRIBUTE(__regcall__)
-# define  PATCHER_REGPARM(n)  PATCHER_ATTR_PARM(__regparm__, n)
-# define  PATCHER_SSEREGPARM  PATCHER_ATTRIBUTE(__sseregparm__)
-# define  PATCHER_MSCALL      PATCHER_ATTRIBUTE(__ms_abi__)
-# define  PATCHER_UNIXCALL    PATCHER_ATTRIBUTE(__sysv_abi__)
+# define  PATCHER_CDECL         PATCHER_ATTRIBUTE(__cdecl__)
+# define  PATCHER_STDCALL       PATCHER_ATTRIBUTE(__stdcall__)
+# define  PATCHER_FASTCALL      PATCHER_ATTRIBUTE(__fastcall__)
+# define  PATCHER_THISCALL      PATCHER_ATTRIBUTE(__thiscall__)
+# define  PATCHER_VECTORCALL    PATCHER_ATTRIBUTE(__vectorcall__)
+# define  PATCHER_REGCALL       PATCHER_ATTRIBUTE(__regcall__)
+# define  PATCHER_REGPARM(n)    PATCHER_ATTR_PARM(__regparm__, n)
+# define  PATCHER_SSEREGPARM    PATCHER_ATTRIBUTE(__sseregparm__)
+# define  PATCHER_MSCALL        PATCHER_ATTRIBUTE(__ms_abi__)
+# define  PATCHER_UNIXCALL      PATCHER_ATTRIBUTE(__sysv_abi__)
+# define  PATCHER_PRESERVENONE
 
 ///@{ @internal  Macro that expands to an attribute if it is defined, otherwise expands to nil.
 # define  PATCHER_ATTRIBUTE(attr)        PATCHER_EXPAND_IF((__has_attribute(attr), __attribute((attr))))

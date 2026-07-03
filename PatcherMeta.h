@@ -1280,7 +1280,7 @@ private:
 
 // =====================================================================================================================
 ///@{ @internal  Helpers for creating a dummy object instance.  Used as a target for GetVftable() in PmfCast().
-template <typename T, bool = std::is_polymorphic<T>::value && (std::is_abstract<T>::value == false)>
+template <typename T, bool = std::is_polymorphic<T>::value && (std::is_abstract<T>::value == false), size_t Params = 25>
 struct DummyFactory { static T* Create(void* pPlacementAddr) { return nullptr; } static void Destroy(const void*) { } };
 
 // Used by DummyFactory::MatchCtor to find user-defined constructors.
@@ -1292,8 +1292,8 @@ struct DummyArg {
   template <typename T>  operator T()        {        DummyType<T> x{};  return reinterpret_cast<T&>(x); }
 };
 
-template <typename T>
-struct DummyFactory<T, true> {
+template <typename T, size_t Params>
+struct DummyFactory<T, true, Params> {
   template <typename U>
   static constexpr bool UseCopyMove() {
     return (std::is_default_constructible<U>::value == false) &&
@@ -1303,14 +1303,14 @@ struct DummyFactory<T, true> {
   // Template metafunction to attempt to find a user-defined constructor by filling in arguments with DummyArgs.
   template <typename = void, typename... A>
   struct MatchCtor {
-    template <typename U = T*>  static auto Create(void* p) -> EnableIf<(sizeof...(A) >= 25), U> { return nullptr; }
-    template <typename U = T>   static auto Create(void* p) -> EnableIf<(sizeof...(A) <  25), U*>
+    template <typename U = T*>  static auto Create(void* p) -> EnableIf<(sizeof...(A) >= Params), U> { return nullptr; }
+    template <typename U = T>   static auto Create(void* p) -> EnableIf<(sizeof...(A) <  Params), U*>
       { return MatchCtor<void, A..., DummyArg>::Create(p); }
   };
   template <typename... A>  struct MatchCtor<ToVoid<decltype(T(A{}...))>, A...>
     { static T* Create(void* p) { PATCHER_UNSAFE_TRY(new(p) T(A{}...));  return static_cast<T*>(p); } };
 
-  // Try to use default constructor, or any user-defined constructor up to 25 params (unless it's an ambiguous call)
+  // Try to use default constructor, or any user-defined constructor up to #Params params (unless an ambiguous call)
   // Warning:  If using non-default constructor, zeroed buffers as args may be unsafe depending on the implementation!
   template <typename U = T>  static auto Create(void* pPlacementAddr) -> EnableIf<UseCopyMove<U>() == false, T*>
     { return MatchCtor<>::Create(pPlacementAddr); }

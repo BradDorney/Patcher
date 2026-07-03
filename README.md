@@ -89,24 +89,24 @@ patcher.Hook(
 // (@ ModuleBase+0x047A8 in this example,  assuming ModuleBase is 0x400000)
 patcher.HookCall(0x4047A8, [](void* p, size_t l) -> void { memset(p, 0, l); });
 
-// Insert an instruction-level hook at the specified code memory address (@ ModuleBase+0x18A00 in this example).
+// Insert an instruction-level hook at the specified code memory address (@ ModuleBase+0x118A00 in this example).
 // This kind of hook can read & write specified registers, and maybe even changes control flow via return value (addr).
 //
 // Note: A return value of 0 or void means return to origin.
-//       Params of Esp<T&, N> references (esp + N) on the stack.
+//       Params of Esp<T&, N> references *T(esp + N) on the stack.
 //       In x64 builds, you would specify registers like e.g. Rax<int64>, Rsi<bool>&, Rsp<int16&, 24>.
 patcher.LowLevelHook(0x518A00, [](Eax<int> readableRegister, Esi<bool>& writableRegister, Esp<int16&, 12> stackValue)
   { writableRegister = !writableRegister;  return (readableRegister >= (stackValue++)) ? 0 : 0x518B20; });
 
 // Hook a class virtual function by overwriting its entry in that class's Virtual Function Pointer Table.
-// Note: This will not hook the function for subclasses.
+// Note: This will not hook the function for subclasses, and might not across DLL import boundaries.
 int someCapturedLocal = 42;
 patcher.Write(0x6E1104 /* Class.vtbl[1] */, ThiscallFunctor([=](T* pThis) { pThis->someField_ -= someCapturedLocal; }));
 
-// Nop out a whole code instruction, at the specified memory address.
+// Nop out one whole code instruction, at the specified memory address.
 patcher.WriteNop(0x5020AE);
 
-// Nop out exactly 12 bytes, at the specified memory address.
+// Nop out exactly 12 bytes' worth of code instructions, at the specified memory address.
 patcher.WriteNop(0x628005, 12);
 
 // Write some arbitrary bytes, at the specified memory address.
@@ -143,7 +143,7 @@ For more information, see the Doxygen comments in `Patcher.h` and `PatcherUtil.h
 # Known Issues
 
 * LowLevelHook does not preserve FPU or extended register state.
-  * As a workaround, you can explicitly call the XSAV/XRSTOR compiler intrinsics at the start/end of your hook code.
+  * Workaround: Explicitly call the XSAV/XRSTOR compiler intrinsics at the start/end of your hook code.
 
 * Stacking multiple patches on the same function/hook address is not fully supported.
   * Workaround: Use multiple PatchContexts, one per stacked hook addr.  Limitations:

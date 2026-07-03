@@ -453,3 +453,5 @@ PatcherStatus PatchContext::Destruct(
 }
 
 } // Patcher
+
+using PatchContext = Patcher::PatchContext;  ///< Convenience alias for @ref Patcher::PatchContext.

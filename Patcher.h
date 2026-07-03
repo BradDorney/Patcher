@@ -293,6 +293,7 @@ public:
   bool   IsEmpty()    const { return NumPatches() == 0; }  ///< Is this an empty PatchContext?
 
   /// Returns true if the given address had previously been touched or patched.
+  // ** TODO Should this also return true when PatchInfo::pAddress differs from user-specified pAddress?
   bool HasPatched(TargetPtr pAddress) const { return historyAt_.count(MaybeFixTargetPtr(pAddress)) != 0; }
 
 protected:
@@ -319,7 +320,7 @@ private:
   ptrdiff_t   moduleRelocDelta_; ///< Delta between the module's preferred base address and its loaded address.
   uint32      moduleHash_;       ///< Hash identifying the module based on its header attributes.
   Allocator*  pAllocator_;       ///< Code allocator instance used by this PatchContext.
-  Status      status_;           ///< Status of this PatchContext.  If this is an error, most methods become a no-op.
+  Status      status_;           ///< Status of this PatchContext.  Upon error, most methods become no-ops.
 
   using OldDataStorage     = Impl::SmallVector<uint8, 8>;
   using TrackedAllocVector = Impl::SmallVector<std::pair<void*, size_t>, (IsX86_64 ? 2 : 1)>;      // pAlloc, sizeIfCode

@@ -169,14 +169,23 @@ struct ExportInfo {
   constexpr ExportInfo(uintptr address, uint16 ordinal) : type(ByOrdinalFix), address(address), ordinal(ordinal) { }
   ///@}
 
+  ///@{ Constructor for defining an export by source pointer address matching.
+  constexpr ExportInfo(void*   pAddress, void* pOrigAddress)
+    : type(ByAddress),  pAddress(pAddress), pOrigAddress(pOrigAddress) { }
+  constexpr ExportInfo(uintptr pAddress, void* pOrigAddress)
+    : type(ByAddressFix), address(address), pOrigAddress(pOrigAddress) { }
+  ///@}
+
   /// Constructor for defining a forwarded export symbol.
   template <typename T, typename = Impl::EnableIf<std::is_same<T, char>::value>>
   constexpr ExportInfo(const T* pForwardName, const char* pSymbolName)
     : type(Forwarded), pForwardName(pForwardName), pSymbolName(pSymbolName) { }
 
-  enum : uint32 { ByName = 0, ByNameFix, ByOrdinal, ByOrdinalFix, Forwarded }
+  enum : uint32 { ByName = 0, ByNameFix, ByOrdinal, ByOrdinalFix, ByAddress, ByAddressFix, Forwarded }
     type;
 
+    // ** TODO Invert order of these 2 union fields, to match Patch(src, dst)?
+    // ** TODO Use `TargetPtr` instead of `pAddress`/`address` & `pOrigAddress`?
   union {
     void*        pAddress;
     uintptr      address;
@@ -186,7 +195,11 @@ struct ExportInfo {
   union {
     const char*  pSymbolName;
     uint16       ordinal;
+    void*        pOrigAddress;
   };
 };
+
+// ** TODO Implement this for feature-parity with MS Detours
+struct ImportInfo {};
 
 } // Patcher

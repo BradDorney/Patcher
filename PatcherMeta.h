@@ -1458,11 +1458,12 @@ auto PmfCast(
       {
         // We need an object instance to get the vftable pointer, which is typically initialized during the constructor.
         void**const pVftable = GetVftable(pThis);
+        size_t      offset   = 0;
 
-        const size_t offset =
-          ((*pOperand) == (vcall.operandBase + 0x40)) ? pOperand[1]                            :  // Byte  operand size.
-          ((*pOperand) == (vcall.operandBase + 0x80)) ? reinterpret_cast<uint32&>(pOperand[1]) :  // Dword operand size.
-          0;
+        if (IsX86) {
+          offset = ((*pOperand) == (vcall.operandBase + 0x40)) ? pOperand[1]                            :     // Byte
+                   ((*pOperand) == (vcall.operandBase + 0x80)) ? reinterpret_cast<uint32&>(pOperand[1]) : 0;  // Dword
+        }
 
         cast.pOut = (pVftable != nullptr) ? pVftable[(offset / sizeof(void*))] : nullptr;
         break;

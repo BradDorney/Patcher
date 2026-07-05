@@ -808,9 +808,6 @@ public:
   Reference Get()      { return data_; } ///< Explicitly retrieves the underlying data.
   operator Reference() { return data_; } ///< Implicit conversion operator to a reference of the underlying type.
 
-  explicit operator Reference&&()    { return std::move(data_); } ///< Explicit move operator.
-           operator Reference&&() && { return std::move(data_); } ///< Implicit move operator.
-
   AddPointer<Type> operator&() { return &data_; }  ///< Implicit pointer operator, strip away ArgWrapper<T>* to plain T*
 
   ///@{ In lieu of no "operator.", dereference-like semantics are allowed for all types for struct field access, etc.
